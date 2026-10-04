@@ -26,8 +26,17 @@
         url: "https://waxbsyvqvyjjppbswqoc.supabase.co",
         publishableKey: "sb_publishable_1YRF0shFj3rLXNKyWAOpGA_UzHKgpFi",
       };
+      // Static site only. Cover, Fig and Tracker are always open; other pages wait for ficus_cloud.js
+      // to list them, and a missing list (an older cached copy of that file) locks nothing.
+      const FICUS_ALWAYS_OPEN_VIEWS = ["cover", "sparks", "habits"];
+      window.ficusViewOffline = (view) => {
+        if (!document.body?.classList.contains("ficus-cloud") || FICUS_ALWAYS_OPEN_VIEWS.includes(view)) return false;
+        const online = window.FICUS_ONLINE_VIEWS;
+        return Array.isArray(online) && !online.includes(view);
+      };
     </script>
-    <script src="ficus_cloud.js"></script>
+    <!-- Bump ?v= whenever ficus_cloud.js changes so browsers never pair it with a different index.html. -->
+    <script src="ficus_cloud.js?v=3"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -7935,10 +7944,9 @@
         try {
           if (name === "home") name = "today";
           if (name !== "cover" && document.body.classList.contains("ficus-locked")) name = "cover";
-          const onlineViews = window.FICUS_ONLINE_VIEWS || [];
-          if (document.body.classList.contains("ficus-cloud") && !onlineViews.includes(name)) {
+          if (window.ficusViewOffline(name)) {
             window.ficusOfflineNotice?.(name);
-            name = onlineViews.includes(activeView) ? activeView : "cover";
+            name = window.ficusViewOffline(activeView) ? "cover" : activeView;
           }
           const prevView = activeView;
           activeView = name;
@@ -40856,10 +40864,9 @@
           offlineNoteTimer = setTimeout(() => offlineNote.classList.add("hidden"), 3200);
         };
 
-        function markOfflineTabs(cloud) {
-          const online = window.FICUS_ONLINE_VIEWS || [];
+        function markOfflineTabs() {
           document.querySelectorAll("#notebook-tabs [data-view]").forEach((tab) => {
-            const offline = cloud && !online.includes(tab.dataset.view);
+            const offline = window.ficusViewOffline(tab.dataset.view);
             tab.classList.toggle("is-offline", offline);
             tab.setAttribute("aria-disabled", String(offline));
           });
@@ -40871,9 +40878,8 @@
           document.body.classList.toggle("ficus-locked", locked);
           document.body.classList.toggle("ficus-cloud", cloud);
           document.body.classList.remove("ficus-auth-pending");
-          markOfflineTabs(cloud);
-          const offlineView = cloud && !(window.FICUS_ONLINE_VIEWS || []).includes(activeView);
-          if ((locked || offlineView) && typeof showView === "function") showView("cover");
+          markOfflineTabs();
+          if ((locked || window.ficusViewOffline(activeView)) && typeof showView === "function") showView("cover");
         }
 
         if (!client) {
