@@ -206,7 +206,9 @@ from database import (
     vision_history,
 )
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+FRONTEND_DIR = Path(__file__).resolve().parent
+# Only these root files are web-served; the root also holds sparks.db and server code.
+FRONTEND_SCRIPTS = {"quick_line.js", "scrapboard.js", "canvas-editor.js", "ficus_cloud.js"}
 UPLOAD_DIR = Path(__file__).resolve().parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 # Image + document uploads for note photos (@photo), attachments, habits, vault.
@@ -239,7 +241,6 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="Sparks", lifespan=lifespan)
-app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 
@@ -714,7 +715,21 @@ def dashboard_route() -> dict:
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+    return FileResponse(FRONTEND_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/api/health")
+def health() -> dict:
+    # ficus_cloud.js probes this to tell the local server apart from static hosting.
+    return {"ok": True}
+
+
+@app.get("/{script}.js")
+def frontend_script(script: str) -> FileResponse:
+    filename = f"{script}.js"
+    if filename not in FRONTEND_SCRIPTS:
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(FRONTEND_DIR / filename, media_type="text/javascript", headers={"Cache-Control": "no-cache"})
 
 
 @app.post("/api/sparks")

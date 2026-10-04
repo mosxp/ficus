@@ -9,16 +9,25 @@
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Emoji:wght@400..700&display=swap" />
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js"></script>
-    <script src="/static/canvas-editor.js"></script>
-    <script src="/static/scrapboard.js?v=23"></script>
-    <script src="/static/quick_line.js"></script>
+    <script src="canvas-editor.js"></script>
+    <script src="scrapboard.js?v=23"></script>
+    <script src="quick_line.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script>
+      // Changing this value wipes every device's saved local preferences on its next load.
+      const APP_STORAGE_EPOCH = "2026-10-03-clean";
+      try {
+        if (localStorage.getItem("ficus_storage_epoch") !== APP_STORAGE_EPOCH) {
+          localStorage.clear();
+          localStorage.setItem("ficus_storage_epoch", APP_STORAGE_EPOCH);
+        }
+      } catch (_) {}
       window.FICUS_SUPABASE_CONFIG = {
         url: "https://waxbsyvqvyjjppbswqoc.supabase.co",
         publishableKey: "sb_publishable_1YRF0shFj3rLXNKyWAOpGA_UzHKgpFi",
       };
     </script>
+    <script src="ficus_cloud.js"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -5850,14 +5859,6 @@
         }, { passive: false });
       })();
 
-      // Changing this value wipes every device's saved local preferences on its next load.
-      const APP_STORAGE_EPOCH = "2026-10-03-clean";
-      try {
-        if (localStorage.getItem("ficus_storage_epoch") !== APP_STORAGE_EPOCH) {
-          localStorage.clear();
-          localStorage.setItem("ficus_storage_epoch", APP_STORAGE_EPOCH);
-        }
-      } catch (_) {}
       const stores = { spark: [], task: [], project: [], habit: [], reference: [], folders: [], vision: [], notepad: [], contacts: [], vaultNotebooks: [], binderProjects: [] };
       let dashboard = null;
       let visionFilter = "All";
@@ -22716,7 +22717,7 @@
           try { openBinderProject(Number(id)); } catch (_) {}
         }
       }
-      /* Quick Line instances (powered by /static/quick_line.js) */
+      /* Quick Line instances (powered by quick_line.js) */
       let todayQuickLine = null;
       let captureQuickLine = null;
       let logQuickLine = null;
@@ -22741,7 +22742,10 @@
         if (logQuickLine && editor === logQuickLine.editor) return logQuickLine.extract();
         if (eventLogQuickLine && editor === eventLogQuickLine.editor) return eventLogQuickLine.extract();
         if (taskLogQuickLine && editor === taskLogQuickLine.editor) return taskLogQuickLine.extract();
-        return window.QuickLine?.extract?.(editor) || { title: "", entities: [], tags: [], tokens: [], media: [] };
+        const parsed = window.QuickLine?.extract?.(editor);
+        if (parsed) return parsed;
+        const title = String(editor?.innerText ?? editor?.value ?? "").replace(/\s+/g, " ").trim();
+        return { title, entities: [], tags: [], tokens: [], media: [] };
       }
       function clearCapsuleEditor(editor) {
         if (todayQuickLine && editor === todayQuickLine.editor) return todayQuickLine.clear();
@@ -33357,8 +33361,9 @@
           body: JSON.stringify(body),
         });
         if (!res.ok) {
+          const detail = await res.json().catch(() => ({}));
           if (error) {
-            error.textContent = "Could not save spark.";
+            error.textContent = detail.detail || "Could not save fig.";
             error.classList.remove("hidden");
           }
           return;
@@ -40778,21 +40783,17 @@
     </script>
     <script>
       (function initFicusAuth() {
-        const config = window.FICUS_SUPABASE_CONFIG || {};
         const signInBtn = document.getElementById("auth-google-btn");
         const chip = document.getElementById("auth-user-chip");
         const avatar = document.getElementById("auth-user-avatar");
         const nameEl = document.getElementById("auth-user-name");
         const signOutBtn = document.getElementById("auth-signout-btn");
         window.ficusAuthUser = null;
-        if (!window.supabase?.createClient || !config.url || !config.publishableKey) {
+        const client = window.ficusSupabase;
+        if (!client) {
           console.warn("Supabase auth unavailable: SDK or config missing.");
           return;
         }
-        const client = window.supabase.createClient(config.url, config.publishableKey, {
-          auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
-        });
-        window.ficusSupabase = client;
 
         function paintAuth(session) {
           const user = session?.user || null;
@@ -40841,7 +40842,12 @@
           signOutBtn.disabled = true;
           const { error } = await client.auth.signOut();
           signOutBtn.disabled = false;
-          if (error) window.alert(`Sign out failed: ${error.message}`);
+          if (error) {
+            window.alert(`Sign out failed: ${error.message}`);
+            return;
+          }
+          // Drop the signed-in user's figs from memory.
+          window.location.reload();
         });
 
         client.auth.onAuthStateChange((_event, session) => paintAuth(session));

@@ -1,0 +1,9 @@
+# Local data: GitHub Pages publishes every tracked file.
+sparks.db
+sparks.db-journal
+sparks.db-wal
+sparks.db-shm
+uploads/
+
+__pycache__/
+*.pyc
