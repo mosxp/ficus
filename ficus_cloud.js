@@ -233,6 +233,7 @@
     data.pos_y = intOr(row.pos_y, 100);
     if (itemType === "habit") return serializeHabitFields(data, row);
     if (itemType === "task") return serializeTaskFields(data, row);
+    if (itemType === "reference") data.extra_data = normalizeReferenceExtra(extra);
     if (itemType !== "spark") return data;
 
     data.color_theme = text(row.color_theme || "beige").toLowerCase() || "beige";
@@ -3711,13 +3712,19 @@
     return body === text(spark.title) ? "" : body;
   }
 
+  function handoffTitle(spark, body) {
+    return text(body.title) || text(spark.title) || "Untitled jot";
+  }
+
+  function handoffBlocks(spark, body) {
+    return (Array.isArray(body.blocks) ? body.blocks : Array.isArray(spark.blocks) ? spark.blocks : []).filter(isPlainObject);
+  }
+
   // The jot becomes a new binder project (its blocks land in the first section), then leaves the inbox.
   async function handOffToBinderProject(spark, body) {
-    const title = text(body.title) || text(spark.title) || "Untitled jot";
+    const title = handoffTitle(spark, body);
     const content = given(body.content) ? body.content : sparkPlainBody(spark);
-    const blocks = Array.isArray(body.blocks)
-      ? body.blocks.filter(isPlainObject)
-      : (Array.isArray(spark.blocks) ? spark.blocks : []).filter(isPlainObject);
+    const blocks = handoffBlocks(spark, body);
     let saved = await createBinderProject(title, content);
     if (blocks.length && saved.sections.length) {
       await createBinderLine(Number(saved.sections[0].id), title, blocks, false);
@@ -3759,6 +3766,1547 @@
       due_time: null,
     }).eq("id", id).select("*").single());
     return serializeSpark(row);
+  }
+
+  /* ---------- Vision boards (goals, linked commitments, blocks, canvas) ---------- */
+
+  const VISION_LINKABLE_KINDS = ["project", "habit", "notebook"];
+  // Task/event links can no longer be created, but older ones still show in the Linked hub.
+  const VISION_LINKED_KINDS = [...VISION_LINKABLE_KINDS, "task", "event"];
+  const VISION_NOTE_ALIASES = ["rich_text", "rich-note", "rich_note", "text"];
+  const VISION_BLOCK_KINDS = ["note", "photo", "link", "checklist", ...MEDIA_BLOCK_TYPES];
+  const VISION_LINK_SOURCES = {
+    project: (id) => run(client.from("projects").select("id").eq("id", id).maybeSingle()),
+    habit: (id) => run(client.from("sparks").select("id").eq("id", id).eq("item_type", "habit").maybeSingle()),
+    notebook: (id) => run(client.from("vault_notebooks").select("id").eq("id", id).maybeSingle()),
+  };
+
+  // Python `a or b or ...`: the first truthy value, else the last one.
+  function pyOr(...values) {
+    for (const value of values) {
+      if (!pyFalsy(value)) return value;
+    }
+    return values[values.length - 1];
+  }
+
+  function titleCase(word) {
+    return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+  }
+
+  const byNewest = (a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0) || b.id - a.id;
+
+  function visionCanvas(raw) {
+    if (isPlainObject(raw)) return Array.isArray(raw.objects) ? raw : { ...raw, objects: [] };
+    if (Array.isArray(raw)) return { objects: raw };
+    return { objects: [] };
+  }
+
+  // Canvas payloads may arrive as a JSON string; anything unreadable saves as an empty board.
+  function storedVisionCanvas(value) {
+    let parsed = value;
+    if (typeof value === "string") {
+      try {
+        parsed = JSON.parse(value);
+      } catch (_) {
+        parsed = null;
+      }
+    }
+    return isPlainObject(parsed) || Array.isArray(parsed) ? parsed : { objects: [] };
+  }
+
+  function serializeVisionGoal(row) {
+    return {
+      id: Number(row.id),
+      vision_id: Number(row.vision_id),
+      content: text(row.content),
+      is_completed: Boolean(row.is_completed),
+      realized_at: row.is_completed ? row.realized_at || null : null,
+      created_at: row.created_at,
+    };
+  }
+
+  function serializeVisionLink(row) {
+    return {
+      id: Number(row.id),
+      vision_id: Number(row.vision_id),
+      entity_type: text(row.entity_type).toLowerCase(),
+      entity_id: Number(row.entity_id),
+      created_at: row.created_at,
+    };
+  }
+
+  function serializeVisionBlock(row) {
+    const content = isPlainObject(row.content) ? row.content : {};
+    return {
+      id: Number(row.id),
+      vision_id: Number(row.vision_id),
+      block_type: text(row.block_type).toLowerCase(),
+      content,
+      content_json: JSON.stringify(content),
+      created_at: row.created_at,
+    };
+  }
+
+  function serializeVisionBoard(row, { canvas = false, goals = null, attached = null, blocks = null, stats = null } = {}) {
+    const payload = {
+      id: Number(row.id),
+      title: text(row.title) || "Untitled Vision",
+      thumbnail_data: row.thumbnail_data ?? null,
+      created_at: row.created_at,
+      status: row.status || "active",
+      fulfilled_at: row.fulfilled_at || null,
+    };
+    if (canvas) {
+      payload.canvas = visionCanvas(row.canvas);
+      payload.canvas_json = JSON.stringify(row.canvas ?? { objects: [] });
+    }
+    if (goals) payload.goals = goals;
+    if (attached) {
+      payload.attached_elements = attached;
+      payload.linked = attached.filter((item) => VISION_LINKED_KINDS.includes(item.entity_type));
+      payload.attached = attached.filter((item) => !VISION_LINKED_KINDS.includes(item.entity_type));
+    }
+    if (blocks) payload.blocks = blocks;
+    if (stats) {
+      Object.assign(payload, stats);
+    } else if (goals) {
+      payload.goal_count = goals.length;
+      payload.goals_completed = goals.filter((goal) => goal.is_completed).length;
+    }
+    return payload;
+  }
+
+  const requireVisionBoard = (id, columns = "id") => requireRow("vision_boards", id, "Vision board not found", columns);
+
+  async function listVisionBoards(query) {
+    const status = query.has("status") ? query.get("status") : "active";
+    const [boards, goals, links, blocks] = await Promise.all([
+      selectAll(() => {
+        const rows = client.from("vision_boards").select("*");
+        return (status === "" || status === "all" ? rows : rows.eq("status", status)).order("id");
+      }),
+      selectAll(() => client.from("vision_goals").select("*").order("created_at").order("id")),
+      selectAll(() => client.from("vision_linked_elements").select("id, vision_id, entity_type").order("id")),
+      selectAll(() => client.from("vision_blocks").select("id, vision_id").order("id")),
+    ]);
+    return boards.sort(byNewest).map((row) => {
+      const own = goals.filter((goal) => goal.vision_id === row.id).map(serializeVisionGoal);
+      return serializeVisionBoard(row, {
+        goals: own,
+        stats: {
+          goal_count: own.length,
+          goals_completed: own.filter((goal) => goal.is_completed).length,
+          linked_count: links.filter((link) => link.vision_id === row.id && VISION_LINKED_KINDS.includes(link.entity_type)).length,
+          block_count: blocks.filter((block) => block.vision_id === row.id).length,
+          object_count: visionCanvas(row.canvas).objects.length,
+        },
+      });
+    });
+  }
+
+  async function visionLinkLabel(kind, id) {
+    if (kind === "project" || kind === "notebook") {
+      const table = kind === "project" ? "projects" : "vault_notebooks";
+      const row = await run(client.from(table).select("title").eq("id", id).maybeSingle());
+      if (row) return text(row.title) || `${titleCase(kind)} #${id}`;
+    } else if (["habit", "task", "event", "spark"].includes(kind)) {
+      let lookup = client.from("sparks").select("title, raw_content").eq("id", id);
+      if (kind !== "spark") lookup = lookup.eq("item_type", kind);
+      const row = await run(lookup.maybeSingle());
+      if (row) return clip(pyText(pyOr(row.title, row.raw_content, "")), 80) || `${titleCase(kind)} #${id}`;
+    }
+    return `${kind ? titleCase(kind) : "Item"} #${id}`;
+  }
+
+  async function labeledVisionLink(row) {
+    const item = serializeVisionLink(row);
+    item.label = await visionLinkLabel(item.entity_type, item.entity_id);
+    return item;
+  }
+
+  async function getVisionBoard(id) {
+    const row = await requireVisionBoard(id, "*");
+    const [goals, links, blocks] = await Promise.all(["vision_goals", "vision_linked_elements", "vision_blocks"].map((table) =>
+      selectAll(() => client.from(table).select("*").eq("vision_id", id).order("created_at").order("id"))));
+    const attached = [];
+    for (const link of links) attached.push(await labeledVisionLink(link));
+    return serializeVisionBoard(row, {
+      canvas: true,
+      goals: goals.map(serializeVisionGoal),
+      attached,
+      blocks: blocks.map(serializeVisionBlock),
+    });
+  }
+
+  async function createVisionBoard(title) {
+    const row = await run(client.from("vision_boards").insert({ title: text(title) || "New Vision", canvas: { objects: [] } })
+      .select("id").single());
+    return getVisionBoard(row.id);
+  }
+
+  async function updateVisionBoard(id, fields) {
+    await requireVisionBoard(id);
+    if (has(fields, "title")) {
+      await run(client.from("vision_boards").update({ title: text(fields.title) || "Untitled Vision" }).eq("id", id));
+    }
+    return getVisionBoard(id);
+  }
+
+  async function saveVisionCanvas(id, body) {
+    const isCanvas = (value) => value === null || isPlainObject(value) || Array.isArray(value);
+    if (has(body, "canvas") && !isCanvas(body.canvas)) throw fieldError("canvas");
+    if (has(body, "canvas_json") && !isCanvas(body.canvas_json) && typeof body.canvas_json !== "string") throw fieldError("canvas_json");
+    const f = modelFields(body, { thumbnail_data: "text" });
+    await requireVisionBoard(id);
+    const changes = { canvas: storedVisionCanvas(given(body.canvas) ? body.canvas : body.canvas_json) };
+    if (given(f.thumbnail_data)) changes.thumbnail_data = f.thumbnail_data;
+    await run(client.from("vision_boards").update(changes).eq("id", id));
+    return getVisionBoard(id);
+  }
+
+  async function fulfillVisionBoard(id) {
+    const row = await requireVisionBoard(id, "id, status");
+    if ((row.status || "active") !== "fulfilled") {
+      await run(client.from("vision_boards").update({ status: "fulfilled", fulfilled_at: new Date().toISOString() }).eq("id", id));
+    }
+    return getVisionBoard(id);
+  }
+
+  async function deleteVisionBoard(id) {
+    await requireVisionBoard(id);
+    for (const table of ["vision_goals", "vision_linked_elements", "vision_blocks"]) {
+      await run(client.from(table).delete().eq("vision_id", id));
+    }
+    await run(client.from("vision_boards").delete().eq("id", id));
+    return { ok: true, id };
+  }
+
+  function goalContent(body) {
+    if (typeof body.content !== "string" || !body.content) throw new ApiError(422, "content is required");
+    return body.content;
+  }
+
+  const requireVisionGoal = (id) => requireRow("vision_goals", id, "Goal not found");
+
+  async function createVisionGoal(visionId, content) {
+    await requireVisionBoard(visionId);
+    const clean = text(content);
+    if (!clean) throw new ApiError(400, "Goal content is required");
+    const row = await run(client.from("vision_goals").insert({ vision_id: visionId, content: clean, is_completed: false })
+      .select("*").single());
+    return serializeVisionGoal(row);
+  }
+
+  async function updateVisionGoal(id, content) {
+    await requireVisionGoal(id);
+    const clean = text(content);
+    if (!clean) throw new ApiError(400, "Goal content is required");
+    const row = await run(client.from("vision_goals").update({ content: clean }).eq("id", id).select("*").single());
+    return serializeVisionGoal(row);
+  }
+
+  async function toggleVisionGoal(id) {
+    const done = !(await requireVisionGoal(id)).is_completed;
+    const row = await run(client.from("vision_goals")
+      .update({ is_completed: done, realized_at: done ? new Date().toISOString() : null })
+      .eq("id", id).select("*").single());
+    return serializeVisionGoal(row);
+  }
+
+  async function deleteVisionGoal(id) {
+    await requireVisionGoal(id);
+    await run(client.from("vision_goals").delete().eq("id", id));
+    return { ok: true, id };
+  }
+
+  async function linkVisionElement(visionId, body) {
+    const f = modelFields(body, { entity_type: "text", entity_id: "int" });
+    if (typeof f.entity_type !== "string") throw fieldError("entity_type");
+    if (!given(f.entity_id)) throw fieldError("entity_id");
+    await requireVisionBoard(visionId);
+    const kind = text(f.entity_type).toLowerCase();
+    if (![...VISION_LINKABLE_KINDS, "spark", "note"].includes(kind)) {
+      throw new ApiError(400, "Commitments can link a project, habit, or notebook");
+    }
+    const source = VISION_LINK_SOURCES[kind];
+    if (source && !(await source(f.entity_id))) throw new ApiError(404, `That ${kind} no longer exists`);
+    const existing = await run(client.from("vision_linked_elements").select("*")
+      .eq("vision_id", visionId).eq("entity_type", kind).eq("entity_id", f.entity_id).maybeSingle());
+    const row = existing || await run(client.from("vision_linked_elements")
+      .insert({ vision_id: visionId, entity_type: kind, entity_id: f.entity_id }).select("*").single());
+    return labeledVisionLink(row);
+  }
+
+  async function unlinkVisionElement(id) {
+    await requireRow("vision_linked_elements", id, "Attachment not found", "id");
+    await run(client.from("vision_linked_elements").delete().eq("id", id));
+    return { ok: true, id };
+  }
+
+  function visionBlockKind(raw) {
+    const kind = text(raw).toLowerCase();
+    return VISION_NOTE_ALIASES.includes(kind) ? "note" : kind;
+  }
+
+  // Unified Log-compatible block shape: { type, title, content, meta, ...flat mirrors }.
+  function normalizeVisionBlock(kind, content) {
+    const payload = isPlainObject(content) ? content : {};
+    const meta = isPlainObject(payload.meta) ? payload.meta : {};
+    if (MEDIA_BLOCK_TYPES.includes(kind)) {
+      const media = mediaBlock(payload, kind);
+      if (!media) throw new ApiError(400, "Add a file to this block");
+      delete media.id;
+      return { ...media, meta };
+    }
+    if (kind === "note") {
+      const html = pyText(pyOr(payload.html, payload.body, payload.content, ""));
+      const title = pyText(pyOr(payload.title, "Rich Note")) || "Rich Note";
+      return { type: "note", title, content: html, html, meta };
+    }
+    if (kind === "photo" || kind === "link") {
+      const url = pyText(pyOr(payload.url, payload.content, ""));
+      if (!url) throw new ApiError(400, kind === "photo" ? "Photo URL is required" : "Link URL is required");
+      if (kind === "photo") {
+        const caption = pyText(pyOr(payload.caption, meta.caption, ""));
+        return {
+          type: "photo",
+          title: pyText(payload.title),
+          content: url,
+          url,
+          caption,
+          filename: pyText(pyOr(payload.filename, meta.filename, "")),
+          meta: { ...meta, caption },
+        };
+      }
+      const displayMode = pyStr(pyOr(meta.display_mode, payload.display_mode, "compact"));
+      return {
+        type: "link",
+        title: pyText(payload.title) || url,
+        content: url,
+        url,
+        display_mode: displayMode,
+        preview_image: pyText(pyOr(meta.preview_image, payload.preview_image, "")),
+        description: pyText(pyOr(meta.description, payload.description, "")),
+        meta: { ...meta, display_mode: displayMode },
+      };
+    }
+    if (kind === "checklist") {
+      const source = Array.isArray(payload.items) ? payload.items : Array.isArray(payload.content) ? payload.content : [];
+      const items = [];
+      source.forEach((item, idx) => {
+        if (isPlainObject(item)) {
+          const label = pyText(pyOr(item.text, item.content, ""));
+          if (label) items.push({ id: pyStr(pyOr(item.id, `i${idx}`)), text: label, done: !pyFalsy(item.done) });
+        } else {
+          const label = pyText(item);
+          if (label) items.push({ id: `i${idx}`, text: label, done: false });
+        }
+      });
+      return { type: "checklist", title: pyText(payload.title) || "Checklist", content: items, items, meta };
+    }
+    throw new ApiError(400, "Invalid block_type");
+  }
+
+  function visionBlockBody(body, create) {
+    const f = modelFields(body, { block_type: "text", content: "object" });
+    if (create && typeof f.block_type !== "string") throw fieldError("block_type");
+    return f;
+  }
+
+  async function createVisionBlock(visionId, blockType, content) {
+    await requireVisionBoard(visionId);
+    const kind = visionBlockKind(blockType);
+    if (!VISION_BLOCK_KINDS.includes(kind)) throw new ApiError(400, "Invalid block_type");
+    const row = await run(client.from("vision_blocks")
+      .insert({ vision_id: visionId, block_type: kind, content: normalizeVisionBlock(kind, content) })
+      .select("*").single());
+    return serializeVisionBlock(row);
+  }
+
+  async function updateVisionBlock(id, content, blockType) {
+    const row = await requireRow("vision_blocks", id, "Block not found", "id, vision_id, block_type");
+    const kind = visionBlockKind(pyOr(blockType, row.block_type, ""));
+    await requireVisionBoard(row.vision_id);
+    const updated = await run(client.from("vision_blocks")
+      .update({ block_type: kind, content: normalizeVisionBlock(kind, content) })
+      .eq("id", id).select("*").single());
+    return serializeVisionBlock(updated);
+  }
+
+  async function deleteVisionBlock(id) {
+    await requireRow("vision_blocks", id, "Block not found", "id");
+    await run(client.from("vision_blocks").delete().eq("id", id));
+    return { ok: true, id };
+  }
+
+  /* ---------- Scrapbook libraries (sticky pads, stickers, palettes) ---------- */
+
+  const SCRAPBOOK_PAD_MAX_BYTES = 3000000;
+  const SCRAPBOOK_PAD_MAX_BATCH = 60;
+  const SCRAPBOOK_STICKER_MAX_BYTES = 2000000;
+  const SCRAPBOOK_STICKER_MAX_BATCH = 150;
+  const SCRAPBOOK_STICKER_DEFAULT_COLLECTION = "My stickers";
+  const SCRAPBOOK_PALETTE_MAX_COLORS = 16;
+  const SCRAPBOOK_PALETTE_DEFAULT_NAME = "My palette";
+  // GIF search and the GIF library need the local server (API keys, file storage).
+  const GIF_SEARCH_OFF = { configured: false, provider: null, source: null };
+
+  function squish(value, length) {
+    return clip(String(value || "").replace(/\s+/g, " ").trim(), length);
+  }
+
+  function serializeScrapbookImage(row) {
+    const data = {
+      id: Number(row.id),
+      name: String(row.name || ""),
+      src: row.src || "",
+      width: Number(row.width) || 0,
+      height: Number(row.height) || 0,
+      created_at: row.created_at,
+    };
+    if (has(row, "collection")) data.collection = String(row.collection || SCRAPBOOK_STICKER_DEFAULT_COLLECTION);
+    return data;
+  }
+
+  function serializeScrapbookPalette(row) {
+    return {
+      id: Number(row.id),
+      name: String(row.name || SCRAPBOOK_PALETTE_DEFAULT_NAME),
+      colors: (Array.isArray(row.colors) ? row.colors : []).filter((color) => typeof color === "string"),
+      source: String(row.source || "custom"),
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
+  function scrapbookImageItems(body, key) {
+    if (!Array.isArray(body[key])) throw fieldError(key);
+    return body[key].map((item) => {
+      if (!isPlainObject(item) || typeof item.src !== "string") throw fieldError(key);
+      const f = modelFields(item, { name: "text", width: "int", height: "int" });
+      return { name: f.name ?? null, src: item.src, width: f.width ?? null, height: f.height ?? null };
+    });
+  }
+
+  function cleanScrapbookImages(items, label, maxBytes) {
+    return items.map((item) => {
+      if (!item.src.startsWith("data:image/")) throw new ApiError(400, `${label} image must be a data:image URL`);
+      if (item.src.length > maxBytes) throw new ApiError(413, `${label} image is too large`);
+      return {
+        name: clip(text(item.name), 80),
+        src: item.src,
+        width: Math.max(0, item.width || 0),
+        height: Math.max(0, item.height || 0),
+      };
+    });
+  }
+
+  function listScrapbookPads() {
+    return selectAll(() => client.from("scrapbook_pads").select("*").order("id", { ascending: false }))
+      .then((rows) => rows.map(serializeScrapbookImage));
+  }
+
+  async function createScrapbookPads(items) {
+    if (!items.length) throw new ApiError(400, "No sticky pads to save");
+    if (items.length > SCRAPBOOK_PAD_MAX_BATCH) {
+      throw new ApiError(400, `Too many sticky pads in one upload (max ${SCRAPBOOK_PAD_MAX_BATCH})`);
+    }
+    const rows = await run(client.from("scrapbook_pads")
+      .insert(cleanScrapbookImages(items, "Sticky pad", SCRAPBOOK_PAD_MAX_BYTES)).select("*"));
+    return rows.sort((a, b) => b.id - a.id).map(serializeScrapbookImage);
+  }
+
+  function normalizeStickerCollection(name) {
+    return squish(name, 40) || SCRAPBOOK_STICKER_DEFAULT_COLLECTION;
+  }
+
+  async function listScrapbookStickers(query) {
+    const metaOnly = query.has("meta") ? flagField("meta", query.get("meta")) : false;
+    const columns = metaOnly ? "id, collection, name, width, height, created_at" : "*";
+    const rows = await selectAll(() => client.from("scrapbook_stickers").select(columns).order("id"));
+    return rows.map((row) => {
+      const sticker = serializeScrapbookImage(row);
+      if (metaOnly) delete sticker.src;
+      return sticker;
+    });
+  }
+
+  async function createScrapbookStickers(collection, items) {
+    if (!items.length) throw new ApiError(400, "No stickers to save");
+    if (items.length > SCRAPBOOK_STICKER_MAX_BATCH) {
+      throw new ApiError(400, `Too many stickers in one upload (max ${SCRAPBOOK_STICKER_MAX_BATCH})`);
+    }
+    const group = normalizeStickerCollection(collection);
+    const rows = await run(client.from("scrapbook_stickers")
+      .insert(cleanScrapbookImages(items, "Sticker", SCRAPBOOK_STICKER_MAX_BYTES).map((item) => ({ ...item, collection: group })))
+      .select("*"));
+    return rows.sort((a, b) => a.id - b.id).map(serializeScrapbookImage);
+  }
+
+  async function deleteScrapbookRow(table, id, detail) {
+    await requireRow(table, id, detail, "id");
+    await run(client.from(table).delete().eq("id", id));
+    return { ok: true, id };
+  }
+
+  async function renameStickerCollection(body) {
+    const f = modelFields(body, { name: "text", new_name: "text" });
+    if (typeof f.name !== "string") throw fieldError("name");
+    if (typeof f.new_name !== "string" || !f.new_name) throw fieldError("new_name");
+    const source = normalizeStickerCollection(f.name);
+    const target = normalizeStickerCollection(f.new_name);
+    const rows = await run(client.from("scrapbook_stickers").update({ collection: target }).eq("collection", source).select("id"));
+    if (!rows.length) throw new ApiError(404, "Sticker collection not found");
+    return { ok: true, collection: target, updated: rows.length };
+  }
+
+  async function deleteStickerCollection(body) {
+    const f = modelFields(body, { name: "text" });
+    if (typeof f.name !== "string") throw fieldError("name");
+    const group = normalizeStickerCollection(f.name);
+    const rows = await run(client.from("scrapbook_stickers").delete().eq("collection", group).select("id"));
+    if (!rows.length) throw new ApiError(404, "Sticker collection not found");
+    return { ok: true, collection: group, deleted: rows.length };
+  }
+
+  function paletteBody(body) {
+    const f = modelFields(body, { name: "text", colors: "text_list", source: "text" });
+    if (!Array.isArray(f.colors) || !f.colors.length || f.colors.length > SCRAPBOOK_PALETTE_MAX_COLORS) {
+      throw fieldError("colors");
+    }
+    return f;
+  }
+
+  function cleanPalette(f) {
+    const colors = [];
+    for (const value of f.colors) {
+      const match = /^#?([0-9a-fA-F]{6})$/.exec(text(value));
+      if (!match) throw new ApiError(400, `Not a hex colour: ${value}`);
+      const hex = `#${match[1].toUpperCase()}`;
+      if (!colors.includes(hex)) colors.push(hex);
+    }
+    if (!colors.length) throw new ApiError(400, "A palette needs at least one colour");
+    if (colors.length > SCRAPBOOK_PALETTE_MAX_COLORS) {
+      throw new ApiError(400, `Too many colours (max ${SCRAPBOOK_PALETTE_MAX_COLORS})`);
+    }
+    return { name: squish(f.name, 40) || SCRAPBOOK_PALETTE_DEFAULT_NAME, colors };
+  }
+
+  function listScrapbookPalettes() {
+    return selectAll(() => client.from("scrapbook_palettes").select("*").order("id", { ascending: false }))
+      .then((rows) => rows.map(serializeScrapbookPalette));
+  }
+
+  async function createScrapbookPalette(f) {
+    const palette = { ...cleanPalette(f), source: f.source === "photo" ? "photo" : "custom" };
+    return serializeScrapbookPalette(await run(client.from("scrapbook_palettes").insert(palette).select("*").single()));
+  }
+
+  async function updateScrapbookPalette(id, f) {
+    const palette = cleanPalette(f);
+    await requireRow("scrapbook_palettes", id, "Palette not found", "id");
+    return serializeScrapbookPalette(await run(client.from("scrapbook_palettes").update(palette).eq("id", id).select("*").single()));
+  }
+
+  /* ---------- Vault (shelves, stacks, notebooks, chapters, lines) ---------- */
+
+  // Unset (null) style fields render as the default blank page, neutral spine or ink-black shelf tab.
+  const VAULT_NOTEBOOK_STYLE_FIELDS = ["cover_color", "cover_image", "spine_color"];
+  const VAULT_CHAPTER_STYLE_FIELDS = ["background_color", "background_image"];
+  const VAULT_SHELF_STYLE_FIELDS = ["tab_color"];
+  const VAULT_LINE_KINDS = ["line", "foldout", "outline"];
+  const VAULT_TITLE_MAX = 80;
+
+  function vaultStyleChanges(fields, keys) {
+    const changes = {};
+    for (const key of keys) {
+      if (has(fields, key)) changes[key] = cleanBinderStyle(key, fields[key]);
+    }
+    return changes;
+  }
+
+  function vaultStyle(row, keys) {
+    const style = {};
+    for (const key of keys) style[key] = row[key] || null;
+    return style;
+  }
+
+  // SQL ascending order puts NULL first.
+  function nullsFirst(a, b) {
+    const left = given(a) ? a : -Infinity;
+    const right = given(b) ? b : -Infinity;
+    return left === right ? 0 : left < right ? -1 : 1;
+  }
+
+  function vaultTitleFields(body, kinds) {
+    const f = modelFields(body, kinds);
+    if (typeof f.title === "string" && Array.from(f.title).length > VAULT_TITLE_MAX) throw fieldError("title");
+    return f;
+  }
+
+  function nonEmptyTitle(fields) {
+    if (fields.title === "") throw fieldError("title");
+    return fields;
+  }
+
+  function serializeVaultShelf(row) {
+    return {
+      id: Number(row.id),
+      title: text(row.title) || "Shelf",
+      sort_order: Number(row.sort_order) || 0,
+      tab_color: row.tab_color || null,
+      created_at: row.created_at,
+    };
+  }
+
+  function serializeVaultStack(row) {
+    return {
+      id: Number(row.id),
+      title: text(row.title) || "Untitled Stack",
+      shelf_id: given(row.shelf_id) ? Number(row.shelf_id) : null,
+      slot: given(row.slot) ? Number(row.slot) : null,
+      created_at: row.created_at,
+    };
+  }
+
+  const vaultShelfRows = (columns = "*") =>
+    selectAll(() => client.from("vault_shelves").select(columns).order("sort_order").order("id"));
+  const vaultStackRows = (columns = "*") => selectAll(() => client.from("vault_stacks").select(columns).order("id"));
+
+  async function insertVaultShelf(title) {
+    const shelves = await vaultShelfRows("id, title, sort_order");
+    let name = clip(pyText(title), VAULT_TITLE_MAX);
+    if (!name) {
+      const taken = new Set(shelves.map((shelf) => text(shelf.title).toLowerCase()));
+      let number = shelves.length + 1;
+      while (taken.has(`shelf ${number}`)) number += 1;
+      name = `Shelf ${number}`;
+    }
+    const nextOrder = shelves.length ? Math.max(...shelves.map((shelf) => Number(shelf.sort_order) || 0)) + 1 : 1;
+    return run(client.from("vault_shelves").insert({ title: name, sort_order: nextOrder }).select("*").single());
+  }
+
+  // The Vault always has at least one shelf; parallel first loads share one check.
+  let vaultShelfReady = null;
+  function ensureVaultShelf() {
+    const owner = session?.user?.id;
+    if (!vaultShelfReady || vaultShelfReady.owner !== owner) {
+      const check = (async () => {
+        const first = await run(client.from("vault_shelves").select("id").order("sort_order").order("id").limit(1));
+        if (!first.length) await insertVaultShelf("Shelf 1");
+      })();
+      check.catch(() => {
+        if (vaultShelfReady?.check === check) vaultShelfReady = null;
+      });
+      vaultShelfReady = { owner, check };
+    }
+    return vaultShelfReady.check;
+  }
+
+  async function vaultSlotTarget(shelfId, slot) {
+    if (!given(shelfId) || !given(slot)) throw new ApiError(400, "Invalid shelf slot");
+    await requireRow("vault_shelves", shelfId, "Shelf not found", "id");
+    if (slot < 0) throw new ApiError(400, "Invalid shelf slot");
+    return [Number(shelfId), Number(slot)];
+  }
+
+  // Next position at the end of a shelf (default: the first shelf). Shelves have no stack limit.
+  async function vaultFreeSlot(shelfId) {
+    let sid = shelfId;
+    if (!given(sid)) {
+      const first = await run(client.from("vault_shelves").select("id").order("sort_order").order("id").limit(1));
+      sid = first.length ? Number(first[0].id) : Number((await insertVaultShelf("Shelf 1")).id);
+    }
+    const slots = (await run(client.from("vault_stacks").select("slot").eq("shelf_id", sid)))
+      .map((row) => row.slot).filter(given);
+    return [sid, slots.length ? Math.max(...slots) + 1 : 0];
+  }
+
+  async function listVaultShelves() {
+    await ensureVaultShelf();
+    return (await vaultShelfRows()).map(serializeVaultShelf);
+  }
+
+  async function createVaultShelf(title) {
+    await ensureVaultShelf();
+    return serializeVaultShelf(await insertVaultShelf(title));
+  }
+
+  async function updateVaultShelf(id, fields) {
+    await requireRow("vault_shelves", id, "Shelf not found", "id");
+    const changes = {};
+    if (given(fields.title)) {
+      const name = text(fields.title);
+      if (!name) throw new ApiError(400, "Shelf name is required");
+      changes.title = clip(name, VAULT_TITLE_MAX);
+    }
+    Object.assign(changes, vaultStyleChanges(fields, VAULT_SHELF_STYLE_FIELDS));
+    if (Object.keys(changes).length) await run(client.from("vault_shelves").update(changes).eq("id", id));
+    return serializeVaultShelf(await requireRow("vault_shelves", id, "Shelf not found"));
+  }
+
+  // Shelves listed come first in the given order; any left out keep their relative order after them.
+  async function reorderVaultShelves(shelfIds) {
+    await ensureVaultShelf();
+    const existing = (await vaultShelfRows("id")).map((row) => Number(row.id));
+    const wanted = [...new Set(shelfIds)];
+    if (wanted.some((id) => !existing.includes(id))) throw new ApiError(404, "Shelf not found");
+    const order = [...wanted, ...existing.filter((id) => !wanted.includes(id))];
+    for (const [index, id] of order.entries()) {
+      await run(client.from("vault_shelves").update({ sort_order: index + 1 }).eq("id", id));
+    }
+    return listVaultShelves();
+  }
+
+  // Puts the listed stacks on the shelf in that order (moving them from other shelves if needed).
+  async function arrangeVaultShelfStacks(shelfId, stackIds) {
+    await vaultSlotTarget(shelfId, 0);
+    const stacks = await vaultStackRows("id, shelf_id, slot");
+    const known = new Set(stacks.map((row) => Number(row.id)));
+    const wanted = [...new Set(stackIds)];
+    if (wanted.some((id) => !known.has(id))) throw new ApiError(404, "Stack not found");
+    const rest = stacks
+      .filter((row) => Number(row.shelf_id) === shelfId && !wanted.includes(Number(row.id)))
+      .sort((a, b) => nullsFirst(a.slot, b.slot) || a.id - b.id)
+      .map((row) => Number(row.id));
+    for (const [slot, id] of [...wanted, ...rest].entries()) {
+      await run(client.from("vault_stacks").update({ shelf_id: shelfId, slot }).eq("id", id));
+    }
+    return listVaultStacks();
+  }
+
+  // Removes the shelf and its stacks; their notebooks fall back to Unstacked. The last shelf always stays.
+  async function deleteVaultShelf(id) {
+    await requireRow("vault_shelves", id, "Shelf not found", "id");
+    if ((await vaultShelfRows("id")).length <= 1) throw new ApiError(400, "The Vault needs at least one shelf");
+    const stackIds = (await run(client.from("vault_stacks").select("id").eq("shelf_id", id))).map((row) => row.id);
+    if (stackIds.length) {
+      await run(client.from("vault_notebooks").update({ stack_id: null }).in("stack_id", stackIds));
+      await run(client.from("vault_stacks").delete().in("id", stackIds));
+    }
+    await run(client.from("vault_shelves").delete().eq("id", id));
+    return { ok: true, id };
+  }
+
+  async function listVaultStacks() {
+    await ensureVaultShelf();
+    const [shelves, stacks] = await Promise.all([vaultShelfRows("id"), vaultStackRows()]);
+    const rank = new Map(shelves.map((shelf, index) => [Number(shelf.id), index]));
+    const shelfRank = (row) => (rank.has(Number(row.shelf_id)) ? rank.get(Number(row.shelf_id)) : null);
+    return stacks
+      .sort((a, b) => nullsFirst(shelfRank(a), shelfRank(b)) || nullsFirst(a.slot, b.slot) || a.id - b.id)
+      .map(serializeVaultStack);
+  }
+
+  // Without a slot the stack goes to the end of the given shelf (or of the first shelf).
+  async function createVaultStack(fields) {
+    await ensureVaultShelf();
+    let target;
+    if (given(fields.slot)) {
+      target = await vaultSlotTarget(fields.shelf_id, fields.slot);
+      const taken = await run(client.from("vault_stacks").select("id").eq("shelf_id", target[0]).eq("slot", target[1]).limit(1));
+      if (taken.length) throw new ApiError(409, "That slot already holds a stack");
+    } else {
+      const shelf = given(fields.shelf_id) ? (await vaultSlotTarget(fields.shelf_id, 0))[0] : null;
+      target = await vaultFreeSlot(shelf);
+    }
+    const title = clip(pyText(fields.title), VAULT_TITLE_MAX) || `Stack ${target[1] + 1}`;
+    return serializeVaultStack(await run(client.from("vault_stacks")
+      .insert({ title, sort_order: 0, shelf_id: target[0], slot: target[1] }).select("*").single()));
+  }
+
+  // Moving onto a slot that already holds a stack swaps the two.
+  async function updateVaultStack(id, fields) {
+    const row = await requireRow("vault_stacks", id, "Stack not found");
+    let title = null;
+    if (given(fields.title)) {
+      title = text(fields.title);
+      if (!title) throw new ApiError(400, "Stack name is required");
+    }
+    const target = given(fields.slot)
+      ? await vaultSlotTarget(given(fields.shelf_id) ? fields.shelf_id : row.shelf_id, fields.slot)
+      : null;
+    if (title !== null) await run(client.from("vault_stacks").update({ title: clip(title, VAULT_TITLE_MAX) }).eq("id", id));
+    if (target) {
+      const occupant = await run(client.from("vault_stacks").select("id")
+        .eq("shelf_id", target[0]).eq("slot", target[1]).neq("id", id).limit(1));
+      if (occupant.length) {
+        await run(client.from("vault_stacks").update({ shelf_id: row.shelf_id, slot: row.slot }).eq("id", occupant[0].id));
+      }
+      await run(client.from("vault_stacks").update({ shelf_id: target[0], slot: target[1] }).eq("id", id));
+    }
+    return serializeVaultStack(await requireRow("vault_stacks", id, "Stack not found"));
+  }
+
+  // Removes the stack only; its notebooks fall back to the unstacked shelf.
+  async function deleteVaultStack(id) {
+    await requireRow("vault_stacks", id, "Stack not found", "id");
+    await run(client.from("vault_notebooks").update({ stack_id: null }).eq("stack_id", id));
+    await run(client.from("vault_stacks").delete().eq("id", id));
+    return { ok: true, id };
+  }
+
+  function serializeVaultLine(row) {
+    const kind = text(row.kind || "line").toLowerCase();
+    return {
+      id: Number(row.id),
+      chapter_id: Number(row.chapter_id),
+      parent_id: given(row.parent_id) ? Number(row.parent_id) : null,
+      kind: VAULT_LINE_KINDS.includes(kind) ? kind : "line",
+      collapsed: Boolean(row.collapsed),
+      sort_order: row.sort_order ?? null,
+      content: text(row.content),
+      blocks: parseBinderBlocks(row.blocks),
+      created_at: row.created_at,
+    };
+  }
+
+  // Lines without a position sort last, then by position, age and id.
+  function byVaultLineOrder(a, b) {
+    const unset = Number(!given(a.sort_order)) - Number(!given(b.sort_order));
+    return unset || (a.sort_order ?? 0) - (b.sort_order ?? 0)
+      || (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0) || a.id - b.id;
+  }
+
+  const byChapterOrder = (a, b) => a.chapter_index - b.chapter_index || a.id - b.id;
+
+  function serializeVaultChapter(row, lines = []) {
+    return {
+      id: Number(row.id),
+      notebook_id: Number(row.notebook_id),
+      chapter_index: Number(row.chapter_index),
+      title: text(row.title) || `Chapter ${row.chapter_index}`,
+      created_at: row.created_at,
+      ...vaultStyle(row, VAULT_CHAPTER_STYLE_FIELDS),
+      lines,
+    };
+  }
+
+  function serializeVaultNotebook(row, chapters = null, chapterCount = null) {
+    const payload = {
+      id: Number(row.id),
+      title: text(row.title) || "Untitled Notebook",
+      created_at: row.created_at,
+      stack_id: row.stack_id ? Number(row.stack_id) : null,
+      ...vaultStyle(row, VAULT_NOTEBOOK_STYLE_FIELDS),
+      chapters: chapters || [],
+    };
+    const count = chapterCount ?? (chapters ? chapters.length : null);
+    if (count !== null) payload.chapter_count = count;
+    return payload;
+  }
+
+  const requireVaultNotebook = (id, columns = "id") => requireRow("vault_notebooks", id, "Notebook not found", columns);
+  const requireVaultChapter = (id, columns = "id") => requireRow("vault_chapters", id, "Chapter not found", columns);
+
+  function chapterLines(chapterId) {
+    return selectAll(() => client.from("vault_lines").select("*").eq("chapter_id", chapterId).order("id"))
+      .then((rows) => rows.sort(byVaultLineOrder).map(serializeVaultLine));
+  }
+
+  async function listVaultNotebooks() {
+    const [notebooks, chapters] = await Promise.all([
+      selectAll(() => client.from("vault_notebooks").select("*").order("id")),
+      selectAll(() => client.from("vault_chapters").select("id, notebook_id").order("id")),
+    ]);
+    return notebooks.sort(byNewest).map((row) => serializeVaultNotebook(
+      row, null, chapters.filter((chapter) => chapter.notebook_id === row.id).length,
+    ));
+  }
+
+  async function getVaultNotebook(id) {
+    const row = await requireVaultNotebook(id, "*");
+    const chapters = (await selectAll(() => client.from("vault_chapters").select("*").eq("notebook_id", id).order("id")))
+      .sort(byChapterOrder);
+    const ids = chapters.map((chapter) => chapter.id);
+    const lines = ids.length
+      ? await selectAll(() => client.from("vault_lines").select("*").in("chapter_id", ids).order("id"))
+      : [];
+    return serializeVaultNotebook(row, chapters.map((chapter) => serializeVaultChapter(
+      chapter,
+      lines.filter((line) => line.chapter_id === chapter.id).sort(byVaultLineOrder).map(serializeVaultLine),
+    )));
+  }
+
+  async function cleanVaultStackId(stackId) {
+    if (!given(stackId) || stackId === "" || stackId === 0) return null;
+    await requireRow("vault_stacks", stackId, "Stack not found", "id");
+    return Number(stackId);
+  }
+
+  async function createVaultNotebook(title, stackId) {
+    const name = text(title);
+    if (!name) throw new ApiError(400, "Notebook name is required");
+    const stack = await cleanVaultStackId(stackId);
+    const row = await run(client.from("vault_notebooks").insert({ title: name, stack_id: stack }).select("id").single());
+    await run(client.from("vault_chapters").insert({ notebook_id: row.id, chapter_index: 1, title: "Chapter 1" }));
+    return getVaultNotebook(row.id);
+  }
+
+  // A stack_id in the body (re)assigns the notebook; leaving it out keeps the current stack.
+  async function updateVaultNotebook(id, fields) {
+    await requireVaultNotebook(id);
+    const changes = {};
+    if (given(fields.title)) {
+      changes.title = text(fields.title);
+      if (!changes.title) throw new ApiError(400, "Notebook name is required");
+    }
+    Object.assign(changes, vaultStyleChanges(fields, VAULT_NOTEBOOK_STYLE_FIELDS));
+    if (has(fields, "stack_id")) changes.stack_id = await cleanVaultStackId(fields.stack_id);
+    if (Object.keys(changes).length) await run(client.from("vault_notebooks").update(changes).eq("id", id));
+    return getVaultNotebook(id);
+  }
+
+  async function deleteVaultNotebook(id) {
+    await requireVaultNotebook(id);
+    const chapterIds = (await run(client.from("vault_chapters").select("id").eq("notebook_id", id))).map((row) => row.id);
+    if (chapterIds.length) {
+      await run(client.from("vault_lines").delete().in("chapter_id", chapterIds));
+      await run(client.from("vault_chapters").delete().in("id", chapterIds));
+    }
+    await run(client.from("vault_notebooks").delete().eq("id", id));
+    return { ok: true, id };
+  }
+
+  async function createVaultChapter(notebookId, title) {
+    await requireVaultNotebook(notebookId);
+    const indexes = (await run(client.from("vault_chapters").select("chapter_index").eq("notebook_id", notebookId)))
+      .map((row) => Number(row.chapter_index) || 0);
+    const next = (indexes.length ? Math.max(...indexes) : 0) + 1;
+    const row = await run(client.from("vault_chapters")
+      .insert({ notebook_id: notebookId, chapter_index: next, title: text(title) || `Chapter ${next}` })
+      .select("*").single());
+    return serializeVaultChapter(row, []);
+  }
+
+  async function updateVaultChapter(id, fields) {
+    await requireVaultChapter(id);
+    const changes = {};
+    if (given(fields.title)) {
+      changes.title = text(fields.title);
+      if (!changes.title) throw new ApiError(400, "Chapter title is required");
+    }
+    Object.assign(changes, vaultStyleChanges(fields, VAULT_CHAPTER_STYLE_FIELDS));
+    if (Object.keys(changes).length) await run(client.from("vault_chapters").update(changes).eq("id", id));
+    return serializeVaultChapter(await requireVaultChapter(id, "*"), await chapterLines(id));
+  }
+
+  async function reorderVaultChapters(notebookId, chapterIds) {
+    await requireVaultNotebook(notebookId);
+    const existing = new Set((await run(client.from("vault_chapters").select("id").eq("notebook_id", notebookId)))
+      .map((row) => Number(row.id)));
+    const ordered = [...new Set(chapterIds)].filter((id) => existing.has(id));
+    if (ordered.length !== existing.size) {
+      throw new ApiError(400, "chapter_ids must include every chapter in the notebook exactly once");
+    }
+    for (const [index, id] of ordered.entries()) {
+      await run(client.from("vault_chapters").update({ chapter_index: index + 1 }).eq("id", id).eq("notebook_id", notebookId));
+    }
+    return { success: true, chapter_ids: ordered };
+  }
+
+  async function deleteVaultChapter(id) {
+    const row = await requireVaultChapter(id, "id, notebook_id");
+    const notebookId = Number(row.notebook_id);
+    const siblings = await run(client.from("vault_chapters").select("id").eq("notebook_id", notebookId));
+    if (siblings.length <= 1) throw new ApiError(400, "Cannot delete the only chapter in a notebook");
+    await run(client.from("vault_lines").delete().eq("chapter_id", id));
+    await run(client.from("vault_chapters").delete().eq("id", id));
+    return { ok: true, id, notebook_id: notebookId };
+  }
+
+  async function vaultFoldoutParent(chapterId, parentId) {
+    if (!given(parentId) || parentId === "" || parentId === 0) return null;
+    const parent = await run(client.from("vault_lines").select("id, chapter_id, kind").eq("id", parentId).maybeSingle());
+    if (!parent || Number(parent.chapter_id) !== Number(chapterId)) {
+      throw new ApiError(404, "Parent foldout page not found in this chapter");
+    }
+    if ((parent.kind || "line") !== "foldout") throw new ApiError(400, "Lines can only be nested inside a foldout page");
+    return Number(parentId);
+  }
+
+  async function createVaultLine(chapterId, content, blocks, kind, parentId) {
+    await requireVaultChapter(chapterId);
+    const lineKind = text(kind || "line").toLowerCase();
+    if (!VAULT_LINE_KINDS.includes(lineKind)) throw new ApiError(400, "Invalid line kind");
+    const parent = await vaultFoldoutParent(chapterId, parentId);
+    if (lineKind === "outline" && parent !== null) {
+      throw new ApiError(400, "Outline sections can only be placed at the top level of a chapter");
+    }
+    const orders = (await run(client.from("vault_lines").select("sort_order, parent_id").eq("chapter_id", chapterId)))
+      .filter((row) => (given(row.parent_id) ? Number(row.parent_id) : null) === parent && given(row.sort_order))
+      .map((row) => Number(row.sort_order));
+    const row = await run(client.from("vault_lines").insert({
+      chapter_id: chapterId,
+      content: text(content),
+      blocks: dumpBinderBlocks(blocks),
+      sort_order: (orders.length ? Math.max(...orders) : 0) + 1,
+      parent_id: parent,
+      kind: lineKind,
+      collapsed: false,
+    }).select("*").single());
+    return serializeVaultLine(row);
+  }
+
+  async function updateVaultLine(id, content, blocks, collapsed) {
+    await requireRow("vault_lines", id, "Line not found", "id");
+    const changes = {};
+    if (content !== null) changes.content = text(content);
+    if (blocks !== null) changes.blocks = dumpBinderBlocks(blocks);
+    if (collapsed !== null) changes.collapsed = Boolean(collapsed);
+    const row = Object.keys(changes).length
+      ? await run(client.from("vault_lines").update(changes).eq("id", id).select("*").single())
+      : await requireRow("vault_lines", id, "Line not found");
+    return serializeVaultLine(row);
+  }
+
+  function vaultLineOrderBody(body) {
+    const f = modelFields(body, { line_ids: "int_list", items: "list" });
+    const items = given(f.items)
+      ? f.items.map((item) => {
+        if (!isPlainObject(item)) throw fieldError("items");
+        const entry = modelFields(item, { id: "int", parent_id: "int" });
+        if (!given(entry.id)) throw fieldError("items");
+        return { id: entry.id, parent_id: entry.parent_id ?? null };
+      })
+      : null;
+    return { lineIds: f.line_ids || [], items };
+  }
+
+  // Saves sibling order and nesting. `items` is the chapter's lines in document order as
+  // {id, parent_id}; `lineIds` alone reorders while keeping each line's current parent.
+  async function reorderVaultLines(chapterId, { lineIds, items }) {
+    await requireVaultChapter(chapterId);
+    const rows = await run(client.from("vault_lines").select("id, parent_id, kind").eq("chapter_id", chapterId));
+    const kinds = new Map(rows.map((row) => [Number(row.id), String(row.kind || "line")]));
+    const currentParent = new Map(rows.map((row) => [Number(row.id), given(row.parent_id) ? Number(row.parent_id) : null]));
+    const entries = items !== null ? items : lineIds.map((id) => ({ id, parent_id: null }));
+    const ordered = [];
+    const parents = new Map();
+    for (const entry of entries) {
+      const lineId = entry.id;
+      if (!kinds.has(lineId) || parents.has(lineId)) continue;
+      const parent = items === null ? currentParent.get(lineId) : entry.parent_id || null;
+      if (parent !== null && (kinds.get(parent) !== "foldout" || parent === lineId)) {
+        throw new ApiError(400, "Lines can only be nested inside a foldout page in the same chapter");
+      }
+      if (parent !== null && kinds.get(lineId) === "outline") {
+        throw new ApiError(400, "Outline sections can only be placed at the top level of a chapter");
+      }
+      parents.set(lineId, parent);
+      ordered.push(lineId);
+    }
+    if (ordered.length !== kinds.size) {
+      throw new ApiError(400, "The new order must include every line in the chapter exactly once");
+    }
+    for (const lineId of ordered) {
+      const seen = new Set();
+      for (let cursor = parents.get(lineId); cursor !== null && cursor !== undefined; cursor = parents.get(cursor)) {
+        if (cursor === lineId || seen.has(cursor)) throw new ApiError(400, "A foldout page cannot be nested inside itself");
+        seen.add(cursor);
+      }
+    }
+    const positions = new Map();
+    for (const lineId of ordered) {
+      const parent = parents.get(lineId);
+      positions.set(parent, (positions.get(parent) || 0) + 1);
+      await run(client.from("vault_lines").update({ sort_order: positions.get(parent), parent_id: parent })
+        .eq("id", lineId).eq("chapter_id", chapterId));
+    }
+    return {
+      success: true,
+      line_ids: ordered,
+      items: ordered.map((id) => ({ id, parent_id: parents.get(id) })),
+    };
+  }
+
+  // Deleting a foldout page removes every line nested inside it.
+  async function deleteVaultLine(id) {
+    await requireRow("vault_lines", id, "Line not found", "id");
+    const doomed = [id];
+    let frontier = [id];
+    while (frontier.length) {
+      frontier = (await run(client.from("vault_lines").select("id").in("parent_id", frontier))).map((row) => Number(row.id));
+      doomed.push(...frontier);
+    }
+    await run(client.from("vault_lines").delete().in("id", doomed));
+    return { ok: true, id, deleted_ids: doomed };
+  }
+
+  /* ---------- Vault references and reference folders ---------- */
+
+  const REFERENCE_FIELD_KINDS = {
+    title: "text", raw_content: "text", source_url: "text", topic_tag: "text", tags: "text_list",
+    folder_id: "int", folder_name: "text", is_pinned: "flag", attachments: "list", link_preview: "object",
+    rich_notes: "text", content: "text", sketch_data: "text", echo_to_home: "flag", daily_echo: "flag",
+    echo_frequency: "text", extra_data: "object",
+  };
+  const ECHO_FREQUENCIES = ["daily_random", "pin", "rotate"];
+
+  function pyString(value) {
+    return pyFalsy(value) ? "" : pyStr(value);
+  }
+
+  function attachmentId(index, url) {
+    const sum = Array.from(url).reduce((total, char) => total + char.codePointAt(0), 0);
+    return `att_${index}_${sum % 10000000}`;
+  }
+
+  // Legacy URL strings and rich attachment objects become {id, type: link|file, title, url}.
+  function normalizeReferenceAttachments(raw) {
+    if (!Array.isArray(raw)) return [];
+    const items = [];
+    const seen = new Set();
+    raw.forEach((entry, index) => {
+      if (typeof entry !== "string" && !isPlainObject(entry)) return;
+      const url = typeof entry === "string" ? entry.trim() : pyText(entry.url);
+      if (!url || seen.has(url)) return;
+      seen.add(url);
+      const isWebLink = /^https?:\/\//.test(url);
+      let kind;
+      if (typeof entry === "string") {
+        kind = isWebLink ? "link" : "file";
+      } else {
+        kind = pyText(entry.type).toLowerCase();
+        if (!["link", "file", "bookmark", "document", "photo"].includes(kind)) {
+          kind = isWebLink && !url.includes("/uploads/") ? "link" : "file";
+        }
+        if (kind === "bookmark") kind = "link";
+        if (kind === "document" || kind === "photo") kind = "file";
+      }
+      const fallbackTitle = basename(url) || (kind === "link" ? "Link" : "File");
+      items.push({
+        id: typeof entry === "string" ? attachmentId(index, url) : pyStr(pyOr(entry.id, attachmentId(index, url))),
+        type: kind,
+        title: (typeof entry === "string" ? "" : pyText(entry.title)) || fallbackTitle,
+        url,
+      });
+    });
+    return items;
+  }
+
+  function cleanUrlList(raw) {
+    return Array.isArray(raw) ? raw.map((url) => pyStr(url).trim()).filter(Boolean) : [];
+  }
+
+  function normalizeReferenceExtra(raw) {
+    const data = parseExtra(raw);
+    const preview = isPlainObject(data.link_preview) ? data.link_preview : {};
+    let sketch = pyText(data.sketch_data);
+    if (sketch && !sketch.startsWith("data:image/")) sketch = "";
+    let frequency = pyText(pyOr(data.echo_frequency, "daily_random")).toLowerCase();
+    if (!ECHO_FREQUENCIES.includes(frequency)) frequency = "daily_random";
+    const rich = sanitizeNoteHtml(pyOr(data.rich_notes, data.content, ""));
+    let tags = normalizeTagList(data.tags);
+    if (!tags.length) {
+      const legacy = normalizeTopicTag(data.topic_tag);
+      if (legacy) tags = [legacy];
+    }
+    const echo = !pyFalsy(data.echo_to_home) || !pyFalsy(data.daily_echo);
+    const isPage = pyText(pyOr(data.ref_type, data.type, "")).toLowerCase() === "page";
+    return {
+      is_snippet: !pyFalsy(data.is_snippet),
+      is_vision: !pyFalsy(data.is_vision) || !pyFalsy(data.vision_pins),
+      attachments: normalizeReferenceAttachments(data.attachments),
+      tags,
+      vision_pins: cleanUrlList(data.vision_pins),
+      vision_hidden: cleanUrlList(data.vision_hidden),
+      link_preview: {
+        title: pyString(preview.title),
+        description: pyString(preview.description),
+        image: pyString(preview.image),
+      },
+      rich_notes: rich,
+      content: rich,
+      sketch_data: sketch,
+      echo_to_home: echo,
+      echo_frequency: frequency,
+      daily_echo: echo,
+      ref_type: isPage ? "page" : pyText(data.ref_type) || null,
+    };
+  }
+
+  function referenceFields(body) {
+    const fields = modelFields(body, REFERENCE_FIELD_KINDS);
+    if (typeof fields.title !== "string" || !fields.title) throw new ApiError(422, "title is required");
+    return fields;
+  }
+
+  async function requireReference(id) {
+    const current = serializeSpark(await requireSpark(id));
+    if (current.item_type !== "reference") throw new ApiError(400, "Only references can be filed here");
+    return current;
+  }
+
+  const nocase = (value) => String(value ?? "").replace(/[A-Z]/g, (char) => char.toLowerCase());
+  function byNocase(key) {
+    return (a, b) => {
+      const left = nocase(a[key]);
+      const right = nocase(b[key]);
+      return left < right ? -1 : left > right ? 1 : a.id - b.id;
+    };
+  }
+
+  function referenceHaystack(item) {
+    const extra = item.extra_data || {};
+    const preview = extra.link_preview || {};
+    const attachments = (extra.attachments || [])
+      .map((att) => (isPlainObject(att) ? `${att.title} ${att.url}` : ` ${att}`))
+      .join(" ");
+    return [
+      item.title || "",
+      item.raw_content || "",
+      String(extra.rich_notes || "").replace(/<[^>]+>/g, " "),
+      item.source_url || "",
+      item.topic_tag || "",
+      (extra.tags || []).join(" "),
+      item.folder_name || "",
+      attachments,
+      String(preview.title || ""),
+      String(preview.description || ""),
+    ].join(" ").toLowerCase();
+  }
+
+  async function listReferences(query) {
+    const [rows, folders] = await Promise.all([
+      selectAll(() => client.from("sparks").select("*").eq("status", "in_cloud").eq("item_type", "reference").order("id")),
+      selectAll(() => client.from("reference_folders").select("id, name").order("id")),
+    ]);
+    const folderNames = new Map(folders.map((folder) => [Number(folder.id), folder.name]));
+    const byTitle = byNocase("title");
+    rows.sort((a, b) => (b.is_pinned ? 1 : 0) - (a.is_pinned ? 1 : 0) || byTitle(a, b));
+    let items = rows.map((row) => ({ ...serializeSpark(row), folder_name: folderNames.get(Number(row.folder_id)) ?? null }));
+    const folderId = query.get("folder_id");
+    if (folderId !== null && !["", "all", "null"].includes(folderId)) {
+      if (folderId === "none" || folderId === "unfiled") {
+        items = items.filter((item) => !item.folder_id);
+      } else {
+        const wanted = strictInt(folderId);
+        if (wanted === null) throw new ApiError(400, "folder_id must be a number");
+        items = items.filter((item) => item.folder_id === wanted);
+      }
+    }
+    const needle = text(query.get("search")).toLowerCase();
+    if (needle) items = items.filter((item) => referenceHaystack(item).includes(needle));
+    const tag = text(query.get("tag"));
+    if (tag && tag.toLowerCase() !== "all") {
+      const wanted = tag.replace(/^#+/, "").toLowerCase();
+      const clean = (value) => text(value).replace(/^#+/, "").toLowerCase();
+      items = items.filter((item) => [item.topic_tag, ...((item.extra_data || {}).tags || [])].map(clean).includes(wanted));
+    }
+    return items;
+  }
+
+  async function createReference(fields) {
+    const title = text(fields.title);
+    if (!title) throw new ApiError(400, "Title is required");
+    let tags = normalizeTagList(fields.tags);
+    if (!tags.length) {
+      const legacy = normalizeTopicTag(fields.topic_tag);
+      if (legacy) tags = [legacy];
+    }
+    const extra = normalizeReferenceExtra({ ...fields, tags });
+    await ensureTagsForNames(tags);
+    const row = await run(client.from("sparks").insert({
+      title,
+      raw_content: text(fields.raw_content) || null,
+      source_url: text(fields.source_url) || null,
+      topic_tag: tags[0] || null,
+      status: "in_cloud",
+      item_type: "reference",
+      is_done: 0,
+      assignee: "Me",
+      extra_data: extra,
+      folder_id: present(fields.folder_id) ? Number(fields.folder_id) : null,
+      is_pinned: fields.is_pinned ? 1 : 0,
+    }).select("*").single());
+    return serializeSpark(row);
+  }
+
+  async function updateReference(id, fields) {
+    const current = await requireReference(id);
+    const title = given(fields.title) ? text(fields.title) : current.title;
+    if (!title) throw new ApiError(400, "Title is required");
+    let extra = { ...current.extra_data };
+    if (Array.isArray(fields.attachments)) extra.attachments = normalizeReferenceAttachments(fields.attachments);
+    if (Array.isArray(fields.tags) || typeof fields.tags === "string") extra.tags = normalizeTagList(fields.tags);
+    if (isPlainObject(fields.link_preview)) extra.link_preview = fields.link_preview;
+    if (has(fields, "rich_notes") || has(fields, "content")) {
+      extra.rich_notes = sanitizeNoteHtml(has(fields, "rich_notes") ? fields.rich_notes : fields.content);
+      extra.content = extra.rich_notes;
+    }
+    if (has(fields, "sketch_data")) extra.sketch_data = fields.sketch_data;
+    if (has(fields, "echo_to_home") || has(fields, "daily_echo")) {
+      const echo = Boolean(has(fields, "echo_to_home") ? fields.echo_to_home : fields.daily_echo);
+      extra.echo_to_home = echo;
+      extra.daily_echo = echo;
+    }
+    if (has(fields, "echo_frequency")) extra.echo_frequency = fields.echo_frequency;
+    if (isPlainObject(fields.extra_data)) {
+      const merged = { ...extra, ...fields.extra_data };
+      if (has(fields.extra_data, "attachments")) merged.attachments = normalizeReferenceAttachments(fields.extra_data.attachments);
+      if (has(fields.extra_data, "tags")) merged.tags = normalizeTagList(fields.extra_data.tags);
+      extra = merged;
+    }
+    extra = normalizeReferenceExtra(extra);
+    const topicOnly = has(fields, "topic_tag") && !has(fields, "tags");
+    if (topicOnly) {
+      const topic = normalizeTopicTag(fields.topic_tag);
+      if (topic) extra.tags = normalizeTagList([topic, ...extra.tags]);
+    }
+    let tag = extra.tags[0] ?? null;
+    if (topicOnly && given(fields.topic_tag)) tag = normalizeTopicTag(fields.topic_tag);
+    await ensureTagsForNames(extra.tags.length ? extra.tags : tag ? [tag] : []);
+    const row = await run(client.from("sparks").update({
+      title,
+      raw_content: has(fields, "raw_content") ? text(fields.raw_content) || null : current.raw_content ?? null,
+      source_url: has(fields, "source_url") ? text(fields.source_url) || null : current.source_url ?? null,
+      topic_tag: tag,
+      extra_data: extra,
+      folder_id: has(fields, "folder_id") ? (present(fields.folder_id) ? Number(fields.folder_id) : null) : current.folder_id,
+      is_pinned: has(fields, "is_pinned") ? (fields.is_pinned ? 1 : 0) : current.is_pinned,
+    }).eq("id", id).select("*").single());
+    return serializeSpark(row);
+  }
+
+  // A folder_name without a folder_id files the reference into a new top-level folder,
+  // created only once the rest of the write is known to be valid.
+  async function saveReference(body, write) {
+    const fields = referenceFields(body);
+    const newFolder = !pyFalsy(fields.folder_name) && pyFalsy(fields.folder_id);
+    if (newFolder && !text(fields.folder_name)) throw new ApiError(400, "Folder name is required");
+    if (!text(fields.title)) throw new ApiError(400, "Title is required");
+    if (newFolder) fields.folder_id = (await createReferenceFolder(fields.folder_name, null, "📁")).id;
+    return write(fields);
+  }
+
+  async function updateReferenceRoute(id, body) {
+    await requireReference(id);
+    return saveReference(body, (fields) => updateReference(id, fields));
+  }
+
+  async function pinReference(id, isPinned) {
+    const current = await requireReference(id);
+    const next = isPinned === null ? (current.is_pinned ? 0 : 1) : (isPinned ? 1 : 0);
+    return updateReference(id, { is_pinned: next });
+  }
+
+  function referenceFolderNode(row) {
+    return {
+      id: Number(row.id),
+      name: row.name,
+      parent_id: given(row.parent_id) ? Number(row.parent_id) : null,
+      icon: row.icon || "📁",
+      created_at: row.created_at,
+      children: [],
+    };
+  }
+
+  function folderBody(body, extraKinds = {}) {
+    const f = modelFields(body, { name: "text", ...extraKinds });
+    if (typeof f.name !== "string" || !f.name) throw fieldError("name");
+    return f;
+  }
+
+  const requireReferenceFolder = (id) => requireRow("reference_folders", id, "Folder not found");
+
+  async function listReferenceFolders() {
+    const rows = (await selectAll(() => client.from("reference_folders").select("*").order("id"))).sort(byNocase("name"));
+    const nodes = new Map(rows.map((row) => [Number(row.id), referenceFolderNode(row)]));
+    const roots = [];
+    for (const node of nodes.values()) {
+      const parentId = node.parent_id;
+      if (parentId && nodes.has(parentId) && parentId !== node.id) nodes.get(parentId).children.push(node);
+      else roots.push(node);
+    }
+    return roots;
+  }
+
+  async function createReferenceFolder(name, parentId, icon) {
+    const clean = text(name);
+    if (!clean) throw new ApiError(400, "Folder name is required");
+    if (given(parentId)) await requireRow("reference_folders", parentId, "Parent folder not found", "id");
+    const row = await run(client.from("reference_folders")
+      .insert({ name: clean, parent_id: given(parentId) ? parentId : null, icon: text(icon || "📁") || "📁" })
+      .select("*").single());
+    return referenceFolderNode(row);
+  }
+
+  async function renameReferenceFolder(id, name) {
+    await requireReferenceFolder(id);
+    const clean = text(name);
+    if (!clean) throw new ApiError(400, "Folder name is required");
+    return referenceFolderNode(await run(client.from("reference_folders").update({ name: clean }).eq("id", id).select("*").single()));
+  }
+
+  // References in the folder become unfiled; sub-folders move up to its parent.
+  async function deleteReferenceFolder(id) {
+    const row = await requireReferenceFolder(id);
+    await run(client.from("sparks").update({ folder_id: null }).eq("folder_id", id));
+    await run(client.from("reference_folders").update({ parent_id: row.parent_id ?? null }).eq("parent_id", id));
+    await run(client.from("reference_folders").delete().eq("id", id));
+    return { ok: true, id };
+  }
+
+  /* ---------- Legacy (Hall of Legacy milestones) ---------- */
+
+  // Calendar day of a stored timestamp as written (database.py _stamp_day).
+  function stampDay(raw) {
+    const match = /^\d{4}-\d{2}-\d{2}/.exec(text(raw));
+    return match && parseDayKey(match[0]) ? match[0] : null;
+  }
+
+  function yearKey(year) {
+    return year < 0 ? `-${String(-year).padStart(3, "0")}` : String(year).padStart(4, "0");
+  }
+
+  function byTextDesc(key) {
+    return (a, b) => {
+      const left = String(a[key] || "");
+      const right = String(b[key] || "");
+      return left < right ? 1 : left > right ? -1 : 0;
+    };
+  }
+
+  // Fulfilled vision boards and mastered trackers. Shipped workbench projects
+  // also belong here, but the workbench is retired online, so that list is empty.
+  async function legacyHall() {
+    const [boards, habitRows] = await Promise.all([
+      selectAll(() => client.from("vision_boards").select("id, title, created_at, fulfilled_at").eq("status", "fulfilled").order("id")),
+      selectAll(() => client.from("sparks").select("*").eq("status", "in_cloud").eq("item_type", "habit")
+        .eq("habit_status", "graduated").order("id")),
+    ]);
+    const boardIds = boards.map((board) => board.id);
+    const goals = boardIds.length
+      ? await selectAll(() => client.from("vision_goals").select("id, vision_id, is_completed").in("vision_id", boardIds).order("id"))
+      : [];
+    const visions = boards.map((board) => {
+      const own = goals.filter((goal) => goal.vision_id === board.id);
+      const done = own.filter((goal) => goal.is_completed).length;
+      const fulfilled = board.fulfilled_at || board.created_at;
+      return {
+        kind: "vision",
+        id: `board-${board.id}`,
+        board_id: Number(board.id),
+        title: text(board.title) || "Untitled Vision",
+        horizon_tag: "Vision",
+        graduated_at: fulfilled,
+        graduation_date: stampDay(fulfilled),
+        photos: [],
+        image_url: "",
+        description: own.length ? `${done}/${own.length} goals realized` : "",
+        badge: "Fulfilled Vision",
+      };
+    }).sort(byTextDesc("graduated_at"));
+    const newestFirst = (a, b) => nullsFirst(Date.parse(b.graduated_at) || null, Date.parse(a.graduated_at) || null)
+      || (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0);
+    const habits = habitRows.map(serializeSpark)
+      .filter((habit) => habit.habit_status === "graduated")
+      .sort(newestFirst)
+      .map((habit) => {
+        const extra = habit.extra_data || {};
+        const graduated = habit.graduated_at || habit.updated_at;
+        return {
+          kind: "habit",
+          id: habit.id,
+          title: habit.title || "Untitled habit",
+          graduated_at: graduated,
+          graduation_date: stampDay(graduated),
+          peak_streak: Math.max(intOr(habit.current_streak, 0), intOr(extra.current_streak, 0), intOr(extra.peak_streak, 0)),
+          photo_pair: habit.photo_pair,
+          reflection: text(habit.raw_content),
+          badge: "Mastered Tracker",
+        };
+      });
+    return {
+      summary: {
+        visions_realized: visions.length,
+        projects_shipped: 0,
+        habits_mastered: habits.length,
+        total_milestones: visions.length + habits.length,
+      },
+      visions,
+      projects: [],
+      habits,
+    };
+  }
+
+  // Chronological achievement archive for the Legacy tab, filtered by year, month or date range.
+  async function legacyMilestones(query) {
+    const hall = await legacyHall();
+    const milestones = [];
+    const reached = (item) => ({
+      completed_at: item.graduated_at,
+      completed_day: item.graduation_date || stampDay(item.graduated_at),
+    });
+    for (const item of hall.visions) {
+      milestones.push({ ...item, type: "vision_graduated", icon: "🌟", label: item.badge || "Graduated Vision", ...reached(item) });
+    }
+    for (const item of hall.habits) {
+      milestones.push({ ...item, type: "habit_mastered", icon: "🔄", label: "Mastered Tracker", ...reached(item) });
+      const peak = intOr(item.peak_streak, 0);
+      if (peak >= 30) {
+        milestones.push({
+          kind: "habit_streak",
+          type: "habit_streak",
+          icon: "🔥",
+          label: `${peak}-Day Streak`,
+          id: `streak-${item.id}-${peak}`,
+          title: item.title || "Tracker streak",
+          habit_id: item.id,
+          peak_streak: peak,
+          ...reached(item),
+          badge: `${peak}-Day Streak`,
+        });
+      }
+    }
+
+    const filter = text(query.get("filter")).toLowerCase();
+    const val = query.get("val");
+    let start = query.get("start_date") ? cleanDueDate(query.get("start_date")) : null;
+    let end = query.get("end_date") ? cleanDueDate(query.get("end_date")) : null;
+    const today = dayKey(localToday());
+    const thisYear = Number(today.slice(0, 4));
+    if (filter === "year") {
+      const year = strictInt(val) ?? thisYear;
+      start = `${yearKey(year)}-01-01`;
+      end = `${yearKey(year)}-12-31`;
+    } else if (filter === "month") {
+      const raw = text(pyOr(val, today.slice(0, 7)));
+      const [year, month] = raw.length >= 7 && raw[4] === "-"
+        ? [strictInt(raw.slice(0, 4)), strictInt(raw.slice(5, 7))]
+        : [thisYear, strictInt(raw)];
+      const lastDay = new Date(2000, 0, 1);
+      if (year !== null && month !== null) lastDay.setFullYear(year, month, 0);
+      if (year !== null && month === 12) {
+        start = `${yearKey(year)}-12-01`;
+        end = `${yearKey(year)}-12-31`;
+      } else if (year !== null && month !== null && month >= 0 && month <= 11 && year >= 1 && year <= 9999) {
+        start = `${yearKey(year)}-${pad2(month)}-01`;
+        end = `${yearKey(lastDay.getFullYear())}-${pad2(lastDay.getMonth() + 1)}-${pad2(lastDay.getDate())}`;
+      } else {
+        start = `${today.slice(0, 7)}-01`;
+        end = today;
+      }
+    } else if ((filter === "range" || filter === "custom") && (start || end)) {
+      // keep the given dates
+    } else if (filter && !["all", "all_time"].includes(filter)) {
+      start = null;
+      end = null;
+    }
+
+    const shown = milestones.filter((item) => {
+      const day = item.completed_day || stampDay(item.completed_at);
+      if (!day) return !start && !end;
+      return !(start && day < start) && !(end && day > end);
+    });
+    const key = (item) => String(item.completed_at || item.completed_day || "");
+    shown.sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
+    return {
+      filter: { type: filter || "all", val, start_date: start, end_date: end },
+      summary: { ...hall.summary, milestones_shown: shown.length },
+      milestones: shown,
+    };
   }
 
   /* ---------- Request routing ---------- */
