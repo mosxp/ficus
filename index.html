@@ -3236,6 +3236,13 @@
           padding-right: 0.75rem;
         }
       }
+      /* Until we know whether sign-in is required, keep the nav invisible without shifting layout. */
+      body.ficus-auth-pending #notebook-tabs { visibility: hidden; }
+      body.ficus-locked { --notebook-tabs-rail: 0px; }
+      body.ficus-locked #notebook-tabs { display: none !important; }
+      body.ficus-locked.notebook-page { padding-bottom: env(safe-area-inset-bottom); }
+      .ficus-signin-gate { display: none; }
+      body.ficus-locked .ficus-signin-gate { display: flex; }
       .capsule-line {
         white-space: pre-wrap;
         word-break: break-word;
@@ -3425,7 +3432,7 @@
       .ublock-rec-dot { animation: ublock-rec-pulse 1.2s ease-in-out infinite; }
     </style>
   </head>
-  <body class="notebook-page min-h-screen text-slate-900 antialiased">
+  <body class="notebook-page ficus-auth-pending min-h-screen text-slate-900 antialiased">
     <svg width="0" height="0" class="absolute" aria-hidden="true" focusable="false">
       <symbol id="ficus-mandala" viewBox="0 0 64 64" fill="none" stroke="currentColor">
         <circle cx="32" cy="32" r="30" />
@@ -3543,6 +3550,7 @@
         <button
           type="button"
           id="auth-google-btn"
+          data-ficus-signin
           class="hidden inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-neutral-300 bg-white px-3.5 py-1.5 text-xs font-semibold text-neutral-900 transition hover:border-neutral-900 hover:bg-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60"
         >
           <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.35 11.1h-9.17v2.92h5.27c-.23 1.4-1.66 4.1-5.27 4.1-3.17 0-5.76-2.63-5.76-5.87s2.59-5.87 5.76-5.87c1.81 0 3.02.77 3.71 1.43l2.53-2.43C16.81 3.87 14.69 3 12.18 3 7.03 3 2.87 7.16 2.87 12.25s4.16 9.25 9.31 9.25c5.37 0 8.93-3.78 8.93-9.1 0-.61-.07-1.08-.16-1.3z" /></svg>
@@ -3582,6 +3590,15 @@
             <span aria-hidden="true">+</span>
             <span>Pick a fig</span>
           </button>
+          <button
+            type="button"
+            data-ficus-signin
+            class="ficus-signin-gate mt-3 cursor-pointer items-center gap-2 rounded-2xl border border-neutral-300 bg-white px-6 py-3 text-sm font-semibold text-neutral-900 transition hover:border-neutral-900 hover:bg-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60"
+          >
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.35 11.1h-9.17v2.92h5.27c-.23 1.4-1.66 4.1-5.27 4.1-3.17 0-5.76-2.63-5.76-5.87s2.59-5.87 5.76-5.87c1.81 0 3.02.77 3.71 1.43l2.53-2.43C16.81 3.87 14.69 3 12.18 3 7.03 3 2.87 7.16 2.87 12.25s4.16 9.25 9.31 9.25c5.37 0 8.93-3.78 8.93-9.1 0-.61-.07-1.08-.16-1.3z" /></svg>
+            <span>Sign in with Google</span>
+          </button>
+          <p class="ficus-signin-gate mt-3 text-xs font-medium text-stone-400">Sign in to open your notebook.</p>
         </div>
       </section>
 
@@ -4243,6 +4260,14 @@
             <div id="capture-spark-blocks" class="space-y-1.5 empty:hidden"></div>
           </div>
           <p id="form-error" class="mb-2 hidden text-sm font-medium text-rose-600"></p>
+          <button
+            type="button"
+            data-ficus-signin
+            class="ficus-signin-gate mb-2 min-h-11 w-full cursor-pointer items-center justify-center gap-2 rounded-2xl border border-neutral-300 bg-white px-4 text-sm font-semibold text-neutral-900 transition hover:border-neutral-900 hover:bg-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 disabled:cursor-wait disabled:opacity-60"
+          >
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.35 11.1h-9.17v2.92h5.27c-.23 1.4-1.66 4.1-5.27 4.1-3.17 0-5.76-2.63-5.76-5.87s2.59-5.87 5.76-5.87c1.81 0 3.02.77 3.71 1.43l2.53-2.43C16.81 3.87 14.69 3 12.18 3 7.03 3 2.87 7.16 2.87 12.25s4.16 9.25 9.31 9.25c5.37 0 8.93-3.78 8.93-9.1 0-.61-.07-1.08-.16-1.3z" /></svg>
+            <span>Sign in with Google</span>
+          </button>
           <button type="submit" class="fig-sheet-submit min-h-12 w-full rounded-2xl text-sm font-bold">Store Fig</button>
         </form>
       </div>
@@ -7890,6 +7915,7 @@
       function showView(name) {
         try {
           if (name === "home") name = "today";
+          if (name !== "cover" && document.body.classList.contains("ficus-locked")) name = "cover";
           const prevView = activeView;
           activeView = name;
           if (prevView !== name) {
@@ -40783,22 +40809,48 @@
     </script>
     <script>
       (function initFicusAuth() {
-        const signInBtn = document.getElementById("auth-google-btn");
+        const topSignInBtn = document.getElementById("auth-google-btn");
         const chip = document.getElementById("auth-user-chip");
         const avatar = document.getElementById("auth-user-avatar");
         const nameEl = document.getElementById("auth-user-name");
         const signOutBtn = document.getElementById("auth-signout-btn");
+        const PENDING_FIG_KEY = "ficus_pending_fig";
         window.ficusAuthUser = null;
         const client = window.ficusSupabase;
+        // Only the static site needs a signed-in user; the local server keeps working without one.
+        const hasLocalBackend = fetch("/api/health", { cache: "no-store" })
+          .then((res) => res.ok)
+          .catch(() => false);
+
+        async function applyAccessLock(user) {
+          const locked = !user && !(await hasLocalBackend);
+          document.body.classList.toggle("ficus-locked", locked);
+          document.body.classList.remove("ficus-auth-pending");
+          if (locked && typeof showView === "function") showView("cover");
+        }
+
         if (!client) {
           console.warn("Supabase auth unavailable: SDK or config missing.");
+          void applyAccessLock(null);
           return;
+        }
+
+        function restorePendingFig() {
+          let draft = "";
+          try {
+            draft = sessionStorage.getItem(PENDING_FIG_KEY) || "";
+            sessionStorage.removeItem(PENDING_FIG_KEY);
+          } catch (_) {}
+          if (!draft || typeof openCaptureSparkModal !== "function") return;
+          openCaptureSparkModal();
+          hydrateCapsuleEditor(document.getElementById("capture-spark-input"), { title: draft, entities: [], tags: [] });
         }
 
         function paintAuth(session) {
           const user = session?.user || null;
           window.ficusAuthUser = user;
-          signInBtn.classList.toggle("hidden", Boolean(user));
+          void applyAccessLock(user);
+          topSignInBtn.classList.toggle("hidden", Boolean(user));
           chip.classList.toggle("hidden", !user);
           avatar.replaceChildren();
           if (!user) {
@@ -40806,6 +40858,7 @@
             chip.title = "";
             return;
           }
+          restorePendingFig();
           const meta = user.user_metadata || {};
           const label = meta.full_name || meta.name || user.email || "Signed in";
           const initial = label.charAt(0).toUpperCase();
@@ -40824,19 +40877,32 @@
           }
         }
 
-        signInBtn.addEventListener("click", async () => {
-          signInBtn.disabled = true;
+        async function signInWithGoogle(button) {
+          const modalOpen = !document.getElementById("capture-spark-modal")?.classList.contains("hidden");
+          const draft = modalOpen ? String(document.getElementById("capture-spark-input")?.innerText || "").trim() : "";
+          try {
+            if (draft) sessionStorage.setItem(PENDING_FIG_KEY, draft);
+          } catch (_) {}
+          button.disabled = true;
           const { error } = await client.auth.signInWithOAuth({
             provider: "google",
             options: { redirectTo: window.location.origin + window.location.pathname },
           });
           if (error) {
-            signInBtn.disabled = false;
+            button.disabled = false;
             window.alert(`Google sign-in failed: ${error.message}`);
           }
+        }
+        document.addEventListener("click", (event) => {
+          const button = event.target.closest?.("[data-ficus-signin]");
+          if (!button || button.disabled) return;
+          event.preventDefault();
+          void signInWithGoogle(button);
         });
         // Safari restores this page from the back-forward cache if the user backs out of Google.
-        window.addEventListener("pageshow", () => { signInBtn.disabled = false; });
+        window.addEventListener("pageshow", () => {
+          document.querySelectorAll("[data-ficus-signin]").forEach((button) => { button.disabled = false; });
+        });
 
         signOutBtn.addEventListener("click", async () => {
           signOutBtn.disabled = true;
