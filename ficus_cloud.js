@@ -8,7 +8,7 @@
  * Ported so far: Figs (inbox sparks), tags, Trackers (habits), the Log and
  * Time pages (tasks, events and log entries, plus checklist templates), the
  * Project page (binders and their ship dates), Vision boards and their
- * scrapbook libraries, the Vault (notebooks, shelves and references), the
+ * scrapbook libraries (with GIPHY/Tenor GIF search), the Vault (notebooks, shelves and references), the
  * Legacy page, and /api/upload, which stores files in the Supabase Storage
  * bucket `uploads`.
  */
@@ -41,10 +41,16 @@
     if (!backendProbe) {
       backendProbe = nativeFetch("/api/health", { cache: "no-store" })
         .then((res) => res.ok && (res.headers.get("content-type") || "").includes("application/json"))
-        .catch(() => false);
+        .catch(() => false)
+        .then((local) => {
+          // Without the local GIF proxy, scrapboard.js loads GIPHY/Tenor media straight from their CDNs.
+          window.FICUS_DIRECT_GIFS = !local;
+          return local;
+        });
     }
     return backendProbe;
   }
+  hasLocalBackend();
 
   class ApiError extends Error {
     constructor(status, detail) {
@@ -4217,8 +4223,6 @@
   const SCRAPBOOK_STICKER_DEFAULT_COLLECTION = "My stickers";
   const SCRAPBOOK_PALETTE_MAX_COLORS = 16;
   const SCRAPBOOK_PALETTE_DEFAULT_NAME = "My palette";
-  // GIF search and the GIF library need the local server (API keys, file storage).
-  const GIF_SEARCH_OFF = { configured: false, provider: null, source: null };
 
   function squish(value, length) {
     return clip(String(value || "").replace(/\s+/g, " ").trim(), length);
@@ -4375,6 +4379,160 @@
     const palette = cleanPalette(f);
     await requireRow("scrapbook_palettes", id, "Palette not found", "id");
     return serializeScrapbookPalette(await run(client.from("scrapbook_palettes").update(palette).eq("id", id).select("*").single()));
+  }
+
+  /* ---------- Scrapbook GIF search (GIPHY or Tenor, called straight from the browser) ---------- */
+
+  // Each user brings their own free API key, kept in scrapbook_settings. The GIF library
+  // (uploaded .gif files) still needs the local server.
+  const GIF_PROVIDERS = { giphy: "GIPHY", tenor: "Tenor" };
+  const GIF_MEDIA_HOSTS = /^(media\d*\.giphy\.com|i\.giphy\.com|media\d*\.tenor\.com|c\.tenor\.com)$/;
+  const GIF_SEARCH_OFF = { configured: false, provider: null, source: null };
+
+  class GifServiceError extends Error {
+    constructor(status) {
+      super("GIF service unavailable");
+      this.status = status;
+    }
+  }
+
+  async function gifServiceJson(url) {
+    let res;
+    try {
+      res = await nativeFetch(url);
+    } catch (_) {
+      throw new GifServiceError(0);
+    }
+    if (!res.ok) throw new GifServiceError(res.status);
+    try {
+      return await res.json();
+    } catch (_) {
+      throw new GifServiceError(0);
+    }
+  }
+
+  function gifRendition(url, width, height) {
+    return url ? { url, width: intOr(width, 0), height: intOr(height, 0) } : null;
+  }
+
+  // Results are {id, title, preview, gif}; `next` is the cursor for the following page.
+  async function fetchGifs(provider, key, query, kind, pos, limit) {
+    const stickers = kind === "stickers";
+    const results = [];
+    const add = (id, title, preview, gif) => {
+      if (preview && gif) results.push({ id: String(id), title: title || "", preview, gif });
+    };
+    if (provider === "giphy") {
+      const offset = /^\d+$/.test(pos) ? Number(pos) : 0;
+      const params = new URLSearchParams({ api_key: key, limit: String(limit), offset: String(offset), rating: "pg-13" });
+      if (query) params.set("q", query);
+      const data = await gifServiceJson(
+        `https://api.giphy.com/v1/${stickers ? "stickers" : "gifs"}/${query ? "search" : "trending"}?${params}`,
+      );
+      for (const item of data.data || []) {
+        const images = item.images || {};
+        const small = pyOr(images.fixed_width_downsampled, images.fixed_width_small, images.fixed_width, {});
+        const full = pyOr(images.fixed_width, images.downsized, images.original, {});
+        add(item.id, item.title, gifRendition(small.url, small.width, small.height), gifRendition(full.url, full.width, full.height));
+      }
+      const page = data.pagination || {};
+      const consumed = offset + (intOr(page.count, 0) || results.length);
+      return { results, next: results.length && consumed < Math.min(intOr(page.total_count, 0), 4999) ? String(consumed) : null };
+    }
+    const params = new URLSearchParams({
+      key,
+      client_key: "ficus",
+      limit: String(limit),
+      contentfilter: "medium",
+      media_filter: stickers ? "tinygif_transparent,gif_transparent" : "tinygif,mediumgif,gif",
+    });
+    if (query) params.set("q", query);
+    if (stickers) params.set("searchfilter", "sticker");
+    if (pos) params.set("pos", pos);
+    const data = await gifServiceJson(`https://tenor.googleapis.com/v2/${query ? "search" : "featured"}?${params}`);
+    for (const item of data.results || []) {
+      const media = item.media_formats || {};
+      const small = media[stickers ? "tinygif_transparent" : "tinygif"] || {};
+      const full = (stickers ? media.gif_transparent : pyOr(media.mediumgif, media.gif, null)) || {};
+      const [sw, sh] = small.dims || [0, 0];
+      const [fw, fh] = full.dims || [0, 0];
+      add(item.id, item.content_description, gifRendition(small.url, sw, sh), gifRendition(full.url, fw, fh));
+    }
+    return { results, next: data.next || null };
+  }
+
+  async function gifSettings() {
+    const { data, error } = await client.from("scrapbook_settings").select("gif_provider, gif_api_key").maybeSingle();
+    if (error) {
+      const missing = ["PGRST205", "42P01"].includes(error.code);
+      throw new ApiError(500, missing ? "GIF search needs supabase/07_gif_search.sql to be run first." : error.message);
+    }
+    return data && data.gif_provider && data.gif_api_key ? { provider: data.gif_provider, key: data.gif_api_key } : null;
+  }
+
+  async function gifConfig() {
+    const settings = await gifSettings();
+    return settings ? { configured: true, provider: settings.provider, source: "app" } : GIF_SEARCH_OFF;
+  }
+
+  // The key is tried with a one-result search before it's saved.
+  async function saveGifConfig(body) {
+    const f = modelFields(body, { provider: "text", key: "text" });
+    if (!has(GIF_PROVIDERS, f.provider)) throw fieldError("provider");
+    if (typeof f.key !== "string" || f.key.length < 8 || f.key.length > 200) throw fieldError("key");
+    const key = f.key.trim();
+    try {
+      await fetchGifs(f.provider, key, "", "gifs", "", 1);
+    } catch (err) {
+      if (!(err instanceof GifServiceError)) throw err;
+      if ([400, 401, 403].includes(err.status)) throw new ApiError(400, `${GIF_PROVIDERS[f.provider]} rejected that key`);
+      throw new ApiError(502, "GIF service unavailable");
+    }
+    await run(client.from("scrapbook_settings")
+      .upsert({ user_id: session.user.id, gif_provider: f.provider, gif_api_key: key }, { onConflict: "user_id" }));
+    return { configured: true, provider: f.provider, source: "app" };
+  }
+
+  async function clearGifConfig() {
+    await run(client.from("scrapbook_settings").delete().eq("user_id", session.user.id));
+    return GIF_SEARCH_OFF;
+  }
+
+  async function searchGifs(query) {
+    const settings = await gifSettings();
+    if (!settings) throw new ApiError(503, "not_configured");
+    let limit = 24;
+    if (query.has("limit")) {
+      limit = strictInt(query.get("limit"));
+      if (limit === null) throw fieldError("limit");
+    }
+    const kind = query.get("kind") === "stickers" ? "stickers" : "gifs";
+    const q = clip(text(query.get("q")), 100);
+    const pos = clip(text(query.get("pos")), 200);
+    try {
+      return await fetchGifs(settings.provider, settings.key, q, kind, pos, Math.max(1, Math.min(limit, 50)));
+    } catch (err) {
+      if (!(err instanceof GifServiceError)) throw err;
+      if (!err.status) throw new ApiError(502, "GIF service unavailable");
+      throw new ApiError([401, 403].includes(err.status) ? 401 : 502, "GIF service error");
+    }
+  }
+
+  // Stand-in for the local server's media proxy. GIPHY and Tenor send CORS headers, so
+  // the static site reads their GIFs directly; this only catches stray proxied URLs.
+  async function gifMedia(raw) {
+    let url = null;
+    try {
+      url = new URL(raw || "");
+    } catch (_) {}
+    if (!url || url.protocol !== "https:" || !GIF_MEDIA_HOSTS.test(url.hostname)) {
+      return jsonResponse(400, { detail: "Host not allowed" });
+    }
+    try {
+      const res = await nativeFetch(url.href);
+      if (res.ok) return res;
+    } catch (_) {}
+    return jsonResponse(502, { detail: "Couldn't fetch GIF" });
   }
 
   /* ---------- Vault (shelves, stacks, notebooks, chapters, lines) ---------- */
@@ -5594,7 +5752,10 @@
       pattern: /^\/api\/scrapbook\/palettes\/(\d+)$/,
       handle: (m) => deleteScrapbookRow("scrapbook_palettes", Number(m[1]), "Palette not found"),
     },
-    { methods: ["GET"], pattern: /^\/api\/scrapbook\/gifs\/config$/, signedOut: GIF_SEARCH_OFF, handle: () => GIF_SEARCH_OFF },
+    { methods: ["GET"], pattern: /^\/api\/scrapbook\/gifs\/config$/, signedOut: GIF_SEARCH_OFF, handle: () => gifConfig() },
+    { methods: ["PUT"], pattern: /^\/api\/scrapbook\/gifs\/config$/, handle: (m, body) => saveGifConfig(body) },
+    { methods: ["DELETE"], pattern: /^\/api\/scrapbook\/gifs\/config$/, handle: () => clearGifConfig() },
+    { methods: ["GET"], pattern: /^\/api\/scrapbook\/gifs\/search$/, handle: (m, body, query) => searchGifs(query) },
     { methods: ["GET"], pattern: /^\/api\/vault\/shelves$/, handle: () => listVaultShelves() },
     {
       methods: ["POST"],
@@ -5763,6 +5924,7 @@
   window.fetch = async function ficusFetch(input, init) {
     const request = describeRequest(input, init);
     if (!request || (await hasLocalBackend())) return nativeFetch(input, init);
+    if (request.method === "GET" && request.path === "/api/scrapbook/gifs/proxy") return gifMedia(request.query.get("url"));
 
     for (const route of ROUTES) {
       if (!route.methods.includes(request.method)) continue;

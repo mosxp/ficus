@@ -5897,6 +5897,11 @@
 
     /* ---------- GIF picker: cloud search, uploads, My GIFs ---------- */
 
+    /** The static site (ficus_cloud.js) has no proxy; GIPHY and Tenor media allow cross-origin reads there. */
+    _gifProxy() {
+      return window.FICUS_DIRECT_GIFS ? null : this.gifProxyUrl;
+    }
+
     _gifProviderName(provider) {
       return (provider || gifService.provider) === "tenor" ? "Tenor" : "GIPHY";
     }
@@ -5966,7 +5971,8 @@
       const chip = (id, text) =>
         '<button type="button" class="sb-stk-chip' + (p === id ? " is-active" : "") + '" data-sb-gif-provider="' + id + '">' + text + "</button>";
       return '<div class="sb-gif-setup"><h4>Connect a GIF library</h4>' +
-        "<p>Searching GIFs needs a free API key from " + link + ". Paste it once and it’s saved for this app. Uploads under My GIFs work without it.</p>" +
+        "<p>Searching GIFs needs a free API key from " + link + ". Paste it once and it’s saved for this app." +
+        (window.FICUS_DIRECT_GIFS ? "" : " Uploads under My GIFs work without it.") + "</p>" +
         '<div class="sb-stk-chips">' + chip("giphy", "GIPHY") + chip("tenor", "Tenor") + "</div>" +
         '<input class="sb-stk-field" data-sb-gif-key value="' + escapeHtml(s.keyDraft) + '" placeholder="Paste your ' + label + ' API key" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" aria-label="' + label + ' API key" />' +
         (s.keyError ? '<p class="sb-gif-error">' + escapeHtml(s.keyError) + "</p>" : "") +
@@ -6145,7 +6151,7 @@
         s.error = "";
         if (s.tab === "mine") s.tab = "gifs";
       } catch (err) {
-        s.keyError = err && err.message && !/fetch/i.test(err.message) ? err.message : "Couldn’t check the key. Is the server running?";
+        s.keyError = err && err.message && !/fetch/i.test(err.message) ? err.message : "Couldn’t check the key. Check your connection and try again.";
       } finally {
         s.savingKey = false;
         if (this._popKind === "gifs") this._openPopover("gifs");
@@ -6811,15 +6817,15 @@
       let img = this._imageCache.get(o.id);
       if (!img || img.__src !== o.src) {
         img = new Image();
-        if (!gif) img.crossOrigin = "anonymous";
+        if (!gif || !this._gifProxy()) img.crossOrigin = "anonymous";
         img.__src = o.src;
         img.onload = () => this._scheduleRedraw();
-        img.src = gif ? gifFetchUrl(o.src, this.gifProxyUrl) : o.src;
+        img.src = gif ? gifFetchUrl(o.src, this._gifProxy()) : o.src;
         this._imageCache.set(o.id, img);
       }
       let source = img.complete && img.naturalWidth ? img : null;
       if (gif) {
-        const anim = gifAnimation(o.src, this.gifProxyUrl, this._redrawCallback());
+        const anim = gifAnimation(o.src, this._gifProxy(), this._redrawCallback());
         if (anim.status === "ready") {
           const frame = gifFrameAt(anim, performance.now());
           source = frame.canvas;
