@@ -10,7 +10,8 @@
  * Project page (binders and their ship dates), Vision boards and their
  * scrapbook libraries (with GIPHY/Tenor GIF search), the Vault (notebooks, shelves and references), the
  * Legacy page, and /api/upload, which stores files in the Supabase Storage
- * bucket `uploads`.
+ * bucket `uploads`. /api/link-preview (titles and thumbnails for shared links)
+ * is answered here in both modes.
  */
 (function () {
   "use strict";
@@ -440,6 +441,73 @@
     await requireSpark(id);
     await run(client.from("sparks").delete().eq("id", id));
     return { ok: true, id };
+  }
+
+  /* ---------- Link previews (for links shared or pasted into a fig) ---------- */
+
+  // Answered here even when the local server is running. YouTube, TikTok and Vimeo serve oEmbed
+  // with CORS; anything else goes through Microlink's free tier (about 25 lookups a day per
+  // visitor). Instagram and Facebook block every free lookup, so those keep their shared title.
+  const LINK_PREVIEW_SKIP = /(^|\.)(instagram\.com|facebook\.com|fb\.com|fb\.watch|threads\.net)$/;
+  const LINK_PREVIEW_OEMBED = [
+    [/(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$/, "https://www.youtube.com/oembed?format=json&url="],
+    [/(^|\.)tiktok\.com$/, "https://www.tiktok.com/oembed?url="],
+    [/(^|\.)vimeo\.com$/, "https://vimeo.com/api/oembed.json?url="],
+  ];
+  const LINK_PREVIEW_TIMEOUT_MS = 8000;
+
+  async function previewJson(url) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), LINK_PREVIEW_TIMEOUT_MS);
+    try {
+      const res = await nativeFetch(url, { signal: controller.signal });
+      return res.ok ? await res.json() : null;
+    } catch (_) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function httpsUrl(value) {
+    const url = text(value);
+    return /^https:\/\//i.test(url) ? clip(url, 2000) : "";
+  }
+
+  // Always 200 with whatever was found; empty strings mean "no preview".
+  async function linkPreview(raw) {
+    let url = null;
+    try {
+      url = new URL(text(raw));
+    } catch (_) {}
+    if (!url || !["http:", "https:"].includes(url.protocol)) {
+      return jsonResponse(422, { detail: "A full http(s) link is required" });
+    }
+    const host = url.hostname.toLowerCase();
+    const preview = { url: url.href, title: "", description: "", image: "", site: "", author: "" };
+    if (LINK_PREVIEW_SKIP.test(host)) return jsonResponse(200, preview);
+
+    const oembed = LINK_PREVIEW_OEMBED.find(([pattern]) => pattern.test(host));
+    const embed = oembed ? await previewJson(oembed[1] + encodeURIComponent(url.href)) : null;
+    if (text(embed?.title)) {
+      return jsonResponse(200, {
+        ...preview,
+        title: clip(text(embed.title), 300),
+        image: httpsUrl(embed.thumbnail_url),
+        site: clip(text(embed.provider_name), 80),
+        author: clip(text(embed.author_name), 120),
+      });
+    }
+    const found = await previewJson(`https://api.microlink.io/?url=${encodeURIComponent(url.href)}`);
+    const meta = found?.status === "success" && isPlainObject(found.data) ? found.data : {};
+    return jsonResponse(200, {
+      ...preview,
+      title: clip(text(meta.title), 300),
+      description: clip(text(meta.description), 500),
+      image: httpsUrl(meta.image?.url),
+      site: clip(text(meta.publisher), 80),
+      author: clip(text(meta.author), 120),
+    });
   }
 
   /* ---------- Tags ---------- */
@@ -5923,7 +5991,9 @@
 
   window.fetch = async function ficusFetch(input, init) {
     const request = describeRequest(input, init);
-    if (!request || (await hasLocalBackend())) return nativeFetch(input, init);
+    if (!request) return nativeFetch(input, init);
+    if (request.method === "GET" && request.path === "/api/link-preview") return linkPreview(request.query.get("url"));
+    if (await hasLocalBackend()) return nativeFetch(input, init);
     if (request.method === "GET" && request.path === "/api/scrapbook/gifs/proxy") return gifMedia(request.query.get("url"));
 
     for (const route of ROUTES) {

@@ -4,6 +4,10 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>FICUS</title>
+    <link rel="manifest" href="manifest.json" />
+    <meta name="theme-color" content="#FBF7F0" />
+    <link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png" />
+    <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Emoji:wght@400..700&display=swap" />
@@ -37,7 +41,7 @@
       };
     </script>
     <!-- Bump ?v= whenever ficus_cloud.js changes so browsers never pair it with a different index.html. -->
-    <script src="ficus_cloud.js?v=7"></script>
+    <script src="ficus_cloud.js?v=8"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -867,6 +871,9 @@
       .fig-ripe-sheet .fig-sheet-submit:focus-visible { outline: none; box-shadow: 0 0 0 3px #fff, 0 0 0 5px #1c1736; }
       .fig-ripe-sheet .fig-sheet-submit:active { transform: scale(0.98); }
       .fig-ripe-sheet #form-error { border-radius: 0.75rem; background: #fff; padding: 0.4rem 0.75rem; color: #be123c; }
+      .fig-ripe-sheet .fig-sheet-hint { color: rgb(28 23 54 / 0.62); }
+      .fig-ripe-sheet .fig-sheet-hint kbd { border-radius: 0.3rem; background: rgb(255 255 255 / 0.75); padding: 0 0.3rem; font: inherit; font-weight: 600; color: #1c1736; box-shadow: inset 0 0 0 1px rgb(28 23 54 / 0.12); }
+      .fig-ripe-sheet #ficus-bookmarklet { display: inline-block; cursor: grab; border-radius: 0.5rem; background: #fff; padding: 0 0.4rem; font-weight: 700; color: #1c1736; box-shadow: inset 0 0 0 1px rgb(28 23 54 / 0.2); }
       .jot-route-seg { display: flex; gap: 0.25rem; margin-bottom: 1rem; border: 1px solid #1c1917; border-radius: 1rem; padding: 0.25rem; }
       .jot-route-seg button { flex: 1 1 0; min-height: 2.75rem; border-radius: 0.75rem; font-size: 0.9rem; font-weight: 700; color: #57534e; }
       .jot-route-seg button.is-on { background: #1c1917; color: #fff; }
@@ -4288,6 +4295,10 @@
             </div>
             <div id="capture-spark-blocks" class="space-y-1.5 empty:hidden"></div>
           </div>
+          <p class="fig-sheet-hint mb-3 hidden text-[11px] leading-relaxed sm:block">
+            Copied a link? Press <kbd>Ctrl</kbd>+<kbd>V</kbd> anywhere in FICUS to pick it as a fig. To save any page in one click, drag
+            <a id="ficus-bookmarklet" href="#" title="Drag me to your bookmarks bar">+ FICUS</a> to your bookmarks bar.
+          </p>
           <p id="form-error" class="mb-2 hidden text-sm font-medium text-rose-600"></p>
           <button
             type="button"
@@ -25227,12 +25238,14 @@
         intent_hint: null,
         is_highlighted: false,
         blocks: [],
+        source_type: null,
       };
       function resetCaptureSparkDraft() {
         captureSparkDraft = {
           intent_hint: null,
           is_highlighted: false,
           blocks: [],
+          source_type: null,
         };
       }
       function newBlockId() {
@@ -25992,7 +26005,7 @@
             </div>`;
           return `<div class="relative mt-2.5 w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white p-2.5 text-left shadow-xs hover:border-slate-300" ${ublockMetaAttrs(block, opts)} data-ublock-state="display" data-ublock-link-layout="card">
             ${header}
-            ${preview ? `<img src="${escapeHtml(preview)}" alt="" class="mb-2 h-28 w-full rounded-xl object-cover" />` : ""}
+            ${preview ? `<img src="${escapeHtml(preview)}" alt="" referrerpolicy="no-referrer" onerror="this.remove()" class="mb-2 h-28 w-full rounded-xl object-cover" />` : ""}
             <div class="flex items-center gap-2 ${opts.hideTypeBadge && !preview ? "pr-8" : ""}">
               ${favicon ? `<img src="${escapeHtml(favicon)}" alt="" class="h-5 w-5 rounded" />` : `<span class="font-mono text-sm text-slate-500" aria-hidden="true">${blockTypeSymbol("link")}</span>`}
               <div class="min-w-0 flex-1">
@@ -28663,6 +28676,199 @@
         }
       }
       window.focusQuickSparkCapture = focusQuickSparkCapture;
+
+      /* ── Link capture: share sheet, iOS Shortcut, bookmarklet and paste all land in "Pick a fig" ── */
+      // manifest.json's share_target, the bookmarklet and the iOS Shortcut all open
+      // /?share_url=…&share_title=…&share_text=… (share_via names the bookmarklet or Shortcut).
+      const SHARE_QUERY_KEYS = ["share_url", "share_title", "share_text", "share_via"];
+      const SHARE_SOURCES = ["bookmarklet", "shortcut"];
+      const LINK_TRACKING_PARAMS = ["fbclid", "gclid", "igsh", "igshid", "mibextid"];
+      const PENDING_FIG_KEY = "ficus_pending_fig";
+      function cleanSharedUrl(raw) {
+        let url;
+        try { url = new URL(String(raw || "").trim()); } catch (_) { return ""; }
+        if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+        const host = url.hostname.replace(/^www\./, "").toLowerCase();
+        const dropSi = /(^|\.)(youtube\.com|youtu\.be|spotify\.com)$/.test(host);
+        [...url.searchParams.keys()].forEach((key) => {
+          const lower = key.toLowerCase();
+          if (lower.startsWith("utm_") || LINK_TRACKING_PARAMS.includes(lower) || (dropSi && lower === "si")) url.searchParams.delete(key);
+        });
+        return url.href;
+      }
+      function firstUrlIn(value) {
+        const match = String(value || "").match(/https?:\/\/[^\s<>"']+/i);
+        return match ? match[0].replace(/[),.;:!?]+$/, "") : "";
+      }
+      function withoutUrls(value) {
+        return String(value || "").replace(/https?:\/\/[^\s<>"']+/gi, " ").replace(/\s+/g, " ").trim();
+      }
+      // Apps disagree on where the link goes: some send url, others bury it in text or title.
+      function sharedLinkFromParams(params) {
+        const fields = ["share_url", "share_text", "share_title"].map((key) => String(params.get(key) || "").trim());
+        let url = "";
+        for (const field of fields) {
+          url = cleanSharedUrl(field) || cleanSharedUrl(firstUrlIn(field));
+          if (url) break;
+        }
+        const [, text, title] = fields;
+        const label = [title, withoutUrls(text), withoutUrls(fields[0])].find(Boolean) || "";
+        if (!url && !label) return null;
+        const via = String(params.get("share_via") || "").toLowerCase();
+        return { url, title: label.slice(0, 200), source: SHARE_SOURCES.includes(via) ? via : "share" };
+      }
+      function takeShareFromLocation() {
+        const params = new URLSearchParams(window.location.search);
+        if (!SHARE_QUERY_KEYS.some((key) => params.has(key))) return null;
+        const shared = sharedLinkFromParams(params);
+        SHARE_QUERY_KEYS.forEach((key) => params.delete(key));
+        const rest = params.toString();
+        history.replaceState(history.state, "", `${window.location.pathname}${rest ? `?${rest}` : ""}${window.location.hash}`);
+        return shared;
+      }
+      function newLinkBlock(url, title = "") {
+        return { id: newBlockId(), type: "link", url, title, display_mode: "compact", preview_image: "", description: "", preview: null };
+      }
+      function linkCaptureDraft({ url, title = "", source = null }) {
+        const label = String(title || "").trim();
+        return {
+          title: label || (url ? linkDomainLabel(url) : ""),
+          blocks: url ? [newLinkBlock(url, label)] : [],
+          source_type: source,
+        };
+      }
+      // Fills the link's title, description and thumbnail; the fig title follows unless the user retyped it.
+      async function fillLinkPreview(blockId, provisionalTitle) {
+        const block = captureSparkDraft.blocks.find((row) => row.id === blockId);
+        if (!block || block.preview) return;
+        let preview = null;
+        try {
+          const res = await fetch(`/api/link-preview?url=${encodeURIComponent(block.url)}`);
+          if (res.ok) preview = await res.json();
+        } catch (_) {}
+        const live = captureSparkDraft.blocks.find((row) => row.id === blockId);
+        if (!live || !preview) return;
+        const title = String(preview.title || "").trim();
+        const image = String(preview.image || "").trim();
+        const description = String(preview.description || preview.author || "").trim();
+        if (!title && !image && !description) return;
+        live.preview = { title, description, image, site: String(preview.site || ""), author: String(preview.author || "") };
+        if (title && (!live.title || live.title === linkDomainLabel(live.url) || live.title === provisionalTitle)) live.title = title;
+        if (description && !live.description) live.description = description;
+        if (image && !live.preview_image) {
+          live.preview_image = image;
+          live.display_mode = "card";
+        }
+        renderCaptureBlocksList();
+        const input = document.getElementById("capture-spark-input");
+        const typed = String(input?.innerText || "").trim();
+        if (title && input && (!typed || typed === provisionalTitle)) {
+          hydrateCapsuleEditor(input, { title, entities: [], tags: [] });
+        }
+      }
+      function openCaptureWithDraft(draft) {
+        openCapture();
+        captureSparkDraft.intent_hint = draft.intent_hint || null;
+        captureSparkDraft.source_type = draft.source_type || null;
+        captureSparkDraft.blocks = normalizeSparkBlocks(draft.blocks || []);
+        const title = String(draft.title || "");
+        if (title) hydrateCapsuleEditor(document.getElementById("capture-spark-input"), { title, entities: [], tags: [] });
+        paintCaptureIntent();
+        renderCaptureBlocksList();
+        captureSparkDraft.blocks
+          .filter((block) => block.type === "link" && !block.preview)
+          .forEach((block) => { void fillLinkPreview(block.id, title); });
+      }
+      function openLinkCapture(link) {
+        openCaptureWithDraft(linkCaptureDraft(link));
+      }
+      window.ficusOpenLinkCapture = openLinkCapture;
+      // Google sign-in leaves the page, so an open "Pick a fig" sheet is parked in sessionStorage.
+      function stashPendingFig(draft) {
+        try { sessionStorage.setItem(PENDING_FIG_KEY, JSON.stringify(draft)); } catch (_) {}
+      }
+      window.ficusStashCaptureDraft = () => {
+        if (document.getElementById("capture-spark-modal")?.classList.contains("hidden") || editingSparkId) return;
+        const title = String(document.getElementById("capture-spark-input")?.innerText || "").trim();
+        const blocks = (captureSparkDraft.blocks || []).filter((block) => block.type === "link");
+        if (!title && !blocks.length) return;
+        stashPendingFig({ title, blocks, intent_hint: captureSparkDraft.intent_hint, source_type: captureSparkDraft.source_type });
+      };
+      let captureRestoreReady = false;
+      window.ficusRestoreCaptureDraft = () => {
+        if (!captureRestoreReady) return;
+        let raw = "";
+        try {
+          raw = sessionStorage.getItem(PENDING_FIG_KEY) || "";
+          sessionStorage.removeItem(PENDING_FIG_KEY);
+        } catch (_) {}
+        if (!raw) return;
+        let draft;
+        try { draft = JSON.parse(raw); } catch (_) { draft = { title: raw }; }
+        if (!draft || typeof draft !== "object") draft = { title: String(raw) };
+        openCaptureWithDraft(draft);
+      };
+      // Startup view switches close every overlay, so wait for the first load and the auth check.
+      function enableCaptureRestore() {
+        const ready = () => {
+          captureRestoreReady = true;
+          window.ficusRestoreCaptureDraft();
+        };
+        if (!document.body.classList.contains("ficus-auth-pending")) {
+          ready();
+          return;
+        }
+        const observer = new MutationObserver(() => {
+          if (document.body.classList.contains("ficus-auth-pending")) return;
+          observer.disconnect();
+          ready();
+        });
+        observer.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+      }
+      {
+        const shared = takeShareFromLocation();
+        if (shared) stashPendingFig(linkCaptureDraft(shared));
+      }
+      // Ctrl+V / Cmd+V with a copied link anywhere outside a text field opens a link fig.
+      document.addEventListener("paste", (event) => {
+        if (event.defaultPrevented || isEditableKeyTarget(event.target) || document.querySelector(".overlay.is-open")) return;
+        const raw = String(event.clipboardData?.getData("text/plain") || "").trim();
+        const url = /\s/.test(raw) ? "" : cleanSharedUrl(raw);
+        if (!url) return;
+        event.preventDefault();
+        openLinkCapture({ url, source: "paste" });
+      });
+      // Pasting a bare link into the fig title attaches it as a link block instead.
+      document.getElementById("spark-form")?.addEventListener("paste", (event) => {
+        if (!event.target.closest?.("#capture-spark-input")) return;
+        const raw = String(event.clipboardData?.getData("text/plain") || "").trim();
+        const url = /\s/.test(raw) ? "" : cleanSharedUrl(raw);
+        if (!url) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const block = newLinkBlock(url);
+        captureSparkDraft.blocks.push(block);
+        if (!captureSparkDraft.source_type) captureSparkDraft.source_type = "paste";
+        const input = document.getElementById("capture-spark-input");
+        let provisional = String(input?.innerText || "").trim();
+        if (!provisional && input) {
+          provisional = linkDomainLabel(url);
+          hydrateCapsuleEditor(input, { title: provisional, entities: [], tags: [] });
+        }
+        renderCaptureBlocksList();
+        void fillLinkPreview(block.id, provisional);
+      }, true);
+      {
+        const bookmarklet = document.getElementById("ficus-bookmarklet");
+        if (bookmarklet) {
+          const base = `${window.location.origin}${window.location.pathname}`;
+          bookmarklet.href = `javascript:(()=>{window.open('${base}?share_via=bookmarklet&share_url='+encodeURIComponent(location.href)+'&share_title='+encodeURIComponent(document.title),'_blank')})()`;
+          bookmarklet.addEventListener("click", (event) => {
+            event.preventDefault();
+            showAppToast("Drag “+ FICUS” to your bookmarks bar, then click it on any page to save that page as a fig.");
+          });
+        }
+      }
       function paintSparkSheetPreview(item) {
         const titleEl = document.getElementById("spark-sheet-title");
         const bodyEl = document.getElementById("spark-sheet-body");
@@ -33387,6 +33593,7 @@
           title,
           raw_content: title,
           source_url: firstLink?.url || null,
+          source_type: captureSparkDraft.source_type || null,
           topic_tag: tags[0] || null,
           tags,
           entities,
@@ -40832,7 +41039,7 @@
             empty.classList.remove("hidden");
             empty.textContent = "Could not load Sparks. Is the server running?";
           }
-        });
+        }).finally(enableCaptureRestore);
       }
       if (document.readyState === "loading") {
         document.addEventListener("DOMContentLoaded", bootSparksApp);
@@ -40847,7 +41054,6 @@
         const avatar = document.getElementById("auth-user-avatar");
         const nameEl = document.getElementById("auth-user-name");
         const signOutBtn = document.getElementById("auth-signout-btn");
-        const PENDING_FIG_KEY = "ficus_pending_fig";
         window.ficusAuthUser = null;
         const client = window.ficusSupabase;
         // Only the static site needs a signed-in user; the local server keeps working without one.
@@ -40889,17 +41095,6 @@
           return;
         }
 
-        function restorePendingFig() {
-          let draft = "";
-          try {
-            draft = sessionStorage.getItem(PENDING_FIG_KEY) || "";
-            sessionStorage.removeItem(PENDING_FIG_KEY);
-          } catch (_) {}
-          if (!draft || typeof openCaptureSparkModal !== "function") return;
-          openCaptureSparkModal();
-          hydrateCapsuleEditor(document.getElementById("capture-spark-input"), { title: draft, entities: [], tags: [] });
-        }
-
         function paintAuth(session) {
           const user = session?.user || null;
           window.ficusAuthUser = user;
@@ -40912,7 +41107,7 @@
             chip.title = "";
             return;
           }
-          restorePendingFig();
+          window.ficusRestoreCaptureDraft?.();
           const meta = user.user_metadata || {};
           const label = meta.full_name || meta.name || user.email || "Signed in";
           const initial = label.charAt(0).toUpperCase();
@@ -40932,11 +41127,7 @@
         }
 
         async function signInWithGoogle(button) {
-          const modalOpen = !document.getElementById("capture-spark-modal")?.classList.contains("hidden");
-          const draft = modalOpen ? String(document.getElementById("capture-spark-input")?.innerText || "").trim() : "";
-          try {
-            if (draft) sessionStorage.setItem(PENDING_FIG_KEY, draft);
-          } catch (_) {}
+          window.ficusStashCaptureDraft?.();
           button.disabled = true;
           const { error } = await client.auth.signInWithOAuth({
             provider: "google",
