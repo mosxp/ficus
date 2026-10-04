@@ -86,6 +86,44 @@ create trigger project_lines_touch_updated_at
 
 -- Row Level Security: each signed-in user can only see and change their own
 -- rows, and can only attach sections and lines to a project they own.
+-- A policy on project_sections can't select from project_sections (Postgres reports
+-- infinite recursion), so ownership checks go through security-definer helpers.
+create schema if not exists private;
+grant usage on schema private to authenticated;
+
+create or replace function private.owns_project(p_project_id bigint)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select exists (
+    select 1 from public.projects p
+    where p.id = p_project_id and p.user_id = (select auth.uid())
+  );
+$$;
+
+create or replace function private.owns_project_section(p_section_id bigint, p_project_id bigint)
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select exists (
+    select 1 from public.project_sections s
+    where s.id = p_section_id
+      and s.project_id = p_project_id
+      and s.user_id = (select auth.uid())
+  );
+$$;
+
+revoke all on function private.owns_project(bigint) from public;
+revoke all on function private.owns_project_section(bigint, bigint) from public;
+grant execute on function private.owns_project(bigint) to authenticated;
+grant execute on function private.owns_project_section(bigint, bigint) to authenticated;
+
 alter table public.projects enable row level security;
 alter table public.project_sections enable row level security;
 alter table public.project_lines enable row level security;
@@ -106,17 +144,8 @@ create policy "Users manage their own project sections"
   using ((select auth.uid()) = user_id)
   with check (
     (select auth.uid()) = user_id
-    and exists (
-      select 1 from public.projects p
-      where p.id = project_id and p.user_id = (select auth.uid())
-    )
-    and (
-      parent_id is null
-      or exists (
-        select 1 from public.project_sections s
-        where s.id = parent_id and s.user_id = (select auth.uid())
-      )
-    )
+    and private.owns_project(project_id)
+    and (parent_id is null or private.owns_project_section(parent_id, project_id))
   );
 
 drop policy if exists "Users manage their own project lines" on public.project_lines;

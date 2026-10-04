@@ -92,7 +92,12 @@
 
   async function run(query) {
     const { data, error } = await query;
-    if (error) throw new ApiError(500, error.message || "Cloud request failed");
+    if (error) {
+      if (error.code === "42P17" && /project_sections/.test(error.message || "")) {
+        throw new ApiError(500, "Project sections can't be saved until supabase/08_project_section_policies.sql is run in Supabase.");
+      }
+      throw new ApiError(500, error.message || "Cloud request failed");
+    }
     return data;
   }
 
@@ -3329,7 +3334,13 @@
     if (!name) throw new ApiError(400, "Project title is required");
     const row = await run(client.from("projects").insert({ title: name, description: text(description) })
       .select("id").single());
-    await run(client.from("project_sections").insert({ project_id: row.id, section_index: 1, title: "Section 1" }));
+    // database.py adds the project and its first section in one transaction; undo the project if the section fails.
+    try {
+      await run(client.from("project_sections").insert({ project_id: row.id, section_index: 1, title: "Section 1" }));
+    } catch (err) {
+      await client.from("projects").delete().eq("id", row.id);
+      throw err;
+    }
     return getBinderProject(row.id);
   }
 

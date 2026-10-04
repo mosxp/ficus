@@ -43,7 +43,7 @@
       };
     </script>
     <!-- Bump ?v= whenever ficus_cloud.js changes so browsers never pair it with a different index.html. -->
-    <script src="ficus_cloud.js?v=8"></script>
+    <script src="ficus_cloud.js?v=9"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -17411,7 +17411,11 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({}),
         });
-        if (!res.ok) return;
+        if (!res.ok) {
+          const detail = await res.json().catch(() => ({}));
+          showAppToast(detail.detail || "Couldn't add a section. Please try again.");
+          return;
+        }
         const section = await res.json();
         binderActiveSectionId = section.id;
         binderEdgeMode = "section";
