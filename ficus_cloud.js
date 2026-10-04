@@ -5,13 +5,14 @@
  * routes mirror main.py / database.py so the rest of index.html is unchanged.
  * With the local server running, every request passes straight through.
  *
- * Ported so far: Figs (inbox sparks), tags, and Trackers (habits).
+ * Ported so far: Figs (inbox sparks), tags, Trackers (habits), and the Log and
+ * Time pages (tasks, events and log entries, plus checklist templates).
  */
 (function () {
   "use strict";
 
   // Pages whose data lives in Supabase; index.html locks the other nav tabs on the static site.
-  window.FICUS_ONLINE_VIEWS = ["cover", "sparks", "habits"];
+  window.FICUS_ONLINE_VIEWS = ["cover", "sparks", "habits", "today", "tasks"];
 
   const config = window.FICUS_SUPABASE_CONFIG || {};
   const nativeFetch = window.fetch.bind(window);
@@ -82,6 +83,18 @@
     const { data, error } = await query;
     if (error) throw new ApiError(500, error.message || "Cloud request failed");
     return data;
+  }
+
+  // Supabase returns at most 1000 rows per select, so long lists are read in pages.
+  // `build` must apply a stable order (e.g. by id) so pages don't overlap.
+  const PAGE_SIZE = 1000;
+  async function selectAll(build) {
+    const rows = [];
+    for (let from = 0; ; from += PAGE_SIZE) {
+      const page = await run(build().range(from, from + PAGE_SIZE - 1));
+      rows.push(...page);
+      if (page.length < PAGE_SIZE) return rows;
+    }
   }
 
   /* ---------- Normalizers (ported from database.py) ---------- */
@@ -217,6 +230,7 @@
     data.pos_x = intOr(row.pos_x, 100);
     data.pos_y = intOr(row.pos_y, 100);
     if (itemType === "habit") return serializeHabitFields(data, row);
+    if (itemType === "task") return serializeTaskFields(data, row);
     if (itemType !== "spark") return data;
 
     data.color_theme = text(row.color_theme || "beige").toLowerCase() || "beige";
@@ -1358,49 +1372,54 @@
     return out;
   }
 
-  // Check-ins also write the day's Log entry so it is already there when the Log page moves online.
+  // Check-ins also write (or refresh) that day's Log entry and hand it back to the page.
   async function recordHabitLogEntry(habitId, key, habit, entry) {
     const [summary, notesHtml] = habitCheckInSummary(habit, entry);
     const title = clip(`:: Habit — ${habit.title || "Habit"}: ${summary}`, 240);
     const plain = stripTags(notesHtml);
     const report = habitTrackerBlock(habitId, key, habit, entry);
-    const candidates = await run(client.from("sparks").select("id, extra_data")
+    const candidates = await run(client.from("sparks").select("*")
       .eq("item_type", "task").eq("entry_type", "log").eq("due_date", key)
-      .eq("extra_data->>habit_id", String(habitId)));
+      .eq("extra_data->>habit_id", String(habitId)).order("id"));
     const existing = candidates.find((row) => String(row.extra_data?.habit_log_date || key) === key);
+    let row;
     if (existing) {
-      const taskExtra = withTrackerReport(isPlainObject(existing.extra_data) ? existing.extra_data : {}, report);
-      await run(client.from("sparks").update({
+      const taskExtra = normalizeTaskExtra(withTrackerReport(parseExtra(existing.extra_data), report));
+      row = await run(client.from("sparks").update({
         title, raw_content: plain, notes: taskExtra.notes || null, extra_data: taskExtra,
-      }).eq("id", existing.id));
-      return;
-    }
-    await run(client.from("sparks").insert({
-      title,
-      raw_content: plain,
-      status: "in_cloud",
-      item_type: "task",
-      is_done: 0,
-      assignee: "Me",
-      extra_data: {
+      }).eq("id", existing.id).select("*").single());
+    } else {
+      const taskExtra = normalizeTaskExtra({
         blocks: [report],
-        migration_history: [{ action: "created", type: "log", timestamp: localHhmm() }],
+        migration_history: birthHistory("log"),
         habit_id: habitId,
         habit_log_date: key,
-      },
-      due_date: key,
-      end_date: key,
-      notes: null,
-      is_routine: 0,
-      recurrence_days: "[]",
-      task_status: "pending",
-      postponed_count: 0,
-      is_parked: 0,
-      entry_type: "log",
-      is_theme_of_day: 0,
-      is_all_day: 0,
-      is_multiday: 0,
-    }));
+      });
+      row = await run(client.from("sparks").insert({
+        title,
+        raw_content: plain,
+        status: "in_cloud",
+        item_type: "task",
+        is_done: 0,
+        assignee: "Me",
+        extra_data: taskExtra,
+        due_date: key,
+        end_date: key,
+        notes: taskExtra.notes || null,
+        is_routine: 0,
+        recurrence_days: "[]",
+        task_status: "pending",
+        postponed_count: 0,
+        is_parked: 0,
+        entry_type: "log",
+        is_theme_of_day: 0,
+        is_all_day: 0,
+        is_multiday: 0,
+      }).select("*").single());
+    }
+    const logEntry = serializeSpark(row);
+    logEntry.start_date = logEntry.start_date || key;
+    return logEntry;
   }
 
   async function checkInHabit(id, body) {
@@ -1410,13 +1429,1359 @@
     const completed = given(submission.completed) ? Boolean(submission.completed) : true;
     const habit = await logHabit(id, key, completed, submission.value, submission.values, submission);
     const entry = (habit.extra_data.history || {})[key] || {};
+    let logEntry = null;
     try {
-      await recordHabitLogEntry(id, key, habit, entry);
+      logEntry = await recordHabitLogEntry(id, key, habit, entry);
     } catch (err) {
       console.warn("Tracker check-in saved, but its Log entry was not:", err?.message || err);
     }
-    // The Log page is still offline, so its entry isn't handed back to the open page yet.
-    return { habit, log_entry: null };
+    return { habit, log_entry: logEntry };
+  }
+
+  /* ---------- Log and Time (tasks, events, log entries) ---------- */
+
+  const ENTRY_TYPES = ["task", "event", "log"];
+  const EVENT_ACCENT_COLORS = ["sage", "cloud", "plum", "coral", "gold"];
+  const EVENT_DEFAULT_ACCENT = "plum";
+  const EVENT_ACCENT_ALIASES = {
+    lavender: "plum", violet: "plum", purple: "plum", sky: "cloud", blue: "cloud",
+    amber: "gold", yellow: "gold", rose: "coral", pink: "coral", mint: "sage", emerald: "sage",
+  };
+  const TASK_STATUSES = ["pending", "completed", "cannot_done", "postponed", "dropped"];
+  const DROP_REASON_LABELS = {
+    blocked: "Blocked by dependency",
+    materials: "Out of materials",
+    energy: "Energy / Time constraint",
+    deprioritized: "Deprioritized / No longer relevant",
+    custom: "Custom",
+  };
+  const DROP_REASON_ALIASES = {
+    "blocked by dependency": "blocked",
+    "out of materials": "materials",
+    "energy / time constraint": "energy",
+    "energy/time constraint": "energy",
+    "deprioritized / no longer relevant": "deprioritized",
+    "no longer relevant": "deprioritized",
+  };
+  const LOG_STATUSES = ["open", "scheduled", "migrated", "parked", "completed", "completed_early", "dropped", "attended", "canceled"];
+  const ACTIVE_SCHEDULE_LOG_STATUSES = ["scheduled", "open"];
+  const MEDIA_BLOCK_TYPES = ["file", "album", "audio", "video", "scrapboard"];
+  const NOTE_BLOCK_TYPES = ["note", "rich_note", "rich-note"];
+  const TRUE_FLAGS = [1, true, "1", "true"];
+  const WEEKDAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+
+  // Python truthiness: empty lists and objects are false.
+  function truthy(value) {
+    if (Array.isArray(value)) return value.length > 0;
+    if (isPlainObject(value)) return Object.keys(value).length > 0;
+    return Boolean(value);
+  }
+
+  function has(object, key) {
+    return Object.prototype.hasOwnProperty.call(object, key);
+  }
+
+  function present(value) {
+    return given(value) && value !== "";
+  }
+
+  // Python int(): whole numbers and integer strings; anything else is null.
+  function pyInt(value) {
+    if (typeof value === "boolean") return Number(value);
+    return strictInt(value);
+  }
+
+  function parseExtra(raw) {
+    if (isPlainObject(raw)) return raw;
+    if (typeof raw !== "string" || !raw) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      return isPlainObject(parsed) ? parsed : {};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  function compareText(a, b) {
+    return a < b ? -1 : a > b ? 1 : 0;
+  }
+
+  function parseStamp(value) {
+    const stamp = String(value ?? "").trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(stamp)) return new Date(`${stamp}T00:00:00`);
+    if (!/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/.test(stamp)) return null;
+    const date = new Date(stamp.replace(" ", "T"));
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  // Port of local_hhmm(): "HH:MM" passes through, timestamps become local wall-clock time.
+  function localHhmmOf(value) {
+    if (!given(value)) return localHhmm();
+    const stamp = String(value).trim();
+    if (/^\d{2}:\d{2}$/.test(stamp)) return stamp;
+    const parsed = parseStamp(stamp);
+    if (parsed) return hhmmOf(parsed);
+    const match = /(?<!\d)(\d{2}:\d{2})(?!\d)/.exec(stamp);
+    return match ? match[1] : localHhmm();
+  }
+
+  // The app reads created_at[:10] as the local calendar day, so task stamps are
+  // handed out in local time with their offset rather than as UTC.
+  function localIso(value) {
+    const date = parseStamp(value);
+    if (!date) return value ?? null;
+    const offset = -date.getTimezoneOffset();
+    const sign = offset >= 0 ? "+" : "-";
+    const abs = Math.abs(offset);
+    return `${dayKey(date)}T${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`
+      + `${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`;
+  }
+
+  // Client stamps such as "2026-10-04T09:00:00" are local wall-clock times.
+  function storedStamp(value) {
+    const date = parseStamp(value);
+    return (date || new Date()).toISOString();
+  }
+
+  function normalizeEntryType(value, fallback = "task") {
+    const raw = text(value).toLowerCase();
+    if (ENTRY_TYPES.includes(raw)) return raw;
+    return ENTRY_TYPES.includes(fallback) ? fallback : "task";
+  }
+
+  function normalizeAccentColor(value) {
+    const raw = text(value).toLowerCase();
+    if (EVENT_ACCENT_COLORS.includes(raw)) return raw;
+    return EVENT_ACCENT_ALIASES[raw] || null;
+  }
+
+  function inferEntryTypeFromNotes(notes, rawContent) {
+    const body = `${notes || ""}\n${rawContent || ""}`.toLowerCase();
+    if (body.includes("bujo:event")) return "event";
+    if (body.includes("bujo:log")) return "log";
+    if (body.includes("bujo:task") || body.includes("bujo:spark")) return "task";
+    return null;
+  }
+
+  function normalizeTaskStatus(raw, isDone) {
+    const value = text(raw).toLowerCase();
+    if (TASK_STATUSES.includes(value)) return value;
+    return TRUE_FLAGS.includes(isDone) ? "completed" : "pending";
+  }
+
+  function normalizeDropReason(raw) {
+    let value = text(raw).toLowerCase();
+    if (!value) return null;
+    value = DROP_REASON_ALIASES[value] || value;
+    return has(DROP_REASON_LABELS, value) ? value : "custom";
+  }
+
+  function normalizeRecurrenceDays(raw) {
+    let list = raw;
+    if (typeof list === "string") {
+      try {
+        list = JSON.parse(list);
+      } catch (_) {
+        list = null;
+      }
+    }
+    if (!Array.isArray(list)) return [];
+    const days = [];
+    for (const item of list) {
+      const day = pyInt(item);
+      if (day !== null && day >= 0 && day <= 6 && !days.includes(day)) days.push(day);
+    }
+    return days.sort((a, b) => a - b);
+  }
+
+  function clockMinutes(value) {
+    const match = /^(\d{1,2}):(\d{1,2})$/.exec(String(value));
+    if (!match || Number(match[1]) > 23 || Number(match[2]) > 59) return null;
+    return Number(match[1]) * 60 + Number(match[2]);
+  }
+
+  function taskTimeWindow(start, end, fallback) {
+    const startTime = start || fallback || null;
+    const endTime = end || null;
+    let label = null;
+    let minutes = null;
+    if (startTime && endTime) {
+      const from = clockMinutes(startTime);
+      const to = clockMinutes(endTime);
+      if (from === null || to === null) {
+        label = `${startTime} → ${endTime}`;
+      } else {
+        minutes = to - from < 0 ? to - from + 24 * 60 : to - from;
+        const hours = Math.floor(minutes / 60);
+        const rem = minutes % 60;
+        let duration = `${rem} min`;
+        if (hours && rem) duration = `${hours}h ${rem}m`;
+        else if (hours) duration = hours === 1 ? `${hours} hr` : `${hours} hrs`;
+        label = `${startTime} → ${endTime} · ${duration}`;
+      }
+    } else if (startTime) {
+      label = startTime;
+    }
+    return { start_time: startTime, end_time: endTime, time_label: label, duration_minutes: minutes };
+  }
+
+  function sanitizeNoteHtml(raw) {
+    return String(raw || "")
+      .replace(/<(script|style|iframe|object|embed|link|meta)[^>]*>[\s\S]*?<\/\1>/gi, "")
+      .replace(/<(script|style|iframe|object|embed|link|meta)[^>]*\/?>/gi, "")
+      .replace(/\son\w+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+      .replace(/javascript:/gi, "")
+      .replace(/data:text\/html/gi, "data:blocked")
+      .trim();
+  }
+
+  function normalizeMigrationHistory(raw, entryType = "task", createdAt = null, ensureBirth = true) {
+    const history = [];
+    for (const item of Array.isArray(raw) ? raw : []) {
+      if (!isPlainObject(item)) continue;
+      history.push({
+        action: text(item.action) || "created",
+        type: text(item.type || entryType || "task").toLowerCase() || "task",
+        timestamp: text(item.timestamp) || localHhmmOf(createdAt),
+      });
+    }
+    if (!history.length && ensureBirth) {
+      history.push({ action: "created", type: text(entryType || "task").toLowerCase() || "task", timestamp: localHhmmOf(createdAt) });
+    }
+    return history;
+  }
+
+  function birthHistory(entryType, timestamp) {
+    return [{ action: "created", type: text(entryType || "task").toLowerCase() || "task", timestamp: timestamp || localHhmm() }];
+  }
+
+  function positiveNumber(value) {
+    const number = typeof value === "number" || typeof value === "boolean" ? Number(value)
+      : typeof value === "string" && value.trim() ? Number(value) : NaN;
+    if (!Number.isFinite(number) || number <= 0) return 0;
+    return Number.isInteger(number) ? number : Math.round(number * 100) / 100;
+  }
+
+  function mediaBlock(row, kind) {
+    if (!isPlainObject(row)) return null;
+    const type = text(kind || row.type || row.kind).toLowerCase();
+    if (!MEDIA_BLOCK_TYPES.includes(type)) return null;
+    const id = String(row.id || "");
+    const title = text(row.title);
+    if (type === "album") {
+      const raw = Array.isArray(row.photos) ? row.photos : Array.isArray(row.items) ? row.items : [];
+      const photos = [];
+      raw.forEach((item, idx) => {
+        const photo = typeof item === "string" ? { url: item } : item;
+        if (!isPlainObject(photo)) return;
+        const url = text(photo.url || photo.src);
+        if (!url) return;
+        photos.push({ id: String(photo.id || `p${idx}`), url, caption: text(photo.caption), filename: text(photo.filename) });
+      });
+      if (!photos.length) return null;
+      const layout = text(row.layout || "grid").toLowerCase();
+      return { id, type: "album", title, layout: ["grid", "carousel"].includes(layout) ? layout : "grid", photos };
+    }
+    if (type === "scrapboard") {
+      const boards = [];
+      (Array.isArray(row.boards) ? row.boards : []).forEach((board, idx) => {
+        if (!isPlainObject(board)) return;
+        const canvas = isPlainObject(board.canvas) ? board.canvas : {};
+        const state = { objects: Array.isArray(canvas.objects) ? canvas.objects : [] };
+        if (isPlainObject(canvas.background)) state.background = canvas.background;
+        boards.push({ id: String(board.id || `sb${idx}`), title: text(board.title), canvas: state });
+      });
+      if (!boards.length) return null;
+      const layout = text(row.layout || "book").toLowerCase();
+      return { id, type: "scrapboard", title, layout: ["book", "carousel"].includes(layout) ? layout : "book", boards };
+    }
+    const url = text(row.url || row.src || row.content);
+    if (!url) return null;
+    const block = {
+      id,
+      type,
+      url,
+      title,
+      filename: text(row.filename || row.name),
+      bytes: positiveNumber(row.bytes),
+      mime: text(row.mime),
+    };
+    if (type === "audio") {
+      block.duration = positiveNumber(row.duration);
+      block.recorded = truthy(row.recorded);
+    }
+    return block;
+  }
+
+  function checklistBlock(row) {
+    const items = [];
+    (Array.isArray(row.items) ? row.items : []).forEach((item, idx) => {
+      if (!isPlainObject(item)) return;
+      const itemText = text(item.text);
+      if (!itemText) return;
+      const entry = { id: String(item.id || `i${idx}`), text: itemText, done: truthy(item.done) };
+      if (item.html) entry.html = String(item.html);
+      items.push(entry);
+    });
+    return {
+      id: String(row.id || ""),
+      type: "checklist",
+      title: text(row.title || row.label || "Checklist") || "Checklist",
+      items,
+      expanded: has(row, "expanded") ? truthy(row.expanded) : true,
+    };
+  }
+
+  function taskPhotoBlock(row, loose) {
+    const url = text(row.url || row.src || (loose ? row.photo_url : ""));
+    if (!url) return null;
+    return {
+      id: String(row.id || ""),
+      type: "photo",
+      url,
+      caption: text(row.caption),
+      filename: text(row.filename || (loose ? row.name : "")),
+      size: text(row.size).toLowerCase() === "expanded" ? "expanded" : "compact",
+    };
+  }
+
+  function taskLinkBlock(row) {
+    const url = text(row.url || row.href);
+    if (!url) return null;
+    const preview = isPlainObject(row.preview) ? row.preview : null;
+    let mode = text(row.display_mode || row.layout || "compact").toLowerCase();
+    if (mode !== "compact" && mode !== "card") mode = "compact";
+    return {
+      id: String(row.id || ""),
+      type: "link",
+      url,
+      title: text(row.title || row.label),
+      display_mode: mode,
+      preview_image: text(row.preview_image || preview?.image || preview?.thumbnail),
+      description: text(row.description || preview?.description),
+      preview,
+    };
+  }
+
+  // `stored` is the write-time cleanup (normalize_task_extra); without it, the
+  // lighter read-time pass serialize_spark applies to blocks.
+  function taskBlocks(raw, stored) {
+    const blocks = [];
+    for (const row of Array.isArray(raw) ? raw : []) {
+      if (!isPlainObject(row)) continue;
+      const type = text(row.type || row.kind).toLowerCase();
+      let block = null;
+      if (type === "photo") block = taskPhotoBlock(row, stored);
+      else if (type === "link") block = taskLinkBlock(row);
+      else if (NOTE_BLOCK_TYPES.includes(type)) {
+        block = {
+          id: String(row.id || ""),
+          type: "note",
+          title: text(row.title || row.label || "Rich Note") || "Rich Note",
+          html: stored ? sanitizeNoteHtml(row.html || row.content || row.notes || "") : String(row.html || row.content || ""),
+          expanded: has(row, "expanded") ? truthy(row.expanded) : true,
+        };
+      } else if (stored && (type === "tracker_report" || type === "tracker-report")) {
+        const habitId = pyInt(row.habit_id);
+        if (habitId === null) continue;
+        const date = cleanDueDate(String(row.date || ""));
+        if (!date) continue;
+        block = {
+          id: String(row.id || `tracker-${habitId}-${date}`),
+          type: "tracker_report",
+          habit_id: habitId,
+          date,
+          snapshot: isPlainObject(row.snapshot) ? row.snapshot : {},
+        };
+      } else if (!stored && type === "tracker_report" && given(row.habit_id) && row.date) {
+        block = {
+          id: String(row.id || ""),
+          type: "tracker_report",
+          habit_id: row.habit_id,
+          date: String(row.date),
+          snapshot: isPlainObject(row.snapshot) ? row.snapshot : {},
+        };
+      } else if (type === "checklist") block = checklistBlock(row);
+      else if (MEDIA_BLOCK_TYPES.includes(type)) block = mediaBlock(row, type);
+      if (block) blocks.push(block);
+    }
+    return blocks;
+  }
+
+  function taskTags(raw) {
+    const tags = [];
+    for (const tag of Array.isArray(raw) ? raw : []) {
+      const cleaned = String(tag || "").trim().replace(/^#+/, "");
+      if (cleaned && !tags.includes(cleaned)) tags.push(cleaned);
+    }
+    return tags;
+  }
+
+  function normalizeTaskExtra(raw) {
+    const data = parseExtra(raw);
+    const checklist = [];
+    for (const item of Array.isArray(data.checklist) ? data.checklist : []) {
+      if (isPlainObject(item)) {
+        const itemText = text(item.text);
+        if (!itemText) continue;
+        checklist.push({ text: itemText, qty: Math.max(1, pyInt(item.qty || 1) ?? 1), done: truthy(item.done) });
+      } else {
+        const itemText = text(item);
+        if (itemText) checklist.push({ text: itemText, qty: 1, done: false });
+      }
+    }
+    const completions = {};
+    if (isPlainObject(data.routine_completions)) {
+      for (const [key, value] of Object.entries(data.routine_completions)) {
+        const day = key ? cleanDueDate(key) : null;
+        if (day) completions[day] = truthy(value);
+      }
+    }
+    const notesHtml = sanitizeNoteHtml(present(data.notes) ? data.notes : data.rich_notes || "");
+    const out = {
+      location: text(data.location),
+      with_person: text(data.with_person),
+      checklist_mode: ["todo", "shopping"].includes(data.checklist_mode) ? data.checklist_mode : "todo",
+      checklist,
+      notes: notesHtml,
+      rich_notes: notesHtml,
+      routine_completions: completions,
+      migration_history: normalizeMigrationHistory(data.migration_history, String(data.entry_type_hint || "task"), null, false),
+      entities: cleanEntities(data.entities, isPersonOrPlace),
+      tags: taskTags(data.tags),
+      blocks: taskBlocks(data.blocks, true),
+    };
+    // Task/Event Log ↔ schedule link flags must survive create/update/serialize.
+    const flag = (key) => {
+      if (has(data, key)) out[key] = truthy(data[key]);
+    };
+    const passthrough = (key) => {
+      if (present(data[key])) out[key] = data[key];
+    };
+    const stamp = (key) => {
+      const value = text(data[key]);
+      if (value) out[key] = value;
+    };
+    const day = (key) => {
+      const value = present(data[key]) ? cleanDueDate(String(data[key])) : null;
+      if (value) out[key] = value;
+    };
+    flag("management_linked");
+    const linkedTaskId = data.linked_task_id || data.task_id;
+    if (present(linkedTaskId)) {
+      out.linked_task_id = linkedTaskId;
+      if (present(data.task_id)) out.task_id = data.task_id;
+    }
+    if (present(data.habit_id)) {
+      const habitId = pyInt(data.habit_id);
+      if (habitId !== null) out.habit_id = habitId;
+      const logDate = text(data.habit_log_date).slice(0, 10);
+      if (/^\d{4}-\d{2}-\d{2}$/.test(logDate)) out.habit_log_date = logDate;
+      out.is_habit_log = true;
+    }
+    flag("is_task_log");
+    flag("schedule_linked");
+    flag("is_event_log");
+    if (isPlainObject(data.stream_log_bridge) && Object.keys(data.stream_log_bridge).length) {
+      const bridge = data.stream_log_bridge;
+      out.stream_log_bridge = { origin: text(bridge.origin) || "stream_log", log_id: present(bridge.log_id) ? bridge.log_id : null };
+    }
+    stamp("priority");
+    const timingMode = text(data.timing_mode).toLowerCase();
+    if (["point", "range", "multiday"].includes(timingMode)) out.timing_mode = timingMode;
+    stamp("task_title");
+    const logStatus = text(data.log_status).toLowerCase();
+    if (LOG_STATUSES.includes(logStatus)) out.log_status = logStatus;
+    stamp("signifier");
+    day("stream_date");
+    const streamTime = text(data.stream_time);
+    if (streamTime && Array.from(streamTime).length >= 4) out.stream_time = streamTime.slice(0, 5);
+    flag("is_active_schedule_log");
+    ["active_schedule_log_id", "migrated_from_log_id", "migrated_to_log_id", "parked_task_id", "linked_event_id", "event_id"]
+      .forEach(passthrough);
+    stamp("event_title");
+    const eventStatus = text(data.event_status).toLowerCase();
+    if (["pending", "attended", "canceled"].includes(eventStatus)) out.event_status = eventStatus;
+    const eventNature = text(data.event_nature || data.nature).toLowerCase();
+    if (["commitment", "ambient", "milestone"].includes(eventNature)) out.event_nature = eventNature;
+    flag("is_actionable");
+    stamp("completed_at");
+    flag("completed_early");
+    day("completed_on_date");
+    passthrough("early_completion_log_id");
+    passthrough("retired_schedule_log_id");
+    stamp("dropped_at");
+    stamp("attended_at");
+    stamp("canceled_at");
+    const ship = data.ship_link;
+    if (isPlainObject(ship) && ["project", "section"].includes(ship.kind) && ship.id) {
+      out.ship_link = { kind: ship.kind, id: ship.id, project_id: ship.project_id ?? null, event_id: ship.event_id ?? null };
+    }
+    return out;
+  }
+
+  function serializeTaskFields(data, row) {
+    const extra = normalizeTaskExtra(row.extra_data);
+    data.extra_data = extra;
+    data.tags = taskTags(extra.tags);
+    data.entities = cleanEntities(extra.entities, isPersonOrPlace);
+    data.blocks = taskBlocks(extra.blocks, false);
+    const window = taskTimeWindow(row.start_time, row.end_time, data.due_time);
+    data.start_time = window.start_time;
+    data.end_time = window.end_time;
+    if (!data.due_time && window.start_time) data.due_time = window.start_time;
+    data.start_date = data.due_date || null;
+    data.end_date = row.end_date || data.due_date || null;
+    data.notes = String(extra.notes || extra.rich_notes || "") || String(row.notes || "");
+    data.time_label = window.time_label;
+    data.duration_minutes = window.duration_minutes;
+    data.is_routine = row.is_routine ? 1 : 0;
+    data.recurrence_days = normalizeRecurrenceDays(row.recurrence_days);
+    const status = normalizeTaskStatus(row.task_status, data.is_done);
+    data.task_status = status;
+    data.drop_reason = status === "cannot_done" ? normalizeDropReason(row.drop_reason) : null;
+    data.drop_reason_label = data.drop_reason ? DROP_REASON_LABELS[data.drop_reason] || "" : "";
+    data.drop_note = text(row.drop_note) || null;
+    data.postponed_count = Math.max(0, pyInt(row.postponed_count || 0) ?? 0);
+    if (status === "completed") data.is_done = 1;
+    else if (status === "cannot_done" || status === "dropped") data.is_done = 0;
+    data.is_parked = [1, true, "1"].includes(row.is_parked) ? 1 : 0;
+    if (data.is_parked) {
+      data.due_date = null;
+      data.start_date = null;
+      data.end_date = null;
+    }
+    const entryType = normalizeEntryType(row.entry_type || inferEntryTypeFromNotes(data.notes, row.raw_content) || "task");
+    data.entry_type = entryType;
+    data.is_theme_of_day = [1, true, "1"].includes(row.is_theme_of_day) ? 1 : 0;
+    data.accent_color = normalizeAccentColor(row.accent_color);
+    data.emoji = text(row.emoji) || null;
+    if (entryType === "event" || entryType === "log") {
+      data.is_done = 0;
+      data.task_status = "pending";
+      data.is_parked = 0;
+      data.is_routine = 0;
+      data.recurrence_days = [];
+      if (entryType === "log") {
+        data.is_theme_of_day = 0;
+        data.end_time = null;
+        data.due_time = null;
+        data.time_label = "";
+        data.duration_minutes = null;
+      }
+      if (entryType === "event" && !data.accent_color) data.accent_color = EVENT_DEFAULT_ACCENT;
+      data.is_all_day = [1, true, "1"].includes(row.is_all_day) ? 1 : 0;
+      data.is_multiday = [1, true, "1"].includes(row.is_multiday) ? 1 : 0;
+      if (entryType === "event") {
+        const startDay = data.due_date || data.start_date;
+        const endDay = data.end_date || startDay;
+        if (startDay && endDay && endDay > startDay) {
+          data.is_multiday = 1;
+          data.is_all_day = 1;
+        }
+        if (data.is_multiday || data.is_all_day) {
+          data.start_time = null;
+          data.end_time = null;
+          data.due_time = null;
+          data.duration_minutes = null;
+          data.time_label = "";
+          if (startDay && endDay && endDay !== startDay) data.time_label = `${startDay} → ${endDay}`;
+          else if (data.is_all_day) data.time_label = "All day";
+        }
+      }
+    } else {
+      data.is_all_day = 0;
+      data.is_multiday = 0;
+    }
+    data.migration_history = normalizeMigrationHistory(extra.migration_history, normalizeEntryType(data.entry_type), row.created_at, true);
+    extra.migration_history = data.migration_history;
+    data.created_at = localIso(row.created_at);
+    data.updated_at = localIso(row.updated_at);
+    return data;
+  }
+
+  // Projects aren't online yet, so no task can point at one.
+  function annotateTask(task) {
+    task.project_title = null;
+    task.phase_title = null;
+    return task;
+  }
+
+  // Request bodies are validated like the FastAPI models (TaskWrite / TaskPatch / TaskSchedule).
+  const TASK_FIELD_KINDS = {};
+  [
+    "title", "due_date", "start_date", "end_date", "due_time", "start_time", "end_time", "routine_date",
+    "assignee", "raw_content", "notes", "task_status", "status", "drop_reason", "drop_note", "cannot_reason",
+    "cannot_note", "postpone_date", "postpone_time", "phase_id", "location", "with_person", "checklist_mode",
+    "rich_notes", "entry_type", "accent_color", "emoji", "timing_mode", "created_at",
+  ].forEach((key) => { TASK_FIELD_KINDS[key] = "text"; });
+  ["is_routine", "is_done", "is_parked", "is_theme_of_day", "is_all_day", "is_multiday"].forEach((key) => { TASK_FIELD_KINDS[key] = "flag"; });
+  ["project_id", "linked_vision_id"].forEach((key) => { TASK_FIELD_KINDS[key] = "int"; });
+  ["checklist", "migration_history", "blocks", "entities"].forEach((key) => { TASK_FIELD_KINDS[key] = "list"; });
+  TASK_FIELD_KINDS.recurrence_days = "int_list";
+  TASK_FIELD_KINDS.tags = "text_list";
+  TASK_FIELD_KINDS.extra_data = "object";
+  const SCHEDULE_FIELDS = ["date", "due_date", "start_date", "end_date", "start_time", "end_time", "due_time"];
+  const FLAG_WORDS = { 1: true, true: true, t: true, yes: true, y: true, on: true, 0: false, false: false, f: false, no: false, n: false, off: false };
+
+  function fieldError(key) {
+    return new ApiError(422, `${key} has an invalid value`);
+  }
+
+  function flagField(key, value) {
+    if (typeof value === "boolean") return value;
+    if (value === 0 || value === 1) return value === 1;
+    const word = typeof value === "string" ? value.trim().toLowerCase() : null;
+    if (word !== null && has(FLAG_WORDS, word)) return FLAG_WORDS[word];
+    throw fieldError(key);
+  }
+
+  function intField(key, value) {
+    const number = typeof value === "number" ? (Number.isInteger(value) ? value : null) : strictInt(value);
+    if (number === null) throw fieldError(key);
+    return number;
+  }
+
+  function coerceField(key, kind, value) {
+    if (value === null) return null;
+    if (kind === "text" && typeof value === "string") return value;
+    if (kind === "flag") return flagField(key, value);
+    if (kind === "int") return intField(key, value);
+    if (kind === "list" && Array.isArray(value)) return value;
+    if (kind === "int_list" && Array.isArray(value)) return value.map((item) => intField(key, item));
+    if (kind === "text_list" && Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
+    if (kind === "object" && isPlainObject(value)) return value;
+    throw fieldError(key);
+  }
+
+  function taskFields(body, partial) {
+    const fields = {};
+    for (const [key, value] of Object.entries(body)) {
+      if (has(TASK_FIELD_KINDS, key)) fields[key] = coerceField(key, TASK_FIELD_KINDS[key], value);
+    }
+    if (!partial) fields.title = requireTitle(body);
+    else if (typeof fields.title === "string" && !fields.title) throw new ApiError(422, "Title is required");
+    return fields;
+  }
+
+  async function clearThemeOfDay(dateKey, exceptId) {
+    const key = text(dateKey);
+    if (!key) return;
+    let query = client.from("sparks").update({ is_theme_of_day: 0 })
+      .eq("item_type", "task").eq("entry_type", "event").eq("is_theme_of_day", 1).eq("due_date", key);
+    if (given(exceptId)) query = query.neq("id", exceptId);
+    await run(query);
+  }
+
+  function safeDay(value) {
+    if (!present(value)) return null;
+    try {
+      return cleanDueDate(String(value).slice(0, 10));
+    } catch (_) {
+      const day = String(value).trim().slice(0, 10);
+      return day.length === 10 && day[4] === "-" && day[7] === "-" ? day : null;
+    }
+  }
+
+  function scheduleLogLinkId(extra, kind) {
+    if (!isPlainObject(extra)) return null;
+    const raw = kind === "event" ? extra.linked_event_id || extra.event_id : extra.linked_task_id || extra.task_id;
+    return present(raw) ? String(raw) : null;
+  }
+
+  function isActiveScheduleLogExtra(extra) {
+    if (!isPlainObject(extra) || !extra.is_active_schedule_log) return false;
+    const status = text(extra.log_status || "open").toLowerCase();
+    return ACTIVE_SCHEDULE_LOG_STATUSES.includes(status) || !status;
+  }
+
+  // One active schedule log per linked calendar item and day.
+  async function findActiveScheduleLog(linkedId, streamDate, kind) {
+    const link = present(linkedId) ? String(linkedId).trim() : "";
+    const day = safeDay(streamDate);
+    if (!link || !day) return null;
+    const rows = await selectAll(() => client.from("sparks").select("*")
+      .eq("item_type", "task").eq("extra_data->>is_active_schedule_log", "true").order("id"));
+    return rows.find((row) => {
+      const extra = parseExtra(row.extra_data);
+      return isActiveScheduleLogExtra(extra)
+        && scheduleLogLinkId(extra, kind) === link
+        && safeDay(extra.stream_date || row.due_date) === day;
+    }) || null;
+  }
+
+  async function refreshActiveScheduleLog(row, { title, streamDate, streamTime, extraPatch, createdAt }) {
+    let extra = normalizeTaskExtra(parseExtra(row.extra_data));
+    if (isPlainObject(extraPatch)) extra = normalizeTaskExtra({ ...extra, ...extraPatch });
+    const day = safeDay(streamDate) || safeDay(extra.stream_date || row.due_date);
+    const clock = String(streamTime || extra.stream_time || "00:00").trim().slice(0, 5) || "00:00";
+    if (day) extra.stream_date = day;
+    extra.stream_time = clock;
+    extra.is_active_schedule_log = true;
+    if (!ACTIVE_SCHEDULE_LOG_STATUSES.includes(text(extra.log_status).toLowerCase())) extra.log_status = "scheduled";
+    return run(client.from("sparks").update({
+      title,
+      due_date: day,
+      start_time: null,
+      end_time: null,
+      due_time: null,
+      end_date: day,
+      extra_data: extra,
+      created_at: createdAt || (day ? storedStamp(`${day}T${clock}:00`) : row.created_at),
+    }).eq("id", row.id).select("*").single());
+  }
+
+  async function createTask(body) {
+    const f = taskFields(body, false);
+    const title = f.title;
+    const entryType = normalizeEntryType(f.entry_type || "task");
+    let dueDate = cleanDueDate(given(f.due_date) ? f.due_date : f.start_date);
+    let endDate = cleanDueDate(f.end_date);
+    let startTime = cleanDueTime(given(f.start_time) ? f.start_time : f.due_time);
+    let endTime = cleanDueTime(f.end_time);
+    let dueTime = startTime;
+    let isRoutine = f.is_routine ? 1 : 0;
+    let recurrenceDays = normalizeRecurrenceDays(f.recurrence_days || []);
+    let isParked = f.is_parked ? 1 : 0;
+    if (entryType !== "task") {
+      isRoutine = 0;
+      recurrenceDays = [];
+      isParked = 0;
+    }
+    if (isRoutine && !recurrenceDays.length) throw new ApiError(400, "Pick at least one weekday for a routine");
+    if (!isRoutine) {
+      recurrenceDays = [];
+      if (!given(endDate) && dueDate) endDate = dueDate;
+      if (endDate && dueDate && endDate < dueDate) throw new ApiError(400, "end_date must be on or after start_date");
+    } else {
+      dueDate = null;
+      endDate = null;
+    }
+    if (isParked) {
+      dueDate = endDate = startTime = endTime = dueTime = null;
+      isRoutine = 0;
+      recurrenceDays = [];
+    }
+    if (entryType === "log") startTime = endTime = dueTime = null;
+    const timingMode = text(f.timing_mode).toLowerCase();
+    let isAllDay = f.is_all_day ? 1 : 0;
+    let isMultiday = f.is_multiday ? 1 : 0;
+    if (entryType === "event") {
+      if (timingMode === "point") {
+        endTime = null;
+        isAllDay = isMultiday = 0;
+        if (!given(endDate)) endDate = dueDate;
+      } else if (timingMode === "range") {
+        isAllDay = isMultiday = 0;
+        if (!given(endDate)) endDate = dueDate;
+      } else if (["multiday", "multi-day", "multi_day"].includes(timingMode)) {
+        isAllDay = isMultiday = 1;
+        startTime = endTime = dueTime = null;
+      }
+      if (dueDate && endDate && endDate > dueDate) {
+        isAllDay = isMultiday = 1;
+        startTime = endTime = dueTime = null;
+      }
+      if (isAllDay || isMultiday) startTime = endTime = dueTime = null;
+    } else {
+      isAllDay = isMultiday = 0;
+    }
+    let taskStatus = normalizeTaskStatus(f.task_status || f.status, f.is_done);
+    let dropReason = null;
+    let dropNote = null;
+    let postponedCount = 0;
+    let isDone = 0;
+    if (entryType !== "task") {
+      taskStatus = "pending";
+    } else {
+      if (taskStatus === "cannot_done") {
+        dropReason = normalizeDropReason(f.drop_reason || f.cannot_reason) || "custom";
+        dropNote = text(f.drop_note || f.cannot_note) || null;
+      } else if (taskStatus === "postponed") {
+        postponedCount = 1;
+        taskStatus = "pending";
+        if (f.postpone_date) dueDate = cleanDueDate(f.postpone_date);
+        if (given(f.postpone_time)) startTime = dueTime = cleanDueTime(f.postpone_time);
+      }
+      isDone = taskStatus === "completed" ? 1 : 0;
+    }
+    const accentColor = entryType === "event" ? normalizeAccentColor(f.accent_color) || EVENT_DEFAULT_ACCENT : null;
+    const emoji = entryType === "event" ? text(f.emoji) || null : null;
+    const isTheme = entryType === "event" && f.is_theme_of_day ? 1 : 0;
+    const phaseId = text(f.phase_id) || null;
+    const notesHtml = given(f.notes) ? f.notes : f.rich_notes;
+    let incomingHistory = f.migration_history;
+    if (!given(incomingHistory) && isPlainObject(f.extra_data)) incomingHistory = f.extra_data.migration_history;
+    const history = Array.isArray(incomingHistory) && incomingHistory.length ? incomingHistory : birthHistory(entryType, localHhmm());
+    const merged = { ...(f.extra_data || {}) };
+    const overrides = {
+      location: f.location,
+      with_person: f.with_person,
+      checklist_mode: f.checklist_mode,
+      checklist: f.checklist,
+      notes: notesHtml,
+      rich_notes: notesHtml,
+      migration_history: history,
+      blocks: f.blocks,
+      entities: f.entities,
+      tags: f.tags,
+    };
+    for (const [key, value] of Object.entries(overrides)) {
+      if (given(value)) merged[key] = value;
+    }
+    const extra = normalizeTaskExtra(merged);
+    extra.migration_history = history;
+    let createdAt = new Date().toISOString();
+    if (text(f.created_at)) createdAt = storedStamp(text(f.created_at));
+    else if (extra.is_active_schedule_log && extra.stream_date && extra.stream_time) {
+      createdAt = storedStamp(`${extra.stream_date}T${String(extra.stream_time).slice(0, 5)}:00`);
+    }
+    if (present(f.project_id)) throw new ApiError(404, "Project not found");
+    if (phaseId) throw new ApiError(400, "phase_id requires project_id");
+    if (isTheme && dueDate) await clearThemeOfDay(dueDate, null);
+    if (extra.is_active_schedule_log) {
+      const streamDay = cleanDueDate(String(extra.stream_date || dueDate || ""));
+      const kind = entryType === "event" ? "event" : "task";
+      const linkedId = kind === "event" ? extra.linked_event_id || extra.event_id : extra.linked_task_id || extra.task_id;
+      if (present(linkedId) && streamDay) {
+        const existing = await findActiveScheduleLog(linkedId, streamDay, kind);
+        if (existing) {
+          const refreshed = await refreshActiveScheduleLog(existing, {
+            title,
+            streamDate: streamDay,
+            streamTime: String(extra.stream_time || dueTime || "00:00").slice(0, 5),
+            extraPatch: extra,
+            createdAt,
+          });
+          return annotateTask(serializeSpark(refreshed));
+        }
+      }
+    }
+    const row = await run(client.from("sparks").insert({
+      title,
+      raw_content: text(f.raw_content) || null,
+      status: "in_cloud",
+      created_at: createdAt,
+      item_type: "task",
+      is_done: isDone,
+      assignee: given(f.assignee) ? f.assignee.trim() : "Me",
+      extra_data: extra,
+      due_date: isRoutine || isParked ? null : dueDate,
+      due_time: dueTime,
+      start_time: startTime,
+      end_time: endTime,
+      end_date: isRoutine || isParked ? null : endDate,
+      notes: extra.notes || null,
+      is_routine: isRoutine,
+      recurrence_days: JSON.stringify(recurrenceDays),
+      project_id: null,
+      phase_id: null,
+      linked_vision_id: f.linked_vision_id ?? null,
+      task_status: taskStatus,
+      drop_reason: dropReason,
+      drop_note: dropNote,
+      postponed_count: postponedCount,
+      is_parked: isParked,
+      entry_type: entryType,
+      is_theme_of_day: isTheme,
+      accent_color: accentColor,
+      emoji,
+      is_all_day: isAllDay,
+      is_multiday: isMultiday,
+    }).select("*").single());
+    return annotateTask(serializeSpark(row));
+  }
+
+  async function updateTask(id, input) {
+    let fields = { ...input };
+    const row = await requireSpark(id);
+    const current = serializeSpark(row);
+    if (current.item_type !== "task") throw new ApiError(400, "Only tasks can be updated here");
+    const entryType = normalizeEntryType(has(fields, "entry_type") ? fields.entry_type : current.entry_type, "task");
+    let title = current.title;
+    if (given(fields.title)) {
+      title = text(fields.title);
+      if (!title) throw new ApiError(400, "Title is required");
+    }
+    let isDone = current.is_done;
+    if (given(fields.is_done) && entryType === "task") isDone = fields.is_done ? 1 : 0;
+    let taskStatus = normalizeTaskStatus(current.task_status, isDone);
+    if (entryType === "task" && (has(fields, "task_status") || has(fields, "status"))) {
+      const rawStatus = has(fields, "task_status") ? fields.task_status : fields.status;
+      taskStatus = normalizeTaskStatus(rawStatus, has(fields, "is_done") ? isDone : null);
+    }
+    let dropReason = current.drop_reason;
+    let dropNote = current.drop_note;
+    let postponedCount = Math.max(0, pyInt(current.postponed_count || 0) ?? 0);
+    if (entryType !== "task") {
+      isDone = 0;
+      taskStatus = "pending";
+      dropReason = dropNote = null;
+    } else if (taskStatus === "completed") {
+      isDone = 1;
+      dropReason = dropNote = null;
+    } else if (taskStatus === "cannot_done") {
+      isDone = 0;
+      if (has(fields, "drop_reason") || has(fields, "cannot_reason")) {
+        dropReason = normalizeDropReason(has(fields, "drop_reason") ? fields.drop_reason : fields.cannot_reason);
+      }
+      if (!dropReason) dropReason = "custom";
+      if (has(fields, "drop_note") || has(fields, "cannot_note")) {
+        dropNote = text(has(fields, "drop_note") ? fields.drop_note : fields.cannot_note) || null;
+      }
+    } else if (taskStatus === "dropped") {
+      isDone = 0;
+      dropReason = dropNote = null;
+    } else if (taskStatus === "postponed") {
+      isDone = 0;
+      dropReason = dropNote = null;
+      postponedCount += 1;
+      if (!has(fields, "due_date") && fields.postpone_date) fields = { ...fields, due_date: fields.postpone_date };
+      if (!has(fields, "due_time") && has(fields, "postpone_time")) fields = { ...fields, due_time: fields.postpone_time };
+      // A postponed task goes back to pending on its new date; only the count records the delay.
+      taskStatus = "pending";
+    } else {
+      if (given(fields.is_done)) taskStatus = isDone ? "completed" : "pending";
+      if (taskStatus === "pending") {
+        isDone = 0;
+        dropReason = dropNote = null;
+      }
+    }
+    let assignee = current.assignee;
+    if (given(fields.assignee)) assignee = text(fields.assignee);
+    let dueDate = has(fields, "due_date") ? cleanDueDate(fields.due_date) : current.due_date;
+    if (has(fields, "start_date") && !has(fields, "due_date")) dueDate = cleanDueDate(fields.start_date);
+    let dueTime = has(fields, "due_time") ? cleanDueTime(fields.due_time) : current.due_time;
+    if (has(fields, "postpone_date") && !has(fields, "due_date") && !has(fields, "start_date")) dueDate = cleanDueDate(fields.postpone_date);
+    if (has(fields, "postpone_time") && !has(fields, "due_time")) dueTime = cleanDueTime(fields.postpone_time);
+    let startTime = current.start_time;
+    let endTime = current.end_time;
+    let endDate = current.end_date;
+    if (has(fields, "start_time")) startTime = cleanDueTime(fields.start_time);
+    if (has(fields, "end_time")) endTime = cleanDueTime(fields.end_time);
+    if (has(fields, "end_date")) endDate = cleanDueDate(fields.end_date);
+    if (has(fields, "start_time") || has(fields, "end_time")) dueTime = startTime || dueTime;
+    let isRoutine = current.is_routine || 0;
+    if (has(fields, "is_routine")) isRoutine = fields.is_routine ? 1 : 0;
+    let recurrenceDays = current.recurrence_days || [];
+    if (has(fields, "recurrence_days")) recurrenceDays = normalizeRecurrenceDays(fields.recurrence_days);
+    if (entryType !== "task") {
+      isRoutine = 0;
+      recurrenceDays = [];
+    }
+    if (isRoutine && !recurrenceDays.length) throw new ApiError(400, "Pick at least one weekday for a routine");
+    if (isRoutine) {
+      dueDate = null;
+      endDate = null;
+    } else {
+      recurrenceDays = [];
+      if (!given(endDate) && dueDate) endDate = dueDate;
+      if (endDate && dueDate && endDate < dueDate) throw new ApiError(400, "end_date must be on or after start_date");
+    }
+    let isParked = current.is_parked ? 1 : 0;
+    if (has(fields, "is_parked")) isParked = TRUE_FLAGS.includes(fields.is_parked) ? 1 : 0;
+    if (entryType !== "task") isParked = 0;
+    if (isParked) {
+      dueDate = endDate = startTime = endTime = dueTime = null;
+      isRoutine = 0;
+      recurrenceDays = [];
+    } else if ((dueDate || given(fields.due_date) || given(fields.start_date)) && !has(fields, "is_parked")) {
+      // Scheduling a parked task takes it out of the parking lot.
+      isParked = 0;
+    }
+    if (entryType === "log") startTime = endTime = dueTime = null;
+    let isAllDay = current.is_all_day ? 1 : 0;
+    let isMultiday = current.is_multiday ? 1 : 0;
+    if (has(fields, "is_all_day")) isAllDay = TRUE_FLAGS.includes(fields.is_all_day) ? 1 : 0;
+    if (has(fields, "is_multiday")) isMultiday = TRUE_FLAGS.includes(fields.is_multiday) ? 1 : 0;
+    if (entryType === "event" && has(fields, "timing_mode")) {
+      const mode = text(fields.timing_mode).toLowerCase();
+      if (mode === "point") {
+        endTime = null;
+        isAllDay = isMultiday = 0;
+        if (!given(endDate) || (dueDate && endDate)) endDate = dueDate;
+      } else if (mode === "range") {
+        isAllDay = isMultiday = 0;
+        if (!given(endDate)) endDate = dueDate;
+      } else if (["multiday", "multi-day", "multi_day"].includes(mode)) {
+        isAllDay = isMultiday = 1;
+        startTime = endTime = dueTime = null;
+      }
+    }
+    if (entryType === "event") {
+      if (dueDate && endDate && endDate > dueDate) {
+        isAllDay = isMultiday = 1;
+        startTime = endTime = dueTime = null;
+      }
+      if (isMultiday || isAllDay) startTime = endTime = dueTime = null;
+      if (!endDate && dueDate) endDate = dueDate;
+    } else {
+      isAllDay = isMultiday = 0;
+    }
+    let accentColor = normalizeAccentColor(has(fields, "accent_color") ? fields.accent_color : current.accent_color);
+    if (entryType === "event" && !accentColor) accentColor = EVENT_DEFAULT_ACCENT;
+    if (entryType !== "event") accentColor = null;
+    let emoji = has(fields, "emoji") ? text(fields.emoji) || null : current.emoji;
+    if (entryType !== "event") emoji = null;
+    let isTheme = current.is_theme_of_day ? 1 : 0;
+    if (has(fields, "is_theme_of_day")) isTheme = TRUE_FLAGS.includes(fields.is_theme_of_day) ? 1 : 0;
+    if (entryType !== "event") isTheme = 0;
+    let plainNotes = has(fields, "raw_content") ? text(fields.raw_content) || null : current.raw_content;
+    let columnNotes = current.notes;
+    const notesGiven = has(fields, "notes") || has(fields, "rich_notes");
+    const noteSource = has(fields, "notes") ? fields.notes : fields.rich_notes;
+    if (notesGiven) {
+      columnNotes = sanitizeNoteHtml(noteSource || "") || null;
+      if (!has(fields, "raw_content")) plainNotes = stripTags(columnNotes || "") || null;
+    }
+    let projectId = current.project_id;
+    let phaseId = current.phase_id;
+    if (has(fields, "project_id")) projectId = present(fields.project_id) ? fields.project_id : null;
+    if (has(fields, "phase_id")) phaseId = text(fields.phase_id) || null;
+    if (projectId && phaseId) throw new ApiError(404, "Project not found");
+    let linkedVisionId = current.linked_vision_id;
+    if (has(fields, "linked_vision_id")) linkedVisionId = present(fields.linked_vision_id) ? fields.linked_vision_id : null;
+    let extra = normalizeTaskExtra(current.extra_data);
+    if (isPlainObject(fields.extra_data)) extra = normalizeTaskExtra({ ...extra, ...fields.extra_data });
+    for (const key of ["location", "with_person", "checklist_mode", "checklist"]) {
+      if (has(fields, key)) extra[key] = fields[key];
+    }
+    for (const key of ["blocks", "entities", "tags"]) {
+      if (given(fields[key])) extra[key] = fields[key];
+    }
+    if (notesGiven) {
+      const cleaned = sanitizeNoteHtml(noteSource || "");
+      extra.notes = cleaned;
+      extra.rich_notes = cleaned;
+      columnNotes = cleaned || null;
+    }
+    if (fields.routine_date) {
+      const day = cleanDueDate(fields.routine_date);
+      if (!day) throw new ApiError(400, "routine_date must be YYYY-MM-DD");
+      const completions = { ...(extra.routine_completions || {}) };
+      completions[day] = has(fields, "is_done") ? truthy(fields.is_done) : !completions[day];
+      extra.routine_completions = completions;
+      isDone = current.is_done;
+      taskStatus = normalizeTaskStatus(current.task_status, isDone);
+    }
+    extra = normalizeTaskExtra(extra);
+    if (entryType !== "task") {
+      isDone = 0;
+      taskStatus = "pending";
+      dropReason = dropNote = null;
+      isParked = 0;
+      isRoutine = 0;
+      recurrenceDays = [];
+    }
+    if (isTheme && dueDate) await clearThemeOfDay(dueDate, id);
+    const updated = await run(client.from("sparks").update({
+      title,
+      is_done: isDone,
+      assignee,
+      due_date: dueDate,
+      due_time: dueTime || startTime,
+      start_time: startTime,
+      end_time: endTime,
+      end_date: endDate,
+      notes: given(columnNotes) ? columnNotes : extra.notes || null,
+      is_routine: isRoutine,
+      recurrence_days: JSON.stringify(recurrenceDays),
+      raw_content: plainNotes,
+      project_id: projectId,
+      phase_id: phaseId,
+      linked_vision_id: linkedVisionId,
+      task_status: taskStatus,
+      drop_reason: dropReason,
+      drop_note: dropNote,
+      postponed_count: postponedCount,
+      is_parked: isParked,
+      entry_type: entryType,
+      is_theme_of_day: isTheme,
+      accent_color: accentColor,
+      emoji,
+      is_all_day: isAllDay,
+      is_multiday: isMultiday,
+      extra_data: extra,
+    }).eq("id", id).select("*").single());
+    return serializeSpark(updated);
+  }
+
+  function scheduleTask(id, body) {
+    const f = {};
+    for (const key of SCHEDULE_FIELDS) {
+      if (has(body, key)) f[key] = coerceField(key, "text", body[key]);
+    }
+    const due = f.date || f.due_date || f.start_date;
+    if (!due) throw new ApiError(400, "date is required to schedule a parked task");
+    const payload = { is_parked: false, due_date: due, start_date: f.start_date || due, end_date: f.end_date || due };
+    if (has(f, "start_time")) payload.start_time = f.start_time;
+    if (has(f, "end_time")) payload.end_time = f.end_time;
+    if (has(f, "due_time")) payload.due_time = f.due_time;
+    else if (payload.start_time) payload.due_time = payload.start_time;
+    return updateTask(id, payload);
+  }
+
+  async function deleteTask(id) {
+    const row = await requireSpark(id);
+    if (row.item_type !== "task") throw new ApiError(400, "Only tasks can be deleted here");
+    await run(client.from("sparks").delete().eq("id", id).eq("item_type", "task"));
+    return { status: "success", deleted_id: id, ok: true, id };
+  }
+
+  function taskRows() {
+    return selectAll(() => client.from("sparks").select("*").eq("status", "in_cloud").eq("item_type", "task").order("id"));
+  }
+
+  // Sort key for the Daily Stream: local HH:MM of the item's moment.
+  function itemStreamClock(item) {
+    const extra = isPlainObject(item.extra_data) ? item.extra_data : parseExtra(item.extra_data);
+    for (const candidate of [extra.stream_time, item.start_time, item.due_time, item.created_at, item.updated_at]) {
+      const value = text(candidate);
+      if (!value) continue;
+      if (/^\d{2}:\d{2}$/.test(value.slice(0, 5))) return value.slice(0, 5);
+      return localHhmmOf(value);
+    }
+    return "00:00";
+  }
+
+  function sortStream(items) {
+    const keyed = items.map((item) => [itemStreamClock(item), Number(item.id) || 0, item]);
+    keyed.sort((a, b) => compareText(a[0], b[0]) || a[1] - b[1]);
+    return keyed.map((entry) => entry[2]);
+  }
+
+  function streamDateOf(item) {
+    const extra = isPlainObject(item.extra_data) ? item.extra_data : {};
+    return text(extra.stream_date).slice(0, 10);
+  }
+
+  // FastAPI's bool query parsing; anything unrecognised is a 422.
+  function boolParam(query, name) {
+    if (!query.has(name)) return null;
+    const word = text(query.get(name)).toLowerCase();
+    if (has(FLAG_WORDS, word)) return FLAG_WORDS[word];
+    throw new ApiError(422, `${name} must be true or false`);
+  }
+
+  const emptyLast = (a, b) => (present(a) ? 0 : 1) - (present(b) ? 0 : 1);
+
+  async function listTasks(query) {
+    const parked = boolParam(query, "parked");
+    const rows = await taskRows();
+    rows.sort((a, b) => emptyLast(a.due_date, b.due_date)
+      || compareText(a.due_date || "", b.due_date || "")
+      || emptyLast(a.due_time, b.due_time)
+      || compareText(a.due_time || "", b.due_time || "")
+      || a.id - b.id);
+    let tasks = rows.map(serializeSpark);
+    if (parked === true) tasks = tasks.filter((task) => task.is_parked);
+    else if (parked === false) tasks = tasks.filter((task) => !task.is_parked);
+    const date = query.get("date");
+    if (date) {
+      const day = text(date).slice(0, 10);
+      tasks = sortStream(tasks.filter((task) => {
+        const streamDate = streamDateOf(task);
+        if (streamDate) return streamDate === day;
+        return text(task.due_date || task.start_date).slice(0, 10) === day;
+      }));
+    }
+    return tasks.map(annotateTask);
+  }
+
+  async function listLogs(query) {
+    const day = text(query.get("date")).slice(0, 10);
+    let tasks = (await taskRows()).map(serializeSpark);
+    let sparks = (await selectAll(() => client.from("sparks").select("*")
+      .eq("status", "in_cloud").eq("item_type", "spark").order("id"))).map(serializeSpark);
+    if (day) {
+      tasks = tasks.filter((row) => {
+        const streamDate = streamDateOf(row);
+        if (streamDate) return streamDate === day;
+        if (["due_date", "start_date"].some((key) => text(row[key]).slice(0, 10) === day)) return true;
+        return text(row.created_at).slice(0, 10) === day;
+      });
+      sparks = sparks.filter((row) => text(row.created_at).slice(0, 10) === day);
+    }
+    return sortStream([...sparks, ...tasks]);
+  }
+
+  async function sparkAction(id, body) {
+    if (typeof body.action !== "string") throw new ApiError(422, "action is required");
+    const spark = serializeSpark(await requireSpark(id));
+    const action = body.action;
+    let isDone = spark.is_done;
+    let assignee = spark.assignee;
+    if (action === "toggle_done") {
+      isDone = isDone ? 0 : 1;
+    } else if (action === "set_assignee") {
+      assignee = given(body.assignee) ? text(body.assignee) : "";
+    } else if (action === "toggle_habit_day") {
+      return logHabit(id, dayKey(localToday()), undefined, undefined, undefined, {});
+    } else if (action === "toggle_node" || action === "add_node") {
+      if (spark.item_type === "project") throw new ApiError(503, OFFLINE_DETAIL);
+      throw new ApiError(400, action === "toggle_node" ? "Only projects have nested items" : "Only projects can add nested items");
+    } else {
+      throw new ApiError(400, "Unknown action");
+    }
+    const extra = { ...spark.extra_data };
+    if (spark.item_type === "habit") delete extra.migration_history;
+    const row = await run(client.from("sparks").update({ is_done: isDone, assignee, extra_data: extra })
+      .eq("id", id).select("*").single());
+    return serializeSpark(row);
+  }
+
+  function localDayOf(stamp) {
+    const date = parseStamp(stamp);
+    return date ? dayKey(date) : null;
+  }
+
+  function habitRate(habits, start, today) {
+    let scheduled = 0;
+    let met = 0;
+    for (let day = start; dayKey(day) <= dayKey(today); day = shiftDays(day, 1)) {
+      for (const habit of habits) {
+        const extra = habit.extra_data || {};
+        if (!habitScheduled(extra, day)) continue;
+        scheduled += 1;
+        if (habitMet(extra, (extra.history || {})[dayKey(day)])) met += 1;
+      }
+    }
+    return scheduled ? Math.round((met / scheduled) * 100) : 0;
+  }
+
+  // Projects aren't online yet, so the "shipped" counts stay at zero.
+  async function momentumStats(today) {
+    const habits = (await listHabits("active", false));
+    const rate7 = habitRate(habits, shiftDays(today, -6), today);
+    const top = Math.max(0, ...habits.map((habit) => Number(habit.current_streak) || 0));
+    const doneTasks = (await taskRows()).filter((row) => row.is_done).map(serializeSpark);
+    const spans = [
+      ["30d", "30 days", shiftDays(today, -29)],
+      ["3m", "3 months", shiftDays(today, -89)],
+      ["6m", "6 months", shiftDays(today, -179)],
+      ["year", "This year", new Date(today.getFullYear(), 0, 1, 12)],
+    ];
+    const windows = spans.map(([key, label, start]) => ({
+      id: key,
+      label,
+      tasks_done: doneTasks.filter((task) => (localDayOf(task.updated_at) || "") >= dayKey(start)).length,
+      projects_shipped: 0,
+      project_titles: [],
+      habit_rate: habitRate(habits, start, today),
+    }));
+    return {
+      top_streak: top,
+      habit_rate_7d: rate7,
+      badges: [
+        { id: "streak", label: `🔥 ${top}-Day Top Streak` },
+        { id: "rate", label: `✨ ${rate7}% habit rate (7d)` },
+        { id: "tasks", label: `✅ ${windows[0].tasks_done} Tasks Done (30d)` },
+        { id: "projects", label: "⬟ 0 Projects Shipped" },
+      ],
+      windows,
+    };
+  }
+
+  async function dashboardToday() {
+    const today = localToday();
+    const key = dayKey(today);
+    const rows = await selectAll(() => client.from("sparks").select("*")
+      .eq("status", "in_cloud").eq("item_type", "task").eq("due_date", key).order("id"));
+    // SQLite order: is_done, then due_time with blanks first, then title ignoring case.
+    rows.sort((a, b) => (a.is_done || 0) - (b.is_done || 0)
+      || compareText(a.due_time ?? "", b.due_time ?? "")
+      || compareText(String(a.title || "").toLowerCase(), String(b.title || "").toLowerCase()));
+    const habits = (await listHabits("active", false))
+      .sort((a, b) => compareText(String(a.title || "").toLowerCase(), String(b.title || "").toLowerCase()))
+      .filter((habit) => habitScheduled(habit.extra_data, today));
+    habits.sort((a, b) => compareText(habitClock(a.extra_data), habitClock(b.extra_data)));
+    return {
+      date_str: `${WEEKDAYS[today.getDay()]}, ${today.getDate()} ${MONTHS[today.getMonth()]} ${today.getFullYear()}`,
+      today_tasks: rows.map(serializeSpark),
+      today_routines: habits,
+      active_project: null,
+      momentum: await momentumStats(today),
+      vision_checkpoints: [],
+      daily_echo: null,
+      weather: null,
+    };
+  }
+
+  async function calendarMonth(query) {
+    const year = strictInt(query.get("year"));
+    const month = strictInt(query.get("month"));
+    if (year === null || month === null) throw new ApiError(422, "year and month are required");
+    if (month < 1 || month > 12) throw new ApiError(400, "month must be 1-12");
+    const first = new Date(year, month - 1, 1, 12);
+    const last = new Date(year, month, 0, 12);
+    const rows = await selectAll(() => client.from("sparks").select("*")
+      .eq("item_type", "task").eq("is_routine", 0)
+      .gte("due_date", dayKey(first)).lte("due_date", dayKey(last)).order("id"));
+    rows.sort((a, b) => compareText(a.due_date || "", b.due_date || "")
+      || compareText(a.due_time ?? "", b.due_time ?? "")
+      || a.id - b.id);
+    const tasks = rows.map(serializeSpark);
+    const days = [];
+    for (let day = first; day <= last; day = shiftDays(day, 1)) {
+      const key = dayKey(day);
+      days.push({ date: key, tasks: tasks.filter((task) => task.due_date === key), notepads: [] });
+    }
+    return { year, month, start_date: dayKey(first), end_date: dayKey(last), days, notepads: [] };
+  }
+
+  /* ---------- Checklist templates ---------- */
+
+  function serializeChecklistTemplate(row) {
+    const items = Array.isArray(row.items) ? row.items : [];
+    return {
+      id: row.id,
+      name: row.name,
+      items: items.map((item) => String(item)).filter((item) => item.trim()),
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
+  async function checklistTemplateRows() {
+    const rows = await run(client.from("checklist_templates").select("*").order("id"));
+    return rows.sort((a, b) => compareText(String(a.name).toLowerCase(), String(b.name).toLowerCase()) || a.id - b.id);
+  }
+
+  async function listChecklistTemplates() {
+    return (await checklistTemplateRows()).map(serializeChecklistTemplate);
+  }
+
+  async function saveChecklistTemplate(body, templateId = null) {
+    if (given(body.name) && typeof body.name !== "string") throw fieldError("name");
+    if (given(body.items) && !Array.isArray(body.items)) throw fieldError("items");
+    const name = clip(text(body.name), 120);
+    if (!name) throw new ApiError(400, "Template name is required");
+    const items = [];
+    for (const item of body.items || []) {
+      const itemText = text(isPlainObject(item) ? item.text : item || "");
+      if (itemText) items.push(clip(itemText, 500));
+    }
+    if (!items.length) throw new ApiError(400, "Add at least one checklist item before saving a template");
+    const rows = await checklistTemplateRows();
+    let id = templateId;
+    if (id === null) id = rows.find((row) => String(row.name).toLowerCase() === name.toLowerCase())?.id ?? null;
+    let saved;
+    if (id === null) {
+      saved = await run(client.from("checklist_templates").insert({ name, items: items.slice(0, 200) }).select("*").single());
+    } else {
+      if (!rows.some((row) => row.id === id)) throw new ApiError(404, "Template not found");
+      saved = await run(client.from("checklist_templates").update({ name, items: items.slice(0, 200) })
+        .eq("id", id).select("*").single());
+    }
+    return serializeChecklistTemplate(saved);
+  }
+
+  async function deleteChecklistTemplate(id) {
+    const row = await run(client.from("checklist_templates").select("id").eq("id", id).maybeSingle());
+    if (!row) throw new ApiError(404, "Template not found");
+    await run(client.from("checklist_templates").delete().eq("id", id));
+    return { ok: true, id };
   }
 
   async function convertFig(id, body) {
@@ -1424,10 +2789,23 @@
     if (!target) throw new ApiError(400, "target_type or item_type is required");
     const spark = await requireSpark(id);
     if ((spark.item_type || "spark") !== "spark") throw new ApiError(400, "Only inbox sparks can be converted");
+    const assignee = given(body.assignee) ? text(body.assignee) || "Me" : "Me";
+    if ((target === "task" || target === "task_in_phase") && !present(body.project_id)) {
+      const row = await run(client.from("sparks").update({
+        item_type: "task",
+        assignee,
+        extra_data: normalizeTaskExtra(isPlainObject(body.extra_data) ? body.extra_data : {}),
+        is_done: 0,
+        task_status: "pending",
+        due_date: cleanDueDate(body.due_date),
+        due_time: cleanDueTime(body.due_time),
+      }).eq("id", id).select("*").single());
+      return serializeSpark(row);
+    }
     if (target !== "habit") throw new ApiError(503, OFFLINE_DETAIL);
     const row = await run(client.from("sparks").update({
       item_type: "habit",
-      assignee: given(body.assignee) ? text(body.assignee) || "Me" : "Me",
+      assignee,
       extra_data: normalizeHabitExtra(isPlainObject(body.extra_data) ? body.extra_data : {}),
       is_done: 0,
       task_status: null,
@@ -1474,17 +2852,43 @@
     { methods: ["POST"], pattern: /^\/api\/habits\/(\d+)\/graduate$/, handle: (m) => setHabitStatus(Number(m[1]), "graduated") },
     { methods: ["PATCH"], pattern: /^\/api\/habits\/(\d+)\/log$/, handle: (m, body) => logHabitRoute(Number(m[1]), body) },
     { methods: ["POST"], pattern: /^\/api\/habits\/(\d+)\/check-in$/, handle: (m, body) => checkInHabit(Number(m[1]), body) },
+    { methods: ["GET"], pattern: /^\/api\/tasks$/, handle: (m, body, query) => listTasks(query) },
+    { methods: ["POST"], pattern: /^\/api\/tasks$/, handle: (m, body) => createTask(body) },
+    {
+      methods: ["PATCH"],
+      pattern: /^\/api\/tasks\/(\d+)$/,
+      handle: async (m, body) => annotateTask(await updateTask(Number(m[1]), taskFields(body, true))),
+    },
+    {
+      methods: ["PATCH"],
+      pattern: /^\/api\/tasks\/(\d+)\/schedule$/,
+      handle: async (m, body) => annotateTask(await scheduleTask(Number(m[1]), body)),
+    },
+    { methods: ["DELETE"], pattern: /^\/api\/tasks\/(\d+)$/, handle: (m) => deleteTask(Number(m[1])) },
+    { methods: ["GET"], pattern: /^\/api\/logs$/, handle: (m, body, query) => listLogs(query) },
+    { methods: ["PATCH"], pattern: /^\/api\/sparks\/(\d+)\/action$/, handle: (m, body) => sparkAction(Number(m[1]), body) },
+    { methods: ["GET"], pattern: /^\/api\/dashboard\/today$/, signedOut: null, handle: () => dashboardToday() },
+    { methods: ["GET"], pattern: /^\/api\/calendar\/month$/, signedOut: null, handle: (m, body, query) => calendarMonth(query) },
+    { methods: ["GET"], pattern: /^\/api\/checklist-templates$/, handle: () => listChecklistTemplates() },
+    { methods: ["POST"], pattern: /^\/api\/checklist-templates$/, handle: (m, body) => saveChecklistTemplate(body) },
+    { methods: ["PUT"], pattern: /^\/api\/checklist-templates\/(\d+)$/, handle: (m, body) => saveChecklistTemplate(body, Number(m[1])) },
+    { methods: ["DELETE"], pattern: /^\/api\/checklist-templates\/(\d+)$/, handle: (m) => deleteChecklistTemplate(Number(m[1])) },
   ];
 
   const OFFLINE_DETAIL = "This part of FICUS isn't available online yet.";
 
   // Lists the app loads at startup for modules not yet in the cloud; empty keeps every page rendering.
   const PENDING_MODULE_LISTS = [
-    /^\/api\/tasks$/, /^\/api\/workbench\/projects$/, /^\/api\/projects$/,
+    /^\/api\/workbench\/projects$/, /^\/api\/projects$/,
     /^\/api\/references$/, /^\/api\/reference-folders$/, /^\/api\/vault\/notebooks$/,
     /^\/api\/vision$/, /^\/api\/visions$/, /^\/api\/contacts$/, /^\/api\/notepads(\/active)?$/,
-    /^\/api\/logs$/,
   ];
+
+  function signedOutNoun(path) {
+    if (path.startsWith("/api/habits")) return "trackers";
+    if (/^\/api\/(tasks|logs|checklist-templates)/.test(path) || path.endsWith("/action")) return "your Log and Time";
+    return "figs";
+  }
 
   function describeRequest(input, init) {
     if (typeof input !== "string" && !(input instanceof URL)) return null;
@@ -1516,10 +2920,9 @@
       if (!client) return jsonResponse(503, { detail: "Cloud sync is unavailable right now." });
       await sessionReady;
       if (!session) {
-        const what = request.path.startsWith("/api/habits") ? "trackers" : "figs";
         return request.method === "GET"
-          ? jsonResponse(200, [])
-          : jsonResponse(401, { detail: `Sign in with Google to save ${what}.` });
+          ? jsonResponse(200, "signedOut" in route ? route.signedOut : [])
+          : jsonResponse(401, { detail: `Sign in with Google to save ${signedOutNoun(request.path)}.` });
       }
       try {
         return jsonResponse(200, await route.handle(match, request.body, request.query));

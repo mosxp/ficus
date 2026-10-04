@@ -26,9 +26,9 @@
         url: "https://waxbsyvqvyjjppbswqoc.supabase.co",
         publishableKey: "sb_publishable_1YRF0shFj3rLXNKyWAOpGA_UzHKgpFi",
       };
-      // Static site only. Cover, Fig and Tracker are always open; other pages wait for ficus_cloud.js
+      // Static site only. Cover, Fig, Tracker, Log and Time are always open; other pages wait for ficus_cloud.js
       // to list them, and a missing list (an older cached copy of that file) locks nothing.
-      const FICUS_ALWAYS_OPEN_VIEWS = ["cover", "sparks", "habits"];
+      const FICUS_ALWAYS_OPEN_VIEWS = ["cover", "sparks", "habits", "today", "tasks"];
       window.ficusViewOffline = (view) => {
         if (!document.body?.classList.contains("ficus-cloud") || FICUS_ALWAYS_OPEN_VIEWS.includes(view)) return false;
         const online = window.FICUS_ONLINE_VIEWS;
@@ -36,7 +36,7 @@
       };
     </script>
     <!-- Bump ?v= whenever ficus_cloud.js changes so browsers never pair it with a different index.html. -->
-    <script src="ficus_cloud.js?v=3"></script>
+    <script src="ficus_cloud.js?v=4"></script>
     <script>
       tailwind.config = {
         theme: {
