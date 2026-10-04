@@ -5,14 +5,16 @@
  * routes mirror main.py / database.py so the rest of index.html is unchanged.
  * With the local server running, every request passes straight through.
  *
- * Ported so far: Figs (inbox sparks), tags, Trackers (habits), and the Log and
- * Time pages (tasks, events and log entries, plus checklist templates).
+ * Ported so far: Figs (inbox sparks), tags, Trackers (habits), the Log and
+ * Time pages (tasks, events and log entries, plus checklist templates), the
+ * Project page (binders and their ship dates), and /api/upload, which stores
+ * files in the Supabase Storage bucket `uploads`.
  */
 (function () {
   "use strict";
 
   // Pages whose data lives in Supabase; index.html locks the other nav tabs on the static site.
-  window.FICUS_ONLINE_VIEWS = ["cover", "sparks", "habits", "today", "tasks"];
+  window.FICUS_ONLINE_VIEWS = ["cover", "sparks", "habits", "today", "tasks", "projects"];
 
   const config = window.FICUS_SUPABASE_CONFIG || {};
   const nativeFetch = window.fetch.bind(window);
@@ -2001,7 +2003,8 @@
     return data;
   }
 
-  // Projects aren't online yet, so no task can point at one.
+  // A task's project_id / phase_id point at the retired phase workbench, which isn't online;
+  // tasks join binder projects through Task / Event blocks instead.
   function annotateTask(task) {
     task.project_title = null;
     task.phase_title = null;
@@ -2504,6 +2507,7 @@
       is_multiday: isMultiday,
       extra_data: extra,
     }).eq("id", id).select("*").single());
+    if (await shipAfterTaskUpdate(row, updated)) return serializeSpark(await requireSpark(id));
     return serializeSpark(updated);
   }
 
@@ -2525,6 +2529,7 @@
   async function deleteTask(id) {
     const row = await requireSpark(id);
     if (row.item_type !== "task") throw new ApiError(400, "Only tasks can be deleted here");
+    await shipBeforeTaskDelete(row);
     await run(client.from("sparks").delete().eq("id", id).eq("item_type", "task"));
     return { status: "success", deleted_id: id, ok: true, id };
   }
@@ -2784,6 +2789,946 @@
     return { ok: true, id };
   }
 
+  /* ---------- Uploads (Supabase Storage) ---------- */
+
+  const UPLOAD_BUCKET = "uploads";
+  const IMAGE_UPLOADS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif"];
+  const DOCUMENT_UPLOADS = [
+    ".pdf", ".txt", ".md", ".rtf", ".csv", ".json",
+    ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx",
+    ".pages", ".numbers", ".key", ".odt", ".ods", ".odp", ".epub", ".zip",
+  ];
+  const AUDIO_UPLOADS = [".m4a", ".mp3", ".wav", ".aac", ".ogg", ".oga", ".opus", ".flac", ".caf", ".weba"];
+  const VIDEO_UPLOADS = [".mp4", ".mov", ".m4v", ".webm"];
+  const ALLOWED_UPLOADS = [...IMAGE_UPLOADS, ...DOCUMENT_UPLOADS, ...AUDIO_UPLOADS, ...VIDEO_UPLOADS];
+  const MB = 1024 * 1024;
+  // The Supabase Free plan stores files up to 50MB, below main.py's audio and video limits.
+  const CLOUD_UPLOAD_CAP = 50 * MB;
+  // Browsers leave File.type blank for some formats (HEIC photos, iPhone voice memos).
+  const UPLOAD_CONTENT_TYPES = {
+    ".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".wav": "audio/wav", ".aac": "audio/aac", ".ogg": "audio/ogg",
+    ".oga": "audio/ogg", ".opus": "audio/ogg", ".flac": "audio/flac", ".caf": "audio/x-caf", ".weba": "audio/webm",
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/x-m4v", ".webm": "video/webm",
+    ".heic": "image/heic", ".heif": "image/heif", ".pdf": "application/pdf",
+  };
+
+  function uploadLimit(suffix) {
+    let limit = 25 * MB;
+    if (AUDIO_UPLOADS.includes(suffix)) limit = 100 * MB;
+    if (VIDEO_UPLOADS.includes(suffix)) limit = 500 * MB;
+    return Math.min(limit, CLOUD_UPLOAD_CAP);
+  }
+
+  function randomHex() {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function uploadFile(form) {
+    const file = typeof FormData !== "undefined" && form instanceof FormData ? form.get("file") : null;
+    if (!(file instanceof Blob)) throw new ApiError(422, "file is required");
+    const name = String(file.name || "file").split(/[\\/]/).pop() || "file";
+    const dot = name.lastIndexOf(".");
+    const suffix = dot > 0 ? name.slice(dot).toLowerCase() : "";
+    if (!ALLOWED_UPLOADS.includes(suffix)) throw new ApiError(400, "Unsupported file type");
+    const limit = uploadLimit(suffix);
+    if (file.size > limit) throw new ApiError(400, `File is larger than ${limit / MB}MB`);
+    if (!file.size) throw new ApiError(400, "Empty file");
+    const path = `${session.user.id}/${randomHex()}${suffix}`;
+    const bucket = client.storage.from(UPLOAD_BUCKET);
+    const { error } = await bucket.upload(path, file, {
+      contentType: file.type || UPLOAD_CONTENT_TYPES[suffix] || "application/octet-stream",
+      cacheControl: "31536000",
+      upsert: false,
+    });
+    if (error) {
+      if (/bucket not found/i.test(error.message || "")) {
+        throw new ApiError(503, "File uploads aren't set up yet. Run supabase/04_storage.sql in Supabase.");
+      }
+      throw new ApiError(Number(error.status || error.statusCode) || 500, error.message || "Upload failed");
+    }
+    return { url: bucket.getPublicUrl(path).data.publicUrl, bytes: file.size, filename: name };
+  }
+
+  /* ---------- Projects (binders: projects, sections, lines) ---------- */
+
+  const BINDER_STYLE_FIELDS = ["cover_color", "cover_image", "spine_color"];
+  const BINDER_STYLE_SHIP_KEYS = [...BINDER_STYLE_FIELDS, "ship_date"];
+  const BINDER_PROJECT_STATUSES = ["active", "graduated"];
+  const BINDER_RECORD_BLOCK_TYPE = "project_record";
+  const BINDER_SECTION_MAX_BLOCKS = 4;
+  const BINDER_SECTION_MAX_COLUMNS = 6;
+  const BINDER_COLUMN_MIN_WIDTH = 256;
+  const BINDER_COLUMN_MAX_WIDTH = 448;
+  const BINDER_TRAY_MAX_COMPARTMENTS = 4;
+  const BINDER_TRAY_MAX_PER_COMPARTMENT = 4;
+  const BINDER_MAX_SUBSECTIONS = 8;
+  const BINDER_HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+  const BINDER_IMAGE_URL = /^(\/uploads\/[A-Za-z0-9._-]+|https?:\/\/[^\s"'()<>\\]+)$/;
+  const SHIP_TITLE_PREFIX = "Ship: ";
+  const SHIP_TITLE_JOINER = " \u00b7 ";
+
+  // Python truthiness and str(), for fields copied the way database.py copies them.
+  function pyFalsy(value) {
+    if (Array.isArray(value)) return !value.length;
+    if (isPlainObject(value)) return !Object.keys(value).length;
+    return value === undefined || value === null || value === false || value === 0 || value === "";
+  }
+
+  function pyStr(value) {
+    if (value === undefined || value === null) return "None";
+    if (typeof value === "boolean") return value ? "True" : "False";
+    return String(value);
+  }
+
+  // str(value or "").strip()
+  function pyText(value) {
+    return pyFalsy(value) ? "" : pyStr(value).trim();
+  }
+
+  // Python float(): numbers, bools and numeric strings; anything else is null.
+  function pyFloat(value) {
+    if (typeof value === "boolean") return value ? 1 : 0;
+    if (typeof value === "number") return value;
+    if (typeof value !== "string") return null;
+    const word = value.trim().toLowerCase();
+    if (/^[-+]?(inf|infinity)$/.test(word)) return word.startsWith("-") ? -Infinity : Infinity;
+    if (/^[-+]?nan$/.test(word)) return NaN;
+    return /^[-+]?(\d+\.?\d*|\.\d+)(e[-+]?\d+)?$/.test(word) ? Number(word) : null;
+  }
+
+  // Python round(): halves go to the even neighbour.
+  function roundHalfEven(value) {
+    const floor = Math.floor(value);
+    const diff = value - floor;
+    if (diff !== 0.5) return Math.round(value);
+    return floor % 2 === 0 ? floor : floor + 1;
+  }
+
+  // Fields present in the body, validated like the FastAPI models (exclude_unset).
+  function modelFields(body, kinds) {
+    const fields = {};
+    for (const [key, kind] of Object.entries(kinds)) {
+      if (!has(body, key)) continue;
+      const value = body[key];
+      if (kind === "blocks") {
+        if (value !== null && !Array.isArray(value) && !isPlainObject(value)) throw fieldError(key);
+        fields[key] = value;
+      } else {
+        fields[key] = coerceField(key, kind, value);
+      }
+    }
+    return fields;
+  }
+
+  const BINDER_STYLE_SHIP_KINDS = { cover_color: "text", cover_image: "text", spine_color: "text", ship_date: "text" };
+
+  function parseBinderBlocks(raw) {
+    if (raw === undefined || raw === null) return [];
+    if (Array.isArray(raw)) return raw;
+    let parsed = raw;
+    if (typeof raw === "string") {
+      const source = raw.trim();
+      if (!source) return [];
+      try {
+        parsed = JSON.parse(source);
+      } catch (_) {
+        return [];
+      }
+    }
+    if (isPlainObject(parsed) && (parsed.__np_blocks === 1 || parsed.__np_blocks === true)) {
+      return Array.isArray(parsed.blocks) ? parsed.blocks : [];
+    }
+    return Array.isArray(parsed) ? parsed : [];
+  }
+
+  function dumpBinderBlocks(blocks) {
+    if (blocks === undefined || blocks === null) return [];
+    if (typeof blocks === "string") {
+      const source = blocks.trim();
+      if (!source) return [];
+      try {
+        return JSON.parse(source);
+      } catch (_) {
+        return [];
+      }
+    }
+    return Array.isArray(blocks) || isPlainObject(blocks) ? blocks : [];
+  }
+
+  function cleanBinderStyle(field, value) {
+    const style = pyText(value);
+    if (!style) return null;
+    if (field.endsWith("_image")) {
+      if (!BINDER_IMAGE_URL.test(style)) throw new ApiError(400, "Background image must be an uploaded file or an http(s) URL");
+      return style;
+    }
+    if (!BINDER_HEX_COLOR.test(style)) throw new ApiError(400, "Colors must be hex values like #A3B18A");
+    return style.toUpperCase();
+  }
+
+  function binderStyleChanges(fields) {
+    const changes = {};
+    for (const key of BINDER_STYLE_FIELDS) {
+      if (has(fields, key)) changes[key] = cleanBinderStyle(key, fields[key]);
+    }
+    return changes;
+  }
+
+  function parseBinderTracker(raw) {
+    let data = raw;
+    if (typeof raw === "string") {
+      try {
+        data = JSON.parse(raw || "null");
+      } catch (_) {
+        return null;
+      }
+    }
+    if (!isPlainObject(data)) return null;
+    const label = clip(pyText(data.label), 40);
+    if (!label) return null;
+    let target = data.target === undefined || data.target === null || data.target === "" ? null : pyFloat(data.target);
+    if (target !== null && (Number.isNaN(target) || target <= 0 || !Number.isFinite(target))) target = null;
+    return { label, unit: clip(pyText(data.unit), 16), target };
+  }
+
+  function binderRecordSum(blocks) {
+    let total = 0;
+    for (const block of parseBinderBlocks(blocks)) {
+      if (!isPlainObject(block) || block.type !== BINDER_RECORD_BLOCK_TYPE) continue;
+      for (const entry of Array.isArray(block.entries) ? block.entries : []) {
+        if (!isPlainObject(entry)) continue;
+        const value = pyFloat(entry.value);
+        if (value !== null && Number.isFinite(value)) total += value;
+      }
+    }
+    return total;
+  }
+
+  // Sum of every Tracker Log entry across a project's sections and columns.
+  function binderTrackerTotal(sectionRows) {
+    let total = 0;
+    for (const row of sectionRows) {
+      total += binderRecordSum(row.blocks);
+      for (const column of parseBinderBlocks(row.extra_columns)) {
+        if (isPlainObject(column)) total += binderRecordSum(column.blocks);
+      }
+    }
+    return Math.round(total * 1e4) / 1e4;
+  }
+
+  function clampColumnWidth(value) {
+    const number = pyFloat(value);
+    if (number === null || !Number.isFinite(number)) return null;
+    return Math.max(BINDER_COLUMN_MIN_WIDTH, Math.min(BINDER_COLUMN_MAX_WIDTH, roundHalfEven(number)));
+  }
+
+  function iterItems(value) {
+    if (Array.isArray(value)) return value;
+    if (typeof value === "string") return Array.from(value);
+    if (isPlainObject(value)) return Object.keys(value);
+    return [];
+  }
+
+  function parseTrayCompartments(raw) {
+    if (!Array.isArray(raw)) return [];
+    const compartments = [];
+    const seen = new Set();
+    raw.slice(0, BINDER_TRAY_MAX_COMPARTMENTS).forEach((comp, index) => {
+      if (!isPlainObject(comp)) return;
+      let compId = clip(pyText(comp.id), 40) || `cmp_${index + 1}`;
+      if (seen.has(compId)) compId = `${compId}_${index + 1}`;
+      seen.add(compId);
+      const blockIds = iterItems(pyFalsy(comp.block_ids) ? [] : comp.block_ids)
+        .map((id) => pyStr(id).trim())
+        .filter(Boolean);
+      compartments.push({
+        id: compId,
+        title: clip(pyText(comp.title), 40),
+        block_ids: blockIds.slice(0, BINDER_TRAY_MAX_PER_COMPARTMENT),
+      });
+    });
+    return compartments;
+  }
+
+  function parseColumnLayout(raw) {
+    let parsed = raw;
+    if (typeof raw === "string") {
+      try {
+        parsed = JSON.parse(raw || "{}");
+      } catch (_) {
+        parsed = {};
+      }
+    }
+    if (!isPlainObject(parsed) || parsed.mode !== "tray") return {};
+    const compartments = parseTrayCompartments(parsed.compartments);
+    return compartments.length ? { mode: "tray", compartments } : {};
+  }
+
+  function columnBlockCap(layout) {
+    const compartments = layout.compartments || [];
+    return compartments.length ? BINDER_TRAY_MAX_PER_COMPARTMENT * compartments.length : BINDER_SECTION_MAX_BLOCKS;
+  }
+
+  function binderColumnPayload(colId, blocks, width, layout) {
+    const parsedLayout = parseColumnLayout(layout);
+    const payload = { id: colId, blocks: blocks.slice(0, columnBlockCap(parsedLayout)), ...parsedLayout };
+    const clamped = clampColumnWidth(width);
+    if (clamped !== null) payload.width = clamped;
+    return payload;
+  }
+
+  // Columns after the first; the first column lives in the section's `blocks`.
+  function parseSectionExtraColumns(raw) {
+    let parsed = raw;
+    if (typeof raw === "string") {
+      try {
+        parsed = JSON.parse(raw || "[]");
+      } catch (_) {
+        parsed = [];
+      }
+    }
+    if (!Array.isArray(parsed)) return [];
+    const columns = [];
+    parsed.slice(0, BINDER_SECTION_MAX_COLUMNS - 1).forEach((col, index) => {
+      if (!isPlainObject(col)) return;
+      let colId = pyText(col.id) || `col_${index + 1}`;
+      if (colId === "main") colId = `col_${index + 1}`;
+      columns.push(binderColumnPayload(colId, parseBinderBlocks(col.blocks), col.width, col));
+    });
+    return columns;
+  }
+
+  function migrateSectionBlocksFromLines(lines) {
+    const migrated = [];
+    for (const line of lines) {
+      if (Array.isArray(line.blocks) && line.blocks.length) {
+        for (const block of line.blocks) {
+          migrated.push(block);
+          if (migrated.length >= 4) return migrated.slice(0, 4);
+        }
+        continue;
+      }
+      const content = text(line.content);
+      if (content) {
+        migrated.push({ id: `migrated_${line.id}`, type: "note", title: "Note", html: `<p>${content}</p>`, content: `<p>${content}</p>` });
+        if (migrated.length >= 4) return migrated.slice(0, 4);
+      }
+    }
+    return migrated.slice(0, 4);
+  }
+
+  function binderStyleShipPayload(row) {
+    const payload = {};
+    for (const field of BINDER_STYLE_FIELDS) payload[field] = row[field] || null;
+    payload.ship_date = row.ship_date || null;
+    payload.ship_event_id = row.ship_event_id ? Number(row.ship_event_id) : null;
+    return payload;
+  }
+
+  function serializeBinderLine(row) {
+    return {
+      id: Number(row.id),
+      section_id: Number(row.section_id),
+      content: text(row.content),
+      is_completed: Boolean(row.is_completed),
+      blocks: parseBinderBlocks(row.blocks),
+      created_at: row.created_at,
+    };
+  }
+
+  function serializeBinderSection(row, lines = []) {
+    let blocks = parseBinderBlocks(row.blocks);
+    if (!blocks.length && lines.length) blocks = migrateSectionBlocksFromLines(lines);
+    const mainColumn = binderColumnPayload("main", blocks, row.main_width, row.main_layout);
+    const columns = [mainColumn, ...parseSectionExtraColumns(row.extra_columns)];
+    return {
+      id: Number(row.id),
+      project_id: Number(row.project_id),
+      parent_id: row.parent_id ? Number(row.parent_id) : null,
+      section_index: Number(row.section_index),
+      title: text(row.title) || `Section ${row.section_index}`,
+      created_at: row.created_at,
+      blocks: mainColumn.blocks,
+      columns,
+      lines,
+      line_count: lines.length,
+      completed_count: lines.filter((line) => line.is_completed).length,
+      block_count: columns.reduce((sum, col) => sum + col.blocks.length, 0),
+      ...binderStyleShipPayload(row),
+    };
+  }
+
+  function serializeBinderProject(row, sections = null, stats = null) {
+    const payload = {
+      id: Number(row.id),
+      title: text(row.title) || "Untitled Project",
+      description: text(row.description),
+      created_at: row.created_at,
+      sections: sections || [],
+      ...binderStyleShipPayload(row),
+      tracker: parseBinderTracker(row.tracker),
+      status: BINDER_PROJECT_STATUSES.includes(row.status) ? row.status : "active",
+      graduated_at: row.graduated_at || null,
+    };
+    if (stats) {
+      Object.assign(payload, stats);
+    } else if (sections) {
+      payload.section_count = sections.length;
+      payload.lines_total = sections.reduce((sum, s) => sum + Number(s.line_count || s.lines.length), 0);
+      payload.lines_completed = sections.reduce((sum, s) => sum + Number(s.completed_count || 0), 0);
+    }
+    return payload;
+  }
+
+  async function requireRow(table, id, detail, columns = "*") {
+    const row = await run(client.from(table).select(columns).eq("id", id).maybeSingle());
+    if (!row) throw new ApiError(404, detail);
+    return row;
+  }
+
+  const requireBinderProject = (id, columns) => requireRow("projects", id, "Project not found", columns);
+  const requireBinderSection = (id, columns) => requireRow("project_sections", id, "Section not found", columns);
+  const requireBinderLine = (id) => requireRow("project_lines", id, "Line not found");
+
+  function projectSectionRows(projectId, columns = "*") {
+    return selectAll(() => client.from("project_sections").select(columns).eq("project_id", projectId).order("id"));
+  }
+
+  async function linesForSections(sectionIds) {
+    if (!sectionIds.length) return [];
+    return selectAll(() => client.from("project_lines").select("*").in("section_id", sectionIds)
+      .order("created_at").order("id"));
+  }
+
+  const bySectionOrder = (a, b) => a.section_index - b.section_index || a.id - b.id;
+
+  async function listBinderProjects() {
+    const today = dayKey(localToday());
+    const [projects, sections, lines] = await Promise.all([
+      selectAll(() => client.from("projects").select("*").order("id")),
+      selectAll(() => client.from("project_sections").select("*").order("id")),
+      selectAll(() => client.from("project_lines").select("id, section_id, is_completed").order("id")),
+    ]);
+    projects.sort((a, b) => (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0) || b.id - a.id);
+    return projects.map((row) => {
+      const own = sections.filter((section) => section.project_id === row.id);
+      const top = own.filter((section) => !section.parent_id).sort(bySectionOrder);
+      const ownIds = new Set(own.map((section) => section.id));
+      const ownLines = lines.filter((line) => ownIds.has(line.section_id));
+      const upcoming = own.map((section) => section.ship_date).filter((day) => day && day >= today).sort();
+      return serializeBinderProject(row, null, {
+        section_count: top.length,
+        lines_total: ownLines.length,
+        lines_completed: ownLines.filter((line) => line.is_completed).length,
+        section_tabs: top.map((section) => ({
+          id: Number(section.id),
+          title: text(section.title) || `Section ${section.section_index}`,
+          spine_color: section.spine_color || null,
+          ship_date: section.ship_date || null,
+        })),
+        next_section_ship_date: upcoming[0] || null,
+        tracker_total: binderTrackerTotal(own),
+      });
+    });
+  }
+
+  async function getBinderProject(id) {
+    const row = await requireBinderProject(id);
+    const sections = (await projectSectionRows(id)).sort(bySectionOrder);
+    const lines = await linesForSections(sections.map((section) => section.id));
+    const serialized = sections.map((section) => serializeBinderSection(
+      section,
+      lines.filter((line) => line.section_id === section.id).map(serializeBinderLine),
+    ));
+    const payload = serializeBinderProject(row, serialized);
+    payload.tracker_total = binderTrackerTotal(sections);
+    return payload;
+  }
+
+  async function createBinderProject(title, description) {
+    const name = text(title);
+    if (!name) throw new ApiError(400, "Project title is required");
+    const row = await run(client.from("projects").insert({ title: name, description: text(description) })
+      .select("id").single());
+    await run(client.from("project_sections").insert({ project_id: row.id, section_index: 1, title: "Section 1" }));
+    return getBinderProject(row.id);
+  }
+
+  function binderShipDateChange(row, fields) {
+    if (!has(fields, "ship_date")) return null;
+    const shipDate = cleanDueDate(fields.ship_date);
+    return (row.ship_date || null) === shipDate ? null : { ship_date: shipDate };
+  }
+
+  async function updateBinderProject(id, fields) {
+    const row = await requireBinderProject(id);
+    let title = row.title;
+    let description = row.description;
+    if (has(fields, "title")) {
+      title = text(fields.title);
+      if (!title) throw new ApiError(400, "Project title is required");
+    }
+    if (has(fields, "description")) description = text(fields.description);
+    const changes = { title, description, ...binderStyleChanges(fields) };
+    if (has(fields, "tracker")) {
+      const raw = fields.tracker;
+      const tracker = parseBinderTracker(raw);
+      if (!pyFalsy(raw) && !tracker) throw new ApiError(400, "A tracker needs a label");
+      changes.tracker = tracker;
+    }
+    if (has(fields, "status")) {
+      const status = text(fields.status).toLowerCase();
+      if (!BINDER_PROJECT_STATUSES.includes(status)) throw new ApiError(400, "status must be active or graduated");
+      if (status !== (row.status || "active")) {
+        changes.status = status;
+        changes.graduated_at = status === "graduated" ? new Date().toISOString() : null;
+      }
+    }
+    const shipChange = binderShipDateChange(row, fields);
+    await run(client.from("projects").update({ ...changes, ...shipChange }).eq("id", id));
+    const renamed = title !== row.title;
+    if (renamed || shipChange) await syncShipCommitment("project", id);
+    if (renamed) {
+      const shipping = (await projectSectionRows(id, "id, ship_date")).filter((section) => section.ship_date);
+      for (const section of shipping) await syncShipCommitment("section", section.id);
+    }
+    return getBinderProject(id);
+  }
+
+  async function deleteBinderProject(id) {
+    const row = await requireBinderProject(id, "id, ship_event_id");
+    const sections = await projectSectionRows(id, "id, ship_event_id");
+    for (const owner of [row, ...sections]) await deleteShipEvent(owner.ship_event_id);
+    const sectionIds = sections.map((section) => section.id);
+    if (sectionIds.length) {
+      await run(client.from("project_lines").delete().in("section_id", sectionIds));
+      await run(client.from("project_sections").delete().in("id", sectionIds));
+    }
+    await run(client.from("projects").delete().eq("id", id));
+    return { ok: true, id };
+  }
+
+  async function createBinderSection(projectId, title, parentId) {
+    await requireBinderProject(projectId, "id");
+    const sections = await projectSectionRows(projectId, "id, parent_id, section_index");
+    let siblings;
+    if (parentId !== null) {
+      const parent = sections.find((section) => section.id === parentId);
+      if (!parent) throw new ApiError(404, "Parent section not found");
+      if (parent.parent_id) throw new ApiError(400, "Sub-sections cannot contain further sub-sections");
+      siblings = sections.filter((section) => section.parent_id === parentId);
+      if (siblings.length >= BINDER_MAX_SUBSECTIONS) {
+        throw new ApiError(400, `A section can hold up to ${BINDER_MAX_SUBSECTIONS} sub-sections`);
+      }
+    } else {
+      siblings = sections.filter((section) => !section.parent_id);
+    }
+    const nextIndex = Math.max(0, ...siblings.map((section) => Number(section.section_index) || 0)) + 1;
+    const fallback = parentId !== null ? `Sub-section ${nextIndex}` : `Section ${nextIndex}`;
+    const row = await run(client.from("project_sections").insert({
+      project_id: projectId,
+      parent_id: parentId,
+      section_index: nextIndex,
+      title: pyText(title) || fallback,
+    }).select("*").single());
+    return serializeBinderSection(row, []);
+  }
+
+  async function updateBinderSection(id, title, blocks, columns, fields) {
+    const row = await requireBinderSection(id);
+    const changes = {};
+    let renamed = false;
+    if (title !== null) {
+      const name = text(title);
+      if (!name) throw new ApiError(400, "Section title is required");
+      changes.title = name;
+      renamed = name !== row.title;
+    }
+    Object.assign(changes, binderStyleChanges(fields));
+    const shipChange = binderShipDateChange(row, fields);
+    Object.assign(changes, shipChange);
+    if (columns !== null) {
+      if (!Array.isArray(columns) || !columns.length) throw new ApiError(400, "Columns must be a non-empty list");
+      const first = isPlainObject(columns[0]) ? columns[0] : {};
+      const mainColumn = binderColumnPayload("main", parseBinderBlocks(pyFalsy(first.blocks) ? [] : first.blocks), first.width, first);
+      const mainLayout = {};
+      for (const key of ["mode", "compartments"]) {
+        if (has(mainColumn, key)) mainLayout[key] = mainColumn[key];
+      }
+      changes.extra_columns = parseSectionExtraColumns(columns.slice(1));
+      changes.main_width = mainColumn.width ?? null;
+      changes.main_layout = mainLayout;
+      changes.blocks = mainColumn.blocks;
+    } else if (blocks !== null) {
+      changes.blocks = parseBinderBlocks(blocks).slice(0, columnBlockCap(parseColumnLayout(row.main_layout)));
+    }
+    let updated = row;
+    if (Object.keys(changes).length) {
+      updated = await run(client.from("project_sections").update(changes).eq("id", id).select("*").single());
+    }
+    if (shipChange || (renamed && row.ship_date)) {
+      await syncShipCommitment("section", id);
+      updated = await requireBinderSection(id);
+    }
+    const lines = (await linesForSections([id])).map(serializeBinderLine);
+    return serializeBinderSection(updated, lines);
+  }
+
+  async function reorderBinderSections(projectId, sectionIds) {
+    await requireBinderProject(projectId, "id");
+    if (!sectionIds.length) throw new ApiError(400, "Section order payload is empty");
+    const sections = await projectSectionRows(projectId, "id, parent_id");
+    const first = sections.find((section) => section.id === sectionIds[0]);
+    if (!first) throw new ApiError(404, "Section not found");
+    const siblings = sections
+      .filter((section) => (first.parent_id ? section.parent_id === first.parent_id : !section.parent_id))
+      .map((section) => section.id);
+    const incoming = [...sectionIds].sort((a, b) => a - b);
+    siblings.sort((a, b) => a - b);
+    if (incoming.length !== siblings.length || incoming.some((sectionId, i) => sectionId !== siblings[i])) {
+      throw new ApiError(400, "Section order payload must include every sibling section exactly once");
+    }
+    for (const [index, sectionId] of sectionIds.entries()) {
+      await run(client.from("project_sections").update({ section_index: index + 1 })
+        .eq("id", sectionId).eq("project_id", projectId));
+    }
+    return getBinderProject(projectId);
+  }
+
+  async function deleteBinderSection(id) {
+    const row = await requireBinderSection(id, "id, project_id, parent_id");
+    const projectId = Number(row.project_id);
+    const sections = await projectSectionRows(projectId, "id, parent_id, ship_event_id");
+    if (!row.parent_id && sections.filter((section) => !section.parent_id).length <= 1) {
+      throw new ApiError(400, "Cannot delete the only section in a project");
+    }
+    const doomed = [id, ...sections.filter((section) => section.parent_id === id).map((section) => section.id)];
+    for (const section of sections.filter((s) => doomed.includes(s.id))) await deleteShipEvent(section.ship_event_id);
+    await run(client.from("project_lines").delete().in("section_id", doomed));
+    await run(client.from("project_sections").delete().in("id", doomed));
+    return { ok: true, id, project_id: projectId, deleted_ids: doomed };
+  }
+
+  async function createBinderLine(sectionId, content, blocks, isCompleted) {
+    await requireBinderSection(sectionId, "id");
+    const row = await run(client.from("project_lines").insert({
+      section_id: sectionId,
+      content: pyText(content),
+      is_completed: Boolean(isCompleted),
+      blocks: dumpBinderBlocks(blocks),
+    }).select("*").single());
+    return serializeBinderLine(row);
+  }
+
+  async function updateBinderLine(id, content, blocks, isCompleted) {
+    const row = await requireBinderLine(id);
+    const updated = await run(client.from("project_lines").update({
+      content: content === null ? row.content : pyText(content),
+      blocks: blocks === null ? row.blocks : dumpBinderBlocks(blocks),
+      is_completed: isCompleted === null ? row.is_completed : Boolean(isCompleted),
+    }).eq("id", id).select("*").single());
+    return serializeBinderLine(updated);
+  }
+
+  async function toggleBinderLine(id) {
+    const row = await requireBinderLine(id);
+    const updated = await run(client.from("project_lines").update({ is_completed: !row.is_completed })
+      .eq("id", id).select("*").single());
+    return serializeBinderLine(updated);
+  }
+
+  async function deleteBinderLine(id) {
+    await requireBinderLine(id);
+    await run(client.from("project_lines").delete().eq("id", id));
+    return { ok: true, id };
+  }
+
+  /* Ship dates: project/section <-> commitment event <-> active Daily Log entry. */
+
+  async function sparkById(id) {
+    if (!present(id)) return null;
+    return run(client.from("sparks").select("*").eq("id", id).maybeSingle());
+  }
+
+  async function shipSource(kind, sourceId) {
+    if (kind === "project") {
+      const row = await run(client.from("projects").select("*").eq("id", sourceId).maybeSingle());
+      if (!row) return { row: null, table: "projects", title: "", projectId: null };
+      return { row, table: "projects", title: `${SHIP_TITLE_PREFIX}${row.title}`, projectId: Number(row.id) };
+    }
+    const row = await run(client.from("project_sections").select("*").eq("id", sourceId).maybeSingle());
+    if (!row) return { row: null, table: "project_sections", title: "", projectId: null };
+    const project = await run(client.from("projects").select("title").eq("id", row.project_id).maybeSingle());
+    const projectTitle = project ? project.title : "Project";
+    return {
+      row,
+      table: "project_sections",
+      title: `${SHIP_TITLE_PREFIX}${row.title}${SHIP_TITLE_JOINER}${projectTitle}`,
+      projectId: Number(row.project_id),
+    };
+  }
+
+  function shipNameFromTitle(title, kind, projectTitle) {
+    let name = text(title);
+    const prefix = SHIP_TITLE_PREFIX.trim();
+    if (name.toLowerCase().startsWith(prefix.toLowerCase())) name = name.slice(prefix.length).trim();
+    if (kind === "section") {
+      const suffix = `${SHIP_TITLE_JOINER}${projectTitle}`;
+      if (name.endsWith(suffix)) name = name.slice(0, -suffix.length).trim();
+    }
+    return name;
+  }
+
+  async function shipEventActiveLogs(eventId) {
+    const rows = await selectAll(() => client.from("sparks").select("*")
+      .eq("item_type", "task").eq("extra_data->>is_active_schedule_log", "true").order("id"));
+    return rows.filter((row) => {
+      if (Number(row.id) === Number(eventId)) return false;
+      const extra = parseExtra(row.extra_data);
+      return isActiveScheduleLogExtra(extra) && scheduleLogLinkId(extra, "event") === String(eventId);
+    });
+  }
+
+  async function deleteShipEvent(eventId) {
+    if (!eventId) return;
+    for (const log of await shipEventActiveLogs(eventId)) {
+      await run(client.from("sparks").delete().eq("id", log.id));
+    }
+    await run(client.from("sparks").delete().eq("id", eventId).eq("item_type", "task"));
+  }
+
+  async function insertShipRow({ title, day, extra, notes, createdAt }) {
+    const allDay = extra.is_event_log ? 0 : 1;
+    const row = await run(client.from("sparks").insert({
+      title,
+      status: "in_cloud",
+      created_at: createdAt,
+      item_type: "task",
+      is_done: 0,
+      assignee: "Me",
+      extra_data: normalizeTaskExtra(extra),
+      due_date: day,
+      end_date: day,
+      notes,
+      is_routine: 0,
+      recurrence_days: "[]",
+      task_status: "pending",
+      postponed_count: 0,
+      is_parked: 0,
+      entry_type: "event",
+      is_theme_of_day: 0,
+      accent_color: EVENT_DEFAULT_ACCENT,
+      emoji: null,
+      is_all_day: allDay,
+      is_multiday: allDay,
+    }).select("id").single());
+    return Number(row.id);
+  }
+
+  function createShipLog(eventId, title, day, shipLink) {
+    return insertShipRow({
+      title,
+      day,
+      extra: {
+        is_event_log: true,
+        is_active_schedule_log: true,
+        log_status: "scheduled",
+        stream_date: day,
+        stream_time: "00:00",
+        linked_event_id: eventId,
+        event_id: eventId,
+        schedule_linked: false,
+        event_title: title,
+        event_status: "pending",
+        timing_mode: "multiday",
+        accent_color: EVENT_DEFAULT_ACCENT,
+        emoji: null,
+        event_nature: "commitment",
+        signifier: "\u25a1",
+        is_actionable: true,
+        ship_link: shipLink,
+        migration_history: birthHistory("event", "00:00"),
+      },
+      notes: `<!--bujo:event--><p>${escapeHtml(title)}</p>`,
+      createdAt: storedStamp(`${day}T00:00:00`),
+    });
+  }
+
+  // Create / move / retitle / remove the commitment event + active log backing a ship date.
+  async function syncShipCommitment(kind, sourceId) {
+    const { row, table, title, projectId } = await shipSource(kind, sourceId);
+    if (!row) return;
+    const shipDate = row.ship_date || null;
+    let eventId = row.ship_event_id ? Number(row.ship_event_id) : null;
+    let event = eventId
+      ? await run(client.from("sparks").select("*").eq("id", eventId).eq("item_type", "task").maybeSingle())
+      : null;
+    if (!shipDate) {
+      await deleteShipEvent(eventId);
+      await run(client.from(table).update({ ship_event_id: null }).eq("id", sourceId));
+      return;
+    }
+    if (!event) {
+      eventId = await insertShipRow({
+        title,
+        day: shipDate,
+        extra: {
+          schedule_linked: true,
+          is_event_log: false,
+          is_active_schedule_log: false,
+          event_title: title,
+          timing_mode: "multiday",
+          event_nature: "commitment",
+          signifier: "\u25a1",
+          is_actionable: true,
+          event_status: "pending",
+          migration_history: birthHistory("event", localHhmm()),
+        },
+        notes: null,
+        createdAt: new Date().toISOString(),
+      });
+      await run(client.from(table).update({ ship_event_id: eventId }).eq("id", sourceId));
+      event = await sparkById(eventId);
+    }
+    const shipLink = { kind, id: Number(sourceId), project_id: projectId, event_id: eventId };
+    const extra = normalizeTaskExtra(parseExtra(event.extra_data));
+    Object.assign(extra, { ship_link: shipLink, event_title: title, linked_event_id: eventId, event_id: eventId });
+    const eventStatus = text(extra.event_status || "pending").toLowerCase();
+    const logs = await shipEventActiveLogs(eventId);
+    const keep = logs.find((log) => String(log.id) === String(extra.active_schedule_log_id || "")) || logs[0] || null;
+    if (keep) {
+      await refreshActiveScheduleLog(keep, {
+        title,
+        streamDate: shipDate,
+        streamTime: "00:00",
+        extraPatch: { event_title: title, ship_link: shipLink },
+      });
+      extra.active_schedule_log_id = Number(keep.id);
+    } else if (eventStatus === "pending") {
+      extra.active_schedule_log_id = await createShipLog(eventId, title, shipDate, shipLink);
+    }
+    await run(client.from("sparks").update({
+      title,
+      due_date: shipDate,
+      end_date: shipDate,
+      due_time: null,
+      start_time: null,
+      end_time: null,
+      is_all_day: 1,
+      is_multiday: 1,
+      extra_data: normalizeTaskExtra(extra),
+    }).eq("id", eventId));
+  }
+
+  function shipLinkOf(row) {
+    if (!row) return null;
+    const link = parseExtra(row.extra_data).ship_link;
+    return isPlainObject(link) && ["project", "section"].includes(link.kind) && link.id ? link : null;
+  }
+
+  async function shipRenameSource(link, newTitle) {
+    const { row: source, table, projectId } = await shipSource(link.kind, Number(link.id));
+    if (!source) return;
+    let projectTitle = "";
+    if (link.kind === "section") {
+      const project = await run(client.from("projects").select("title").eq("id", projectId).maybeSingle());
+      projectTitle = project ? project.title : "";
+    }
+    const name = shipNameFromTitle(newTitle, link.kind, projectTitle);
+    if (name && name !== source.title) await run(client.from(table).update({ title: name }).eq("id", Number(link.id)));
+  }
+
+  // Time-schedule / Daily Log edits flow back to the project or section.
+  // Returns true when the edited row itself was rewritten.
+  async function shipAfterTaskUpdate(before, after) {
+    let link = shipLinkOf(after);
+    let event = after;
+    if (link && String(link.event_id) !== String(after.id)) {
+      event = await sparkById(link.event_id);
+      link = shipLinkOf(event);
+    }
+    if (!link) {
+      const afterExtra = parseExtra(after.extra_data);
+      const linked = scheduleLogLinkId(afterExtra, "event");
+      if (!linked || !afterExtra.is_event_log) return false;
+      event = await sparkById(linked);
+      link = shipLinkOf(event);
+      if (!link) return false;
+    }
+    const { row: source, table } = await shipSource(link.kind, Number(link.id));
+    if (!source || String(source.ship_event_id || "") !== String(event.id)) return false;
+    if (Number(after.id) === Number(event.id)) {
+      if (before.title !== after.title) await shipRenameSource(link, after.title);
+      const newDay = after.due_date || null;
+      if (newDay && newDay !== (source.ship_date || null)) {
+        await run(client.from(table).update({ ship_date: newDay }).eq("id", Number(link.id)));
+      }
+      return false;
+    }
+    const afterExtra = parseExtra(after.extra_data);
+    const eventExtra = parseExtra(event.extra_data);
+    if (String(eventExtra.active_schedule_log_id || "") !== String(after.id)) return false;
+    if (!isActiveScheduleLogExtra(afterExtra)) return false;
+    const titleChanged = before.title !== after.title && Boolean(text(after.title));
+    const beforeDay = safeDay(parseExtra(before.extra_data).stream_date || before.due_date);
+    const afterDay = safeDay(afterExtra.stream_date || after.due_date);
+    const dayChanged = Boolean(afterDay) && afterDay !== beforeDay;
+    if (!titleChanged && !dayChanged) return false;
+    if (titleChanged) await shipRenameSource(link, after.title);
+    if (dayChanged) await run(client.from(table).update({ ship_date: afterDay }).eq("id", Number(link.id)));
+    await syncShipCommitment(link.kind, Number(link.id));
+    return true;
+  }
+
+  // Deleting the ship event (or its current Daily Log entry) clears the ship date at the source.
+  async function shipBeforeTaskDelete(row) {
+    let link = shipLinkOf(row);
+    let event = row;
+    const extra = parseExtra(row.extra_data);
+    if (!link || String(link.event_id) !== String(row.id)) {
+      const linked = scheduleLogLinkId(extra, "event");
+      if (!linked || !extra.is_event_log) return;
+      event = await sparkById(linked);
+      link = shipLinkOf(event);
+      if (!link) return;
+      if (String(parseExtra(event.extra_data).active_schedule_log_id || "") !== String(row.id)) return;
+    }
+    const { row: source, table } = await shipSource(link.kind, Number(link.id));
+    if (source && String(source.ship_event_id || "") === String(event.id)) {
+      await run(client.from(table).update({ ship_date: null, ship_event_id: null }).eq("id", Number(link.id)));
+    }
+    for (const log of await shipEventActiveLogs(event.id)) {
+      if (Number(log.id) !== Number(row.id)) await run(client.from("sparks").delete().eq("id", log.id));
+    }
+    if (Number(event.id) !== Number(row.id)) await run(client.from("sparks").delete().eq("id", event.id));
+  }
+
+  function sparkPlainBody(spark) {
+    let body = text(spark.raw_content);
+    if (!body) body = decodeEntities(String(spark.notes || "").replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim();
+    return body === text(spark.title) ? "" : body;
+  }
+
+  // The jot becomes a new binder project (its blocks land in the first section), then leaves the inbox.
+  async function handOffToBinderProject(spark, body) {
+    const title = text(body.title) || text(spark.title) || "Untitled jot";
+    const content = given(body.content) ? body.content : sparkPlainBody(spark);
+    const blocks = Array.isArray(body.blocks)
+      ? body.blocks.filter(isPlainObject)
+      : (Array.isArray(spark.blocks) ? spark.blocks : []).filter(isPlainObject);
+    let saved = await createBinderProject(title, content);
+    if (blocks.length && saved.sections.length) {
+      await createBinderLine(Number(saved.sections[0].id), title, blocks, false);
+      saved = await getBinderProject(saved.id);
+    }
+    await run(client.from("sparks").delete().eq("id", spark.id).eq("item_type", "spark"));
+    saved.converted_from_spark_id = Number(spark.id);
+    saved.convert_target = "binder_project";
+    return saved;
+  }
+
   async function convertFig(id, body) {
     const target = text(body.target_type || body.item_type).toLowerCase();
     if (!target) throw new ApiError(400, "target_type or item_type is required");
@@ -2802,6 +3747,7 @@
       }).eq("id", id).select("*").single());
       return serializeSpark(row);
     }
+    if (target === "binder_project") return handOffToBinderProject(serializeSpark(spark), body);
     if (target !== "habit") throw new ApiError(503, OFFLINE_DETAIL);
     const row = await run(client.from("sparks").update({
       item_type: "habit",
@@ -2873,19 +3819,94 @@
     { methods: ["POST"], pattern: /^\/api\/checklist-templates$/, handle: (m, body) => saveChecklistTemplate(body) },
     { methods: ["PUT"], pattern: /^\/api\/checklist-templates\/(\d+)$/, handle: (m, body) => saveChecklistTemplate(body, Number(m[1])) },
     { methods: ["DELETE"], pattern: /^\/api\/checklist-templates\/(\d+)$/, handle: (m) => deleteChecklistTemplate(Number(m[1])) },
+    { methods: ["POST"], pattern: /^\/api\/upload$/, handle: (m, body) => uploadFile(body) },
+    { methods: ["GET"], pattern: /^\/api\/projects$/, handle: () => listBinderProjects() },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/projects$/,
+      handle: (m, body) => {
+        const f = modelFields(body, { title: "text", description: "text" });
+        if (typeof f.title !== "string" || !f.title) throw new ApiError(422, "title is required");
+        return createBinderProject(f.title, f.description);
+      },
+    },
+    { methods: ["GET"], pattern: /^\/api\/projects\/(\d+)$/, signedOut: null, handle: (m) => getBinderProject(Number(m[1])) },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/projects\/(\d+)$/,
+      handle: (m, body) => updateBinderProject(Number(m[1]), modelFields(body, {
+        title: "text", description: "text", tracker: "object", status: "text", ...BINDER_STYLE_SHIP_KINDS,
+      })),
+    },
+    { methods: ["DELETE"], pattern: /^\/api\/projects\/(\d+)$/, handle: (m) => deleteBinderProject(Number(m[1])) },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/projects\/(\d+)\/sections$/,
+      handle: (m, body) => {
+        const f = modelFields(body, { title: "text", parent_id: "int" });
+        return createBinderSection(Number(m[1]), f.title ?? null, f.parent_id ?? null);
+      },
+    },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/projects\/(\d+)\/sections\/reorder$/,
+      handle: (m, body) => {
+        const f = modelFields(body, { section_ids: "int_list" });
+        if (!f.section_ids?.length) throw new ApiError(422, "section_ids must list at least one section");
+        return reorderBinderSections(Number(m[1]), f.section_ids);
+      },
+    },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/projects\/sections\/(\d+)$/,
+      handle: (m, body) => {
+        const f = modelFields(body, { title: "text", blocks: "blocks", columns: "list", ...BINDER_STYLE_SHIP_KINDS });
+        const extra = {};
+        for (const key of BINDER_STYLE_SHIP_KEYS) {
+          if (has(f, key)) extra[key] = f[key];
+        }
+        if (!given(f.title) && !given(f.blocks) && !given(f.columns) && !Object.keys(extra).length) {
+          throw new ApiError(400, "Nothing to update");
+        }
+        return updateBinderSection(Number(m[1]), f.title ?? null, f.blocks ?? null, f.columns ?? null, extra);
+      },
+    },
+    { methods: ["DELETE"], pattern: /^\/api\/projects\/sections\/(\d+)$/, handle: (m) => deleteBinderSection(Number(m[1])) },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/projects\/sections\/(\d+)\/lines$/,
+      handle: (m, body) => {
+        const f = modelFields(body, { content: "text", title: "text", blocks: "blocks", is_completed: "flag" });
+        const content = (given(f.content) ? f.content : f.title) || "";
+        return createBinderLine(Number(m[1]), content, f.blocks ?? null, f.is_completed ?? false);
+      },
+    },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/projects\/lines\/(\d+)$/,
+      handle: (m, body) => {
+        const f = modelFields(body, { content: "text", title: "text", blocks: "blocks", is_completed: "flag" });
+        const content = given(f.content) ? f.content : f.title ?? null;
+        return updateBinderLine(Number(m[1]), content, f.blocks ?? null, f.is_completed ?? null);
+      },
+    },
+    { methods: ["PUT"], pattern: /^\/api\/projects\/lines\/(\d+)\/toggle$/, handle: (m) => toggleBinderLine(Number(m[1])) },
+    { methods: ["DELETE"], pattern: /^\/api\/projects\/lines\/(\d+)$/, handle: (m) => deleteBinderLine(Number(m[1])) },
   ];
 
   const OFFLINE_DETAIL = "This part of FICUS isn't available online yet.";
 
   // Lists the app loads at startup for modules not yet in the cloud; empty keeps every page rendering.
   const PENDING_MODULE_LISTS = [
-    /^\/api\/workbench\/projects$/, /^\/api\/projects$/,
+    /^\/api\/workbench\/projects$/,
     /^\/api\/references$/, /^\/api\/reference-folders$/, /^\/api\/vault\/notebooks$/,
     /^\/api\/vision$/, /^\/api\/visions$/, /^\/api\/contacts$/, /^\/api\/notepads(\/active)?$/,
   ];
 
   function signedOutNoun(path) {
     if (path.startsWith("/api/habits")) return "trackers";
+    if (path.startsWith("/api/projects")) return "projects";
+    if (path === "/api/upload") return "files";
     if (/^\/api\/(tasks|logs|checklist-templates)/.test(path) || path.endsWith("/action")) return "your Log and Time";
     return "figs";
   }
@@ -2900,6 +3921,8 @@
         const parsed = JSON.parse(init.body);
         if (isPlainObject(parsed)) body = parsed;
       } catch (_) {}
+    } else if (typeof FormData !== "undefined" && init?.body instanceof FormData) {
+      body = init.body;
     }
     return {
       path: url.pathname.replace(/\/+$/, ""),

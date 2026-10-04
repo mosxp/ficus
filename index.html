@@ -26,9 +26,9 @@
         url: "https://waxbsyvqvyjjppbswqoc.supabase.co",
         publishableKey: "sb_publishable_1YRF0shFj3rLXNKyWAOpGA_UzHKgpFi",
       };
-      // Static site only. Cover, Fig, Tracker, Log and Time are always open; other pages wait for ficus_cloud.js
+      // Static site only. Cover, Fig, Tracker, Log, Time and Project are always open; other pages wait for ficus_cloud.js
       // to list them, and a missing list (an older cached copy of that file) locks nothing.
-      const FICUS_ALWAYS_OPEN_VIEWS = ["cover", "sparks", "habits", "today", "tasks"];
+      const FICUS_ALWAYS_OPEN_VIEWS = ["cover", "sparks", "habits", "today", "tasks", "projects"];
       window.ficusViewOffline = (view) => {
         if (!document.body?.classList.contains("ficus-cloud") || FICUS_ALWAYS_OPEN_VIEWS.includes(view)) return false;
         const online = window.FICUS_ONLINE_VIEWS;
@@ -36,7 +36,7 @@
       };
     </script>
     <!-- Bump ?v= whenever ficus_cloud.js changes so browsers never pair it with a different index.html. -->
-    <script src="ficus_cloud.js?v=4"></script>
+    <script src="ficus_cloud.js?v=5"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -27004,7 +27004,7 @@
         </div>`;
       }
       function renderVideoBlockSettingsHtml(block, opts = {}) {
-        const uploaded = String(block.url || "").startsWith("/uploads/");
+        const uploaded = /^\/uploads\/|\/storage\/v1\/object\/public\/uploads\//.test(String(block.url || ""));
         return `<div class="mt-2.5 max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white p-3 shadow-sm" ${ublockMetaAttrs(block, opts)} data-ublock-state="settings">
           <div class="mb-2 flex items-center gap-1.5">${blockTypeBadgeHtml("video")}<span class="ml-auto">${mediaBadgeHtml(formatFileBytes(block.bytes))}</span></div>
           <div class="-mx-3 mb-3">${videoFrameHtml(block, mediaBlockName(block, "Video"))}</div>
