@@ -7,14 +7,16 @@
  *
  * Ported so far: Figs (inbox sparks), tags, Trackers (habits), the Log and
  * Time pages (tasks, events and log entries, plus checklist templates), the
- * Project page (binders and their ship dates), and /api/upload, which stores
- * files in the Supabase Storage bucket `uploads`.
+ * Project page (binders and their ship dates), Vision boards and their
+ * scrapbook libraries, the Vault (notebooks, shelves and references), the
+ * Legacy page, and /api/upload, which stores files in the Supabase Storage
+ * bucket `uploads`.
  */
 (function () {
   "use strict";
 
   // Pages whose data lives in Supabase; index.html locks the other nav tabs on the static site.
-  window.FICUS_ONLINE_VIEWS = ["cover", "sparks", "habits", "today", "tasks", "projects"];
+  window.FICUS_ONLINE_VIEWS = ["cover", "sparks", "habits", "today", "tasks", "projects", "vision", "reference", "legacy"];
 
   const config = window.FICUS_SUPABASE_CONFIG || {};
   const nativeFetch = window.fetch.bind(window);
@@ -3720,21 +3722,81 @@
     return (Array.isArray(body.blocks) ? body.blocks : Array.isArray(spark.blocks) ? spark.blocks : []).filter(isPlainObject);
   }
 
-  // The jot becomes a new binder project (its blocks land in the first section), then leaves the inbox.
-  async function handOffToBinderProject(spark, body) {
-    const title = handoffTitle(spark, body);
-    const content = given(body.content) ? body.content : sparkPlainBody(spark);
-    const blocks = handoffBlocks(spark, body);
+  function handoffFields(body) {
+    return modelFields(body, {
+      title: "text", content: "text", blocks: "list", vision_id: "int", chapter_id: "int",
+      vision_title: "text", notebook_title: "text",
+    });
+  }
+
+  // The jot becomes a new binder project (its blocks land in the first section).
+  async function handOffToBinderProject(spark, f) {
+    const title = handoffTitle(spark, f);
+    const content = given(f.content) ? f.content : sparkPlainBody(spark);
+    const blocks = handoffBlocks(spark, f);
     let saved = await createBinderProject(title, content);
     if (blocks.length && saved.sections.length) {
       await createBinderLine(Number(saved.sections[0].id), title, blocks, false);
       saved = await getBinderProject(saved.id);
     }
-    await run(client.from("sparks").delete().eq("id", spark.id).eq("item_type", "spark"));
-    saved.converted_from_spark_id = Number(spark.id);
-    saved.convert_target = "binder_project";
     return saved;
   }
+
+  // The jot becomes a goal on a board (or names the first goal of a new board from vision_title);
+  // its blocks join the board, skipping any a board can't hold.
+  async function handOffToVisionGoal(spark, f) {
+    const title = handoffTitle(spark, f);
+    const newBoard = text(f.vision_title);
+    let visionId;
+    let saved;
+    if (newBoard) {
+      const board = await createVisionBoard(newBoard);
+      visionId = Number(board.id);
+      saved = { id: visionId, title: board.title, vision_id: visionId, created_board: true };
+      if (f.title) saved.goal = await createVisionGoal(visionId, title);
+    } else {
+      if (!given(f.vision_id)) throw new ApiError(400, "Choose a vision board");
+      visionId = Number(f.vision_id);
+      saved = { ...(await createVisionGoal(visionId, title)), vision_id: visionId };
+    }
+    let attached = 0;
+    for (const block of handoffBlocks(spark, f)) {
+      try {
+        await createVisionBlock(visionId, pyString(block.type), block);
+        attached += 1;
+      } catch (err) {
+        if (!(err instanceof ApiError)) throw err;
+      }
+    }
+    saved.attached_blocks = attached;
+    return saved;
+  }
+
+  // The jot becomes a line in a notebook chapter (or in a new notebook named by notebook_title).
+  async function handOffToNotebookLine(spark, f) {
+    const title = handoffTitle(spark, f);
+    const newBook = text(f.notebook_title);
+    let chapterId = f.chapter_id ?? null;
+    let book = null;
+    if (newBook) {
+      book = await createVaultNotebook(newBook, null);
+      if (!book.chapters.length) throw new ApiError(400, "Could not create the notebook chapter");
+      chapterId = Number(book.chapters[0].id);
+    }
+    if (!given(chapterId)) throw new ApiError(400, "Choose a notebook chapter");
+    const body = sparkPlainBody(spark);
+    const content = given(f.content) ? text(f.content) : body ? `${title} — ${body}` : title;
+    const saved = await createVaultLine(Number(chapterId), content || title, handoffBlocks(spark, f));
+    if (book) saved.created_notebook = { id: Number(book.id), title: book.title };
+    return saved;
+  }
+
+  // Targets outside the sparks table: the jot is copied there, then leaves the inbox.
+  const SPARK_HANDOFFS = {
+    binder_project: handOffToBinderProject,
+    vision_goal: handOffToVisionGoal,
+    notebook_line: handOffToNotebookLine,
+  };
 
   async function convertFig(id, body) {
     const target = text(body.target_type || body.item_type).toLowerCase();
@@ -3754,12 +3816,19 @@
       }).eq("id", id).select("*").single());
       return serializeSpark(row);
     }
-    if (target === "binder_project") return handOffToBinderProject(serializeSpark(spark), body);
-    if (target !== "habit") throw new ApiError(503, OFFLINE_DETAIL);
+    if (has(SPARK_HANDOFFS, target)) {
+      const saved = await SPARK_HANDOFFS[target](serializeSpark(spark), handoffFields(body));
+      await run(client.from("sparks").delete().eq("id", id).eq("item_type", "spark"));
+      saved.converted_from_spark_id = Number(id);
+      saved.convert_target = target;
+      return saved;
+    }
+    if (target !== "habit" && target !== "reference") throw new ApiError(503, OFFLINE_DETAIL);
+    const normalizeExtra = target === "habit" ? normalizeHabitExtra : normalizeReferenceExtra;
     const row = await run(client.from("sparks").update({
-      item_type: "habit",
+      item_type: target,
       assignee,
-      extra_data: normalizeHabitExtra(isPlainObject(body.extra_data) ? body.extra_data : {}),
+      extra_data: normalizeExtra(isPlainObject(body.extra_data) ? body.extra_data : {}),
       is_done: 0,
       task_status: null,
       due_date: null,
@@ -5440,20 +5509,231 @@
     },
     { methods: ["PUT"], pattern: /^\/api\/projects\/lines\/(\d+)\/toggle$/, handle: (m) => toggleBinderLine(Number(m[1])) },
     { methods: ["DELETE"], pattern: /^\/api\/projects\/lines\/(\d+)$/, handle: (m) => deleteBinderLine(Number(m[1])) },
+    { methods: ["GET"], pattern: /^\/api\/visions$/, handle: (m, body, query) => listVisionBoards(query) },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/visions$/,
+      handle: (m, body) => createVisionBoard(modelFields(body, { title: "text" }).title ?? null),
+    },
+    { methods: ["GET"], pattern: /^\/api\/visions\/(\d+)$/, signedOut: null, handle: (m) => getVisionBoard(Number(m[1])) },
+    {
+      methods: ["PATCH"],
+      pattern: /^\/api\/visions\/(\d+)$/,
+      handle: (m, body) => updateVisionBoard(Number(m[1]), modelFields(body, { title: "text" })),
+    },
+    { methods: ["DELETE"], pattern: /^\/api\/visions\/(\d+)$/, handle: (m) => deleteVisionBoard(Number(m[1])) },
+    { methods: ["PUT"], pattern: /^\/api\/visions\/(\d+)\/canvas$/, handle: (m, body) => saveVisionCanvas(Number(m[1]), body) },
+    { methods: ["PATCH"], pattern: /^\/api\/visions\/(\d+)\/fulfill$/, handle: (m) => fulfillVisionBoard(Number(m[1])) },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/visions\/(\d+)\/goals$/,
+      handle: (m, body) => createVisionGoal(Number(m[1]), goalContent(body)),
+    },
+    { methods: ["PUT"], pattern: /^\/api\/visions\/goals\/(\d+)$/, handle: (m, body) => updateVisionGoal(Number(m[1]), goalContent(body)) },
+    { methods: ["PUT"], pattern: /^\/api\/visions\/goals\/(\d+)\/toggle$/, handle: (m) => toggleVisionGoal(Number(m[1])) },
+    { methods: ["DELETE"], pattern: /^\/api\/visions\/goals\/(\d+)$/, handle: (m) => deleteVisionGoal(Number(m[1])) },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/visions\/(\d+)\/(?:linked-elements|attach)$/,
+      handle: (m, body) => linkVisionElement(Number(m[1]), body),
+    },
+    {
+      methods: ["DELETE"],
+      pattern: /^\/api\/visions\/(?:linked-elements|attach)\/(\d+)$/,
+      handle: (m) => unlinkVisionElement(Number(m[1])),
+    },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/visions\/(\d+)\/blocks$/,
+      handle: (m, body) => {
+        const f = visionBlockBody(body, true);
+        return createVisionBlock(Number(m[1]), f.block_type, f.content ?? null);
+      },
+    },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/visions\/blocks\/(\d+)$/,
+      handle: (m, body) => {
+        const f = visionBlockBody(body, false);
+        return updateVisionBlock(Number(m[1]), f.content ?? null, f.block_type ?? null);
+      },
+    },
+    { methods: ["DELETE"], pattern: /^\/api\/visions\/blocks\/(\d+)$/, handle: (m) => deleteVisionBlock(Number(m[1])) },
+    { methods: ["GET"], pattern: /^\/api\/scrapbook\/pads$/, handle: () => listScrapbookPads() },
+    { methods: ["POST"], pattern: /^\/api\/scrapbook\/pads$/, handle: (m, body) => createScrapbookPads(scrapbookImageItems(body, "pads")) },
+    {
+      methods: ["DELETE"],
+      pattern: /^\/api\/scrapbook\/pads\/(\d+)$/,
+      handle: (m) => deleteScrapbookRow("scrapbook_pads", Number(m[1]), "Sticky pad not found"),
+    },
+    { methods: ["GET"], pattern: /^\/api\/scrapbook\/stickers$/, handle: (m, body, query) => listScrapbookStickers(query) },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/scrapbook\/stickers$/,
+      handle: (m, body) => {
+        const f = modelFields(body, { collection: "text" });
+        return createScrapbookStickers(f.collection ?? null, scrapbookImageItems(body, "stickers"));
+      },
+    },
+    {
+      methods: ["DELETE"],
+      pattern: /^\/api\/scrapbook\/stickers\/(\d+)$/,
+      handle: (m) => deleteScrapbookRow("scrapbook_stickers", Number(m[1]), "Sticker not found"),
+    },
+    { methods: ["POST"], pattern: /^\/api\/scrapbook\/stickers\/collections\/rename$/, handle: (m, body) => renameStickerCollection(body) },
+    { methods: ["POST"], pattern: /^\/api\/scrapbook\/stickers\/collections\/delete$/, handle: (m, body) => deleteStickerCollection(body) },
+    { methods: ["GET"], pattern: /^\/api\/scrapbook\/palettes$/, handle: () => listScrapbookPalettes() },
+    { methods: ["POST"], pattern: /^\/api\/scrapbook\/palettes$/, handle: (m, body) => createScrapbookPalette(paletteBody(body)) },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/scrapbook\/palettes\/(\d+)$/,
+      handle: (m, body) => updateScrapbookPalette(Number(m[1]), paletteBody(body)),
+    },
+    {
+      methods: ["DELETE"],
+      pattern: /^\/api\/scrapbook\/palettes\/(\d+)$/,
+      handle: (m) => deleteScrapbookRow("scrapbook_palettes", Number(m[1]), "Palette not found"),
+    },
+    { methods: ["GET"], pattern: /^\/api\/scrapbook\/gifs\/config$/, signedOut: GIF_SEARCH_OFF, handle: () => GIF_SEARCH_OFF },
+    { methods: ["GET"], pattern: /^\/api\/vault\/shelves$/, handle: () => listVaultShelves() },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/vault\/shelves$/,
+      handle: (m, body) => createVaultShelf(vaultTitleFields(body, { title: "text", tab_color: "text" }).title ?? null),
+    },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/vault\/shelves\/order$/,
+      handle: (m, body) => reorderVaultShelves(modelFields(body, { shelf_ids: "int_list" }).shelf_ids || []),
+    },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/vault\/shelves\/(\d+)$/,
+      handle: (m, body) => updateVaultShelf(Number(m[1]), vaultTitleFields(body, { title: "text", tab_color: "text" })),
+    },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/vault\/shelves\/(\d+)\/stacks$/,
+      handle: (m, body) => arrangeVaultShelfStacks(Number(m[1]), modelFields(body, { stack_ids: "int_list" }).stack_ids || []),
+    },
+    { methods: ["DELETE"], pattern: /^\/api\/vault\/shelves\/(\d+)$/, handle: (m) => deleteVaultShelf(Number(m[1])) },
+    { methods: ["GET"], pattern: /^\/api\/vault\/stacks$/, handle: () => listVaultStacks() },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/vault\/stacks$/,
+      handle: (m, body) => createVaultStack(vaultTitleFields(body, { title: "text", shelf_id: "int", slot: "int" })),
+    },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/vault\/stacks\/(\d+)$/,
+      handle: (m, body) => updateVaultStack(Number(m[1]), vaultTitleFields(body, { title: "text", shelf_id: "int", slot: "int" })),
+    },
+    { methods: ["DELETE"], pattern: /^\/api\/vault\/stacks\/(\d+)$/, handle: (m) => deleteVaultStack(Number(m[1])) },
+    { methods: ["GET"], pattern: /^\/api\/vault\/notebooks$/, handle: () => listVaultNotebooks() },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/vault\/notebooks$/,
+      handle: (m, body) => {
+        const f = modelFields(body, { title: "text", name: "text", stack_id: "int" });
+        return createVaultNotebook(f.title || f.name || "", f.stack_id ?? null);
+      },
+    },
+    { methods: ["GET"], pattern: /^\/api\/vault\/notebooks\/(\d+)$/, signedOut: null, handle: (m) => getVaultNotebook(Number(m[1])) },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/vault\/notebooks\/(\d+)$/,
+      handle: (m, body) => updateVaultNotebook(Number(m[1]), nonEmptyTitle(modelFields(body, {
+        title: "text", cover_color: "text", cover_image: "text", spine_color: "text", stack_id: "int",
+      }))),
+    },
+    { methods: ["DELETE"], pattern: /^\/api\/vault\/notebooks\/(\d+)$/, handle: (m) => deleteVaultNotebook(Number(m[1])) },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/vault\/notebooks\/(\d+)\/chapters$/,
+      handle: (m, body) => createVaultChapter(Number(m[1]), modelFields(body, { title: "text" }).title ?? null),
+    },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/vault\/notebooks\/(\d+)\/reorder-chapters$/,
+      handle: (m, body) => reorderVaultChapters(Number(m[1]), modelFields(body, { chapter_ids: "int_list" }).chapter_ids || []),
+    },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/vault\/chapters\/(\d+)$/,
+      handle: (m, body) => updateVaultChapter(Number(m[1]), nonEmptyTitle(modelFields(body, {
+        title: "text", background_color: "text", background_image: "text",
+      }))),
+    },
+    { methods: ["DELETE"], pattern: /^\/api\/vault\/chapters\/(\d+)$/, handle: (m) => deleteVaultChapter(Number(m[1])) },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/vault\/chapters\/(\d+)\/lines$/,
+      handle: (m, body) => {
+        const f = modelFields(body, { content: "text", title: "text", blocks: "blocks", kind: "text", parent_id: "int" });
+        const content = (given(f.content) ? f.content : f.title) || "";
+        return createVaultLine(Number(m[1]), content, f.blocks ?? null, f.kind ?? null, f.parent_id ?? null);
+      },
+    },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/vault\/chapters\/(\d+)\/reorder-lines$/,
+      handle: (m, body) => reorderVaultLines(Number(m[1]), vaultLineOrderBody(body)),
+    },
+    {
+      methods: ["PUT"],
+      pattern: /^\/api\/vault\/lines\/(\d+)$/,
+      handle: (m, body) => {
+        const f = modelFields(body, { content: "text", title: "text", blocks: "blocks", collapsed: "flag" });
+        const content = given(f.content) ? f.content : f.title ?? null;
+        return updateVaultLine(Number(m[1]), content, f.blocks ?? null, f.collapsed ?? null);
+      },
+    },
+    { methods: ["DELETE"], pattern: /^\/api\/vault\/lines\/(\d+)$/, handle: (m) => deleteVaultLine(Number(m[1])) },
+    { methods: ["GET"], pattern: /^\/api\/references$/, handle: (m, body, query) => listReferences(query) },
+    { methods: ["POST"], pattern: /^\/api\/references$/, handle: (m, body) => saveReference(body, createReference) },
+    { methods: ["PATCH"], pattern: /^\/api\/references\/(\d+)$/, handle: (m, body) => updateReferenceRoute(Number(m[1]), body) },
+    {
+      methods: ["PATCH"],
+      pattern: /^\/api\/references\/(\d+)\/move$/,
+      handle: (m, body) => updateReference(Number(m[1]), { folder_id: modelFields(body, { folder_id: "int" }).folder_id ?? null }),
+    },
+    {
+      methods: ["PATCH"],
+      pattern: /^\/api\/references\/(\d+)\/pin$/,
+      handle: (m, body) => pinReference(Number(m[1]), modelFields(body, { is_pinned: "flag" }).is_pinned ?? null),
+    },
+    { methods: ["GET"], pattern: /^\/api\/reference-folders$/, handle: () => listReferenceFolders() },
+    {
+      methods: ["POST"],
+      pattern: /^\/api\/reference-folders$/,
+      handle: (m, body) => {
+        const f = folderBody(body, { parent_id: "int", icon: "text" });
+        return createReferenceFolder(f.name, f.parent_id ?? null, has(f, "icon") ? f.icon : "📁");
+      },
+    },
+    {
+      methods: ["PATCH"],
+      pattern: /^\/api\/reference-folders\/(\d+)$/,
+      handle: (m, body) => renameReferenceFolder(Number(m[1]), folderBody(body).name),
+    },
+    { methods: ["DELETE"], pattern: /^\/api\/reference-folders\/(\d+)$/, handle: (m) => deleteReferenceFolder(Number(m[1])) },
+    { methods: ["GET"], pattern: /^\/api\/legacy-hall$/, signedOut: null, handle: () => legacyHall() },
+    { methods: ["GET"], pattern: /^\/api\/legacy\/milestones$/, signedOut: null, handle: (m, body, query) => legacyMilestones(query) },
   ];
 
   const OFFLINE_DETAIL = "This part of FICUS isn't available online yet.";
 
   // Lists the app loads at startup for modules not yet in the cloud; empty keeps every page rendering.
   const PENDING_MODULE_LISTS = [
-    /^\/api\/workbench\/projects$/,
-    /^\/api\/references$/, /^\/api\/reference-folders$/, /^\/api\/vault\/notebooks$/,
-    /^\/api\/vision$/, /^\/api\/visions$/, /^\/api\/contacts$/, /^\/api\/notepads(\/active)?$/,
+    /^\/api\/workbench\/projects$/, /^\/api\/scrapbook\/gif-library$/,
+    /^\/api\/vision$/, /^\/api\/contacts$/, /^\/api\/notepads(\/active)?$/,
   ];
 
   function signedOutNoun(path) {
     if (path.startsWith("/api/habits")) return "trackers";
     if (path.startsWith("/api/projects")) return "projects";
+    if (/^\/api\/(visions|scrapbook)/.test(path)) return "your visions";
+    if (/^\/api\/(vault|references|reference-folders)/.test(path)) return "your Vault";
     if (path === "/api/upload") return "files";
     if (/^\/api\/(tasks|logs|checklist-templates)/.test(path) || path.endsWith("/action")) return "your Log and Time";
     return "figs";
