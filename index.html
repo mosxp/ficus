@@ -3243,6 +3243,24 @@
       body.ficus-locked.notebook-page { padding-bottom: env(safe-area-inset-bottom); }
       .ficus-signin-gate { display: none; }
       body.ficus-locked .ficus-signin-gate { display: flex; }
+      /* Static site: pages not yet moved to Supabase stay in the nav but closed. */
+      body.ficus-cloud .nav-tab.is-offline { opacity: 0.35; }
+      .ficus-offline-note {
+        position: fixed;
+        left: 50%;
+        bottom: calc(1.5rem + env(safe-area-inset-bottom));
+        z-index: 95;
+        transform: translateX(-50%);
+        max-width: calc(100vw - 2rem);
+        padding: 0.6rem 1rem;
+        border-radius: 9999px;
+        background: #1f2937;
+        color: #f9fafb;
+        font-size: 0.8125rem;
+        font-weight: 600;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.18);
+        pointer-events: none;
+      }
       .capsule-line {
         white-space: pre-wrap;
         word-break: break-word;
@@ -3502,6 +3520,7 @@
         <span class="tab-ico" aria-hidden="true">▲</span><span class="tab-label">Legacy</span>
       </button>
     </nav>
+    <div id="ficus-offline-note" class="ficus-offline-note hidden" role="status" aria-live="polite"></div>
 
     <div id="focus-alarm-toast" class="pointer-events-none fixed bottom-24 left-1/2 z-[80] hidden -translate-x-1/2 rounded-2xl border border-indigo-200 bg-white px-4 py-3 text-sm font-semibold text-indigo-900 shadow-xl md:bottom-8" role="status" aria-live="polite"></div>
 
@@ -7916,6 +7935,11 @@
         try {
           if (name === "home") name = "today";
           if (name !== "cover" && document.body.classList.contains("ficus-locked")) name = "cover";
+          const onlineViews = window.FICUS_ONLINE_VIEWS || [];
+          if (document.body.classList.contains("ficus-cloud") && !onlineViews.includes(name)) {
+            window.ficusOfflineNotice?.(name);
+            name = onlineViews.includes(activeView) ? activeView : "cover";
+          }
           const prevView = activeView;
           activeView = name;
           if (prevView !== name) {
@@ -40822,11 +40846,34 @@
           .then((res) => res.ok)
           .catch(() => false);
 
+        const offlineNote = document.getElementById("ficus-offline-note");
+        let offlineNoteTimer = null;
+        window.ficusOfflineNotice = (view) => {
+          const label = document.querySelector(`#notebook-tabs [data-view="${view}"] .tab-label`)?.textContent || "This page";
+          offlineNote.textContent = `${label} is coming to the web soon.`;
+          offlineNote.classList.remove("hidden");
+          clearTimeout(offlineNoteTimer);
+          offlineNoteTimer = setTimeout(() => offlineNote.classList.add("hidden"), 3200);
+        };
+
+        function markOfflineTabs(cloud) {
+          const online = window.FICUS_ONLINE_VIEWS || [];
+          document.querySelectorAll("#notebook-tabs [data-view]").forEach((tab) => {
+            const offline = cloud && !online.includes(tab.dataset.view);
+            tab.classList.toggle("is-offline", offline);
+            tab.setAttribute("aria-disabled", String(offline));
+          });
+        }
+
         async function applyAccessLock(user) {
-          const locked = !user && !(await hasLocalBackend);
+          const cloud = !(await hasLocalBackend);
+          const locked = !user && cloud;
           document.body.classList.toggle("ficus-locked", locked);
+          document.body.classList.toggle("ficus-cloud", cloud);
           document.body.classList.remove("ficus-auth-pending");
-          if (locked && typeof showView === "function") showView("cover");
+          markOfflineTabs(cloud);
+          const offlineView = cloud && !(window.FICUS_ONLINE_VIEWS || []).includes(activeView);
+          if ((locked || offlineView) && typeof showView === "function") showView("cover");
         }
 
         if (!client) {
