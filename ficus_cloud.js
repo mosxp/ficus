@@ -90,12 +90,19 @@
     return hhmmOf();
   }
 
+  const NOTEPADS_SQL_HINT = "Notepads need supabase/09_notepads.sql to be run in Supabase first.";
+
+  function isMissingTable(error, table) {
+    return ["PGRST205", "42P01"].includes(error?.code) && String(error.message || "").includes(table);
+  }
+
   async function run(query) {
     const { data, error } = await query;
     if (error) {
       if (error.code === "42P17" && /project_sections/.test(error.message || "")) {
         throw new ApiError(500, "Project sections can't be saved until supabase/08_project_section_policies.sql is run in Supabase.");
       }
+      if (isMissingTable(error, "notepads")) throw new ApiError(500, NOTEPADS_SQL_HINT);
       throw new ApiError(500, error.message || "Cloud request failed");
     }
     return data;
@@ -2150,13 +2157,15 @@
     return fields;
   }
 
-  async function clearThemeOfDay(dateKey, exceptId) {
+  // One Theme of the Day per date, shared between events and notepads.
+  async function clearThemeOfDay(dateKey, exceptId, exceptPadId = null) {
     const key = text(dateKey);
     if (!key) return;
     let query = client.from("sparks").update({ is_theme_of_day: 0 })
       .eq("item_type", "task").eq("entry_type", "event").eq("is_theme_of_day", 1).eq("due_date", key);
     if (given(exceptId)) query = query.neq("id", exceptId);
     await run(query);
+    await clearNotepadThemes(key, exceptPadId);
   }
 
   function safeDay(value) {
@@ -2809,12 +2818,352 @@
       || compareText(a.due_time ?? "", b.due_time ?? "")
       || a.id - b.id);
     const tasks = rows.map(serializeSpark);
-    const days = [];
-    for (let day = first; day <= last; day = shiftDays(day, 1)) {
-      const key = dayKey(day);
-      days.push({ date: key, tasks: tasks.filter((task) => task.due_date === key), notepads: [] });
+    const keys = [];
+    for (let day = first; day <= last; day = shiftDays(day, 1)) keys.push(dayKey(day));
+    const pads = (await notepadRows()).map(serializeNotepad)
+      .filter((pad) => keys.some((key) => notepadActiveOn(pad, key)));
+    const days = keys.map((key) => ({
+      date: key,
+      tasks: tasks.filter((task) => task.due_date === key),
+      notepads: pads.filter((pad) => notepadActiveOn(pad, key)).sort(byNotepadDayOrder),
+    }));
+    return { year, month, start_date: dayKey(first), end_date: dayKey(last), days, notepads: pads };
+  }
+
+  /* ---------- Notepads ---------- */
+
+  const NOTEPAD_PAD_TYPES = ["text", "checklist", "contacts"];
+  const NOTEPAD_SCOPES = ["day", "week", "month", "phase", "project"];
+  const NOTEPAD_THEMES = ["sage", "cloud", "plum", "coral", "gold", "taupe"];
+  const NOTEPAD_DEFAULT_THEME = "gold";
+  const NOTEPAD_COLOR_ALIASES = {
+    "sage-green": "sage", mint: "sage", emerald: "sage", "pastel-mint": "sage",
+    "cloud-blue": "cloud", "pastel-cloud-blue": "cloud", sky: "cloud", blue: "cloud",
+    "faded-plum": "plum", "pastel-plum": "plum", lavender: "plum", purple: "plum", violet: "plum", iris: "plum", "pastel-iris": "plum",
+    "coral-pink": "coral", rose: "coral", pink: "coral", "pastel-rose": "coral",
+    "pale-gold": "gold", yellow: "gold", "classic-yellow": "gold", amber: "gold", "pastel-amber": "gold",
+    "warm-taupe": "taupe", kraft: "taupe", "warm-kraft": "taupe", stone: "taupe",
+  };
+  const NOTEPAD_FIELD_KINDS = {
+    title: "text", content: "text", items: "list", blocks: "list", pad_type: "text", scope: "text",
+    target_date: "text", start_date: "text", end_date: "text", linked_phase_id: "text", phase_id: "text",
+    linked_project_id: "int", project_id: "int", color_theme: "text", color: "text",
+    is_pinned: "flag", is_theme_of_day: "flag",
+  };
+
+  function normalizeNotepadColor(raw) {
+    const key = pyText(raw).toLowerCase().replace(/_/g, "-");
+    if (NOTEPAD_THEMES.includes(key)) return key;
+    return has(NOTEPAD_COLOR_ALIASES, key) ? NOTEPAD_COLOR_ALIASES[key] : NOTEPAD_DEFAULT_THEME;
+  }
+
+  function notepadChoice(choices, raw, fallback) {
+    const value = pyText(raw).toLowerCase();
+    return choices.includes(value) ? value : fallback;
+  }
+
+  function isoWeekKey(day) {
+    const thursday = shiftDays(day, 3 - ((day.getDay() + 6) % 7));
+    const yearStart = new Date(thursday.getFullYear(), 0, 1, 12);
+    const week = Math.floor(Math.round((thursday - yearStart) / 86400000) / 7) + 1;
+    return `${thursday.getFullYear()}-W${pad2(week)}`;
+  }
+
+  function notepadTargetForScope(scope, day = localToday()) {
+    if (scope === "day") return dayKey(day);
+    if (scope === "week") return isoWeekKey(day);
+    if (scope === "month") return `${day.getFullYear()}-${pad2(day.getMonth() + 1)}`;
+    return null;
+  }
+
+  // [target_date, start_date, end_date] for a pad created today without dates.
+  function notepadRangeForScope(scope, day = localToday()) {
+    const target = notepadTargetForScope(scope, day);
+    if (scope === "day") return [target, target, target];
+    if (scope === "week") {
+      const monday = shiftDays(day, -((day.getDay() + 6) % 7));
+      return [target, dayKey(monday), dayKey(shiftDays(monday, 6))];
     }
-    return { year, month, start_date: dayKey(first), end_date: dayKey(last), days, notepads: [] };
+    if (scope === "month") {
+      const first = new Date(day.getFullYear(), day.getMonth(), 1, 12);
+      return [target, dayKey(first), dayKey(new Date(day.getFullYear(), day.getMonth() + 1, 0, 12))];
+    }
+    return [null, null, null];
+  }
+
+  function notepadDay(value, key) {
+    if (!present(value)) return null;
+    const day = parseDayKey(value);
+    if (!day) throw new ApiError(400, `${key} must be YYYY-MM-DD`);
+    return dayKey(day);
+  }
+
+  function normalizeNotepadItems(raw) {
+    let rows = raw;
+    if (!Array.isArray(raw)) {
+      const source = pyText(raw);
+      if (!source) return [];
+      try {
+        const parsed = JSON.parse(source);
+        rows = Array.isArray(parsed) ? parsed : [];
+      } catch (_) {
+        rows = source.split(/\r\n|\r|\n/).map((line) => line.trim()).filter(Boolean).map((line) => ({ text: line, done: false }));
+      }
+    }
+    const clean = [];
+    rows.forEach((item, index) => {
+      if (typeof item === "string") {
+        if (item.trim()) clean.push({ id: `i_${index + 1}`, text: item.trim(), done: false });
+        return;
+      }
+      if (!isPlainObject(item)) return;
+      const label = pyText(pyFalsy(item.text) ? item.title : item.text);
+      if (!label) return;
+      clean.push({ id: pyFalsy(item.id) ? `i_${index + 1}` : pyStr(item.id), text: label, done: !pyFalsy(item.done) });
+    });
+    return clean;
+  }
+
+  // index.html sends a text pad's blocks packed into content as {"__np_blocks": 1, "blocks": [...]}.
+  function notepadBlocksPayload(content) {
+    if (typeof content !== "string" || !content.trim()) return null;
+    try {
+      const parsed = JSON.parse(content);
+      if (isPlainObject(parsed) && parsed.__np_blocks === 1) return Array.isArray(parsed.blocks) ? parsed.blocks : [];
+    } catch (_) {}
+    return null;
+  }
+
+  function notepadBodyColumns(padType, f, items) {
+    if (padType === "checklist" || padType === "contacts") {
+      return { content: JSON.stringify(normalizeNotepadItems(items)), blocks: [] };
+    }
+    if (Array.isArray(f.blocks)) return { content: "", blocks: f.blocks };
+    const content = f.content || "";
+    const blocks = notepadBlocksPayload(content);
+    return blocks ? { content: "", blocks } : { content, blocks: [] };
+  }
+
+  function serializeNotepad(row) {
+    const padType = notepadChoice(NOTEPAD_PAD_TYPES, row.pad_type, "text");
+    const theme = normalizeNotepadColor(row.color);
+    const blocks = Array.isArray(row.blocks) ? row.blocks : [];
+    let content = row.content ?? "";
+    let items = [];
+    if (padType === "checklist" || padType === "contacts") {
+      items = normalizeNotepadItems(content);
+      content = JSON.stringify(items);
+    } else if (blocks.length) {
+      content = JSON.stringify({ __np_blocks: 1, blocks });
+    }
+    return {
+      id: row.id,
+      title: row.title || "Notepad",
+      content,
+      items,
+      blocks,
+      pad_type: padType,
+      scope: notepadChoice(NOTEPAD_SCOPES, row.scope, "day"),
+      target_date: row.target_date ?? null,
+      start_date: row.start_date || null,
+      end_date: row.end_date || null,
+      linked_phase_id: present(row.linked_phase_id) ? String(row.linked_phase_id) : null,
+      linked_project_id: present(row.linked_project_id) ? Number(row.linked_project_id) : null,
+      project_title: null,
+      phase_title: null,
+      color_theme: theme,
+      color: theme,
+      is_pinned: TRUE_FLAGS.includes(row.is_pinned) ? 1 : 0,
+      is_theme_of_day: TRUE_FLAGS.includes(row.is_theme_of_day) ? 1 : 0,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+    };
+  }
+
+  function notepadActiveOn(pad, key) {
+    if (pad.start_date) return pad.start_date <= key && (!pad.end_date || key <= pad.end_date);
+    if (pad.scope === "phase") return false;
+    const target = text(pad.target_date);
+    if (pad.scope === "day") return target === key;
+    if (pad.scope === "week") return target === isoWeekKey(parseDayKey(key));
+    if (pad.scope === "month") return target === key.slice(0, 7);
+    return false;
+  }
+
+  function notepadDateKey(pad) {
+    return text(pad.start_date) || text(pad.target_date) || null;
+  }
+
+  const byNotepadFlags = (a, b) => b.is_theme_of_day - a.is_theme_of_day || b.is_pinned - a.is_pinned;
+  const byNotepadListOrder = (a, b) => byNotepadFlags(a, b)
+    || compareText(b.updated_at || "", a.updated_at || "") || b.id - a.id;
+  const byNotepadActiveOrder = (a, b) => byNotepadFlags(a, b)
+    || compareText(a.start_date || "", b.start_date || "") || b.id - a.id;
+  const byNotepadDayOrder = (a, b) => byNotepadFlags(a, b) || b.id - a.id;
+
+  // Until supabase/09_notepads.sql has been run, reads come back empty so Home and the calendar still load.
+  async function notepadRows() {
+    try {
+      return await selectAll(() => client.from("notepads").select("*").order("id"));
+    } catch (err) {
+      if (err instanceof ApiError && err.message === NOTEPADS_SQL_HINT) return [];
+      throw err;
+    }
+  }
+
+  const requireNotepad = (id) => requireRow("notepads", id, "Notepad not found");
+
+  async function getNotepad(id) {
+    return serializeNotepad(await requireNotepad(id));
+  }
+
+  function optionalInt(query, key, detail) {
+    const raw = query.get(key);
+    if (!present(raw)) return null;
+    const number = strictInt(raw);
+    if (number === null) throw new ApiError(422, detail);
+    return number;
+  }
+
+  async function listNotepads(query) {
+    const scope = text(query.get("scope")).toLowerCase();
+    const target = text(query.get("date"));
+    const phaseId = text(query.get("phase_id"));
+    const projectId = optionalInt(query, "project_id", "project_id has an invalid value");
+    const year = optionalInt(query, "year", "year must be a number");
+    const themeOnly = present(query.get("theme_only")) && flagField("theme_only", query.get("theme_only"));
+    const pads = (await notepadRows()).map(serializeNotepad).filter((pad) => {
+      if (scope && pad.scope !== scope) return false;
+      if (target && pad.target_date !== target) return false;
+      if (phaseId && pad.linked_phase_id !== phaseId) return false;
+      if (projectId !== null && pad.linked_project_id !== projectId) return false;
+      if (year !== null && !String(pad.start_date || pad.target_date || "").startsWith(`${year}-`)) return false;
+      return !themeOnly || pad.is_theme_of_day === 1;
+    });
+    return pads.sort(byNotepadListOrder);
+  }
+
+  async function listActiveNotepads(dateValue) {
+    const key = dayKey(parseDayKey(dateValue) || localToday());
+    return (await notepadRows()).map(serializeNotepad)
+      .filter((pad) => notepadActiveOn(pad, key)).sort(byNotepadActiveOrder);
+  }
+
+  async function themeOfDayNotepad(dateValue) {
+    const key = dayKey(parseDayKey(dateValue) || localToday());
+    const exact = (pad) => pad.start_date === key || pad.target_date === key;
+    const [pad] = (await notepadRows()).map(serializeNotepad)
+      .filter((row) => row.is_theme_of_day && (notepadDateKey(row) === key
+        || (row.start_date && row.start_date <= key && (!row.end_date || row.end_date >= key))))
+      .sort((a, b) => Number(exact(b)) - Number(exact(a)) || b.id - a.id);
+    return pad && notepadActiveOn(pad, key) ? pad : null;
+  }
+
+  async function clearNotepadThemes(key, exceptId) {
+    const { data, error } = await client.from("notepads").select("id, start_date, target_date").eq("is_theme_of_day", 1);
+    if (error) {
+      if (isMissingTable(error, "notepads")) return;
+      throw new ApiError(500, error.message || "Cloud request failed");
+    }
+    const ids = (data || []).filter((row) => row.id !== exceptId && notepadDateKey(row) === key).map((row) => row.id);
+    if (ids.length) await run(client.from("notepads").update({ is_theme_of_day: 0 }).in("id", ids));
+  }
+
+  async function applyNotepadTheme(id, enabled, dateKey) {
+    if (enabled) await clearThemeOfDay(dateKey, null, id);
+    await run(client.from("notepads").update({ is_theme_of_day: enabled ? 1 : 0 }).eq("id", id));
+  }
+
+  function notepadThemeDate(startDate, targetDate) {
+    return startDate || text(targetDate) || null;
+  }
+
+  async function createNotepad(body) {
+    const f = modelFields(body, NOTEPAD_FIELD_KINDS);
+    const padType = notepadChoice(NOTEPAD_PAD_TYPES, f.pad_type, "text");
+    const scope = notepadChoice(NOTEPAD_SCOPES, f.scope, "day");
+    let targetDate = f.target_date ?? null;
+    let startDate = notepadDay(f.start_date, "start_date");
+    let endDate = notepadDay(f.end_date, "end_date");
+    if (!startDate && !endDate && scope !== "phase") {
+      [targetDate, startDate, endDate] = notepadRangeForScope(scope);
+    } else if (!present(targetDate) && scope !== "phase") {
+      targetDate = notepadTargetForScope(scope, startDate ? parseDayKey(startDate) : localToday());
+    } else {
+      targetDate = text(targetDate) || null;
+    }
+    if (startDate && endDate && endDate < startDate) throw new ApiError(400, "end_date must be on or after start_date");
+    const phaseId = pyText(pyFalsy(f.linked_phase_id) ? f.phase_id : f.linked_phase_id) || null;
+    if (scope === "phase" && !phaseId) throw new ApiError(400, "Phase notepads need a phase");
+    const isTheme = f.is_theme_of_day === true;
+    const themeDate = notepadThemeDate(startDate, targetDate);
+    if (isTheme && !themeDate) throw new ApiError(400, "Theme of the Day needs a calendar date");
+    const row = await run(client.from("notepads").insert({
+      title: pyText(f.title) || "Notepad",
+      ...notepadBodyColumns(padType, f, given(f.items) ? f.items : f.content),
+      pad_type: padType,
+      scope,
+      target_date: targetDate,
+      start_date: startDate,
+      end_date: endDate,
+      linked_phase_id: phaseId,
+      linked_project_id: f.linked_project_id || f.project_id || null,
+      color: normalizeNotepadColor(present(f.color_theme) ? f.color_theme : f.color),
+      is_pinned: has(f, "is_pinned") && !f.is_pinned ? 0 : 1,
+      is_theme_of_day: 0,
+    }).select("id").single());
+    if (isTheme) await applyNotepadTheme(row.id, true, themeDate);
+    return getNotepad(row.id);
+  }
+
+  async function updateNotepad(id, body) {
+    const f = modelFields(body, NOTEPAD_FIELD_KINDS);
+    const current = await getNotepad(id);
+    const padType = has(f, "pad_type") ? notepadChoice(NOTEPAD_PAD_TYPES, f.pad_type, current.pad_type) : current.pad_type;
+    const targetDate = has(f, "target_date") ? text(f.target_date) || null : current.target_date;
+    const startDate = has(f, "start_date") ? notepadDay(f.start_date, "start_date") : current.start_date;
+    const endDate = has(f, "end_date") ? notepadDay(f.end_date, "end_date") : current.end_date;
+    if (startDate && endDate && endDate < startDate) throw new ApiError(400, "end_date must be on or after start_date");
+    const themeTouched = has(f, "is_theme_of_day");
+    const isTheme = themeTouched ? f.is_theme_of_day === true : current.is_theme_of_day === 1;
+    const themeDate = notepadThemeDate(startDate, targetDate);
+    if (themeTouched && isTheme && !themeDate) throw new ApiError(400, "Theme of the Day needs a calendar date");
+    const changes = {
+      title: has(f, "title") ? pyText(f.title) || current.title : current.title,
+      pad_type: padType,
+      scope: has(f, "scope") ? notepadChoice(NOTEPAD_SCOPES, f.scope, current.scope) : current.scope,
+      target_date: targetDate,
+      start_date: startDate,
+      end_date: endDate,
+      linked_phase_id: has(f, "linked_phase_id") || has(f, "phase_id")
+        ? pyText(has(f, "linked_phase_id") ? f.linked_phase_id : f.phase_id) || null
+        : current.linked_phase_id,
+      linked_project_id: has(f, "linked_project_id") || has(f, "project_id")
+        ? (has(f, "linked_project_id") ? f.linked_project_id : f.project_id) ?? null
+        : current.linked_project_id,
+      color: has(f, "color_theme") || has(f, "color")
+        ? normalizeNotepadColor(has(f, "color_theme") ? f.color_theme : f.color)
+        : current.color,
+      is_pinned: has(f, "is_pinned") ? (f.is_pinned ? 1 : 0) : current.is_pinned,
+      is_theme_of_day: !themeTouched && isTheme ? 1 : 0,
+    };
+    if (padType === "checklist" || padType === "contacts") {
+      if (has(f, "items") || has(f, "content")) {
+        Object.assign(changes, notepadBodyColumns(padType, f, has(f, "items") ? f.items : f.content));
+      }
+    } else if (has(f, "content") || has(f, "blocks")) {
+      Object.assign(changes, notepadBodyColumns(padType, f));
+    }
+    await run(client.from("notepads").update(changes).eq("id", id));
+    if (themeTouched) await applyNotepadTheme(id, isTheme, themeDate);
+    else if (isTheme && themeDate) await clearThemeOfDay(themeDate, null, id);
+    return getNotepad(id);
+  }
+
+  async function deleteNotepad(id) {
+    await requireNotepad(id);
+    await run(client.from("notepads").delete().eq("id", id));
+    return { ok: true, id };
   }
 
   /* ---------- Checklist templates ---------- */
@@ -5669,6 +6018,12 @@
     { methods: ["PATCH"], pattern: /^\/api\/sparks\/(\d+)\/action$/, handle: (m, body) => sparkAction(Number(m[1]), body) },
     { methods: ["GET"], pattern: /^\/api\/dashboard\/today$/, signedOut: null, handle: () => dashboardToday() },
     { methods: ["GET"], pattern: /^\/api\/calendar\/month$/, signedOut: null, handle: (m, body, query) => calendarMonth(query) },
+    { methods: ["GET"], pattern: /^\/api\/notepads$/, handle: (m, body, query) => listNotepads(query) },
+    { methods: ["GET"], pattern: /^\/api\/notepads\/active$/, handle: (m, body, query) => listActiveNotepads(query.get("date")) },
+    { methods: ["GET"], pattern: /^\/api\/notepads\/theme$/, signedOut: null, handle: (m, body, query) => themeOfDayNotepad(query.get("date")) },
+    { methods: ["POST"], pattern: /^\/api\/notepads$/, handle: (m, body) => createNotepad(body) },
+    { methods: ["PATCH"], pattern: /^\/api\/notepads\/(\d+)$/, handle: (m, body) => updateNotepad(Number(m[1]), body) },
+    { methods: ["DELETE"], pattern: /^\/api\/notepads\/(\d+)$/, handle: (m) => deleteNotepad(Number(m[1])) },
     { methods: ["GET"], pattern: /^\/api\/checklist-templates$/, handle: () => listChecklistTemplates() },
     { methods: ["POST"], pattern: /^\/api\/checklist-templates$/, handle: (m, body) => saveChecklistTemplate(body) },
     { methods: ["PUT"], pattern: /^\/api\/checklist-templates\/(\d+)$/, handle: (m, body) => saveChecklistTemplate(body, Number(m[1])) },
@@ -5966,12 +6321,13 @@
   // Lists the app loads at startup for modules not yet in the cloud; empty keeps every page rendering.
   const PENDING_MODULE_LISTS = [
     /^\/api\/workbench\/projects$/, /^\/api\/scrapbook\/gif-library$/,
-    /^\/api\/vision$/, /^\/api\/contacts$/, /^\/api\/notepads(\/active)?$/,
+    /^\/api\/vision$/, /^\/api\/contacts$/,
   ];
 
   function signedOutNoun(path) {
     if (path.startsWith("/api/habits")) return "trackers";
     if (path.startsWith("/api/projects")) return "projects";
+    if (path.startsWith("/api/notepads")) return "notepads";
     if (/^\/api\/(visions|scrapbook)/.test(path)) return "your visions";
     if (/^\/api\/(vault|references|reference-folders)/.test(path)) return "your Vault";
     if (path === "/api/upload") return "files";

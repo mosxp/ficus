@@ -43,7 +43,7 @@
       };
     </script>
     <!-- Bump ?v= whenever ficus_cloud.js changes so browsers never pair it with a different index.html. -->
-    <script src="ficus_cloud.js?v=9"></script>
+    <script src="ficus_cloud.js?v=10"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -34696,9 +34696,16 @@
       document.getElementById("day-tasks")?.addEventListener("click", async (event) => {
         await handleTaskChromeClick(event);
       });
+      let notepadSaving = false;
       async function saveNotepadSetup() {
-        if (!notepadDraft) return;
+        if (!notepadDraft || notepadSaving) return;
         const error = document.getElementById("notepad-edit-error");
+        const showError = (message) => {
+          if (!error) return;
+          error.textContent = message;
+          error.classList.remove("hidden");
+        };
+        error?.classList.add("hidden");
         syncNotepadNoteEditorsFromDom();
         document.querySelectorAll("[data-notepad-check-text]").forEach((input) => {
           const blockIndex = Number(input.dataset.notepadCheckText);
@@ -34740,34 +34747,38 @@
           color_theme: notepadColorOf(notepadDraft),
           content: encodeNotepadPayload(blocks),
         };
-        let res;
-        if (notepadDraft.id) {
-          res = await fetch(`/api/notepads/${notepadDraft.id}`, {
-            method: "PATCH",
+        const saveBtn = document.getElementById("btn-save-notepad");
+        notepadSaving = true;
+        if (saveBtn) saveBtn.disabled = true;
+        let saved;
+        try {
+          const res = await fetch(notepadDraft.id ? `/api/notepads/${notepadDraft.id}` : "/api/notepads", {
+            method: notepadDraft.id ? "PATCH" : "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
           });
-        } else {
-          res = await fetch("/api/notepads", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-          });
-        }
-        if (!res.ok) {
-          const detail = await res.json().catch(() => ({}));
-          if (error) {
-            error.textContent = detail.detail || "Could not save notepad.";
-            error.classList.remove("hidden");
+          if (!res.ok) {
+            const detail = await res.json().catch(() => ({}));
+            showError(detail.detail || "Could not save notepad.");
+            return;
           }
+          saved = await res.json();
+        } catch (_) {
+          showError("Could not save notepad. Check your connection and try again.");
           return;
+        } finally {
+          notepadSaving = false;
+          if (saveBtn) saveBtn.disabled = false;
         }
-        const saved = await res.json();
         saved.blocks = notepadBlocksOf(saved);
         const focusDay = notepadDraft._focusDayAfterSave || null;
         upsertNotepad(saved);
         closeOverlay("notepad-modal");
-        await refreshNotepadHome();
+        try {
+          await refreshNotepadHome();
+        } catch (err) {
+          console.error("Notepad saved, but the calendar could not refresh", err);
+        }
         renderProjects();
         if (focusDay) focusPlannerDay(focusDay);
       }
