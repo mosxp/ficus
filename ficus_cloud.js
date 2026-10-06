@@ -3017,7 +3017,7 @@
     return serializeNotepad(await requireNotepad(id));
   }
 
-  function optionalInt(query, key, detail) {
+  function queryInt(query, key, detail) {
     const raw = query.get(key);
     if (!present(raw)) return null;
     const number = strictInt(raw);
@@ -3029,8 +3029,8 @@
     const scope = text(query.get("scope")).toLowerCase();
     const target = text(query.get("date"));
     const phaseId = text(query.get("phase_id"));
-    const projectId = optionalInt(query, "project_id", "project_id has an invalid value");
-    const year = optionalInt(query, "year", "year must be a number");
+    const projectId = queryInt(query, "project_id", "project_id has an invalid value");
+    const year = queryInt(query, "year", "year must be a number");
     const themeOnly = present(query.get("theme_only")) && flagField("theme_only", query.get("theme_only"));
     const pads = (await notepadRows()).map(serializeNotepad).filter((pad) => {
       if (scope && pad.scope !== scope) return false;
