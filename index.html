@@ -18,7 +18,7 @@
     <script src="canvas-editor.js"></script>
     <script src="scrapboard.js?v=24"></script>
     <script src="quick_line.js"></script>
-    <script src="space.js?v=4" defer></script>
+    <script src="space.js?v=5" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -3565,6 +3565,75 @@
       .space-icon-upload:disabled { opacity: 0.6; cursor: progress; }
       .space-icon-note { margin-top: 0.4rem; font-size: 0.72rem; line-height: 1.4; color: #a8a29e; }
       .space-icon-note.is-status { color: #57534e; }
+      .space-icon-note.is-error { color: #be123c; }
+      /* Space's File and Link dialogs, and the cards they insert. */
+      .space-insert-pop { width: min(20rem, calc(100vw - 1rem)); padding: 0.75rem; overflow-y: auto; overscroll-behavior: contain; }
+      .space-source-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0.4rem; }
+      .space-source {
+        display: flex; min-width: 0; flex-direction: column; align-items: center; gap: 0.4rem; padding: 0.75rem 0.25rem 0.6rem;
+        border-radius: 0.75rem; background: #fafaf9; box-shadow: inset 0 0 0 1px #f0eeec;
+        font-size: 0.72rem; font-weight: 600; color: #44403c; transition: background 120ms ease, box-shadow 120ms ease;
+      }
+      .space-source svg { width: 1.4rem; height: 1.4rem; color: #57534e; }
+      .space-source:hover:not(:disabled) { background: #f5f5f4; box-shadow: inset 0 0 0 1px #d6d3d1; }
+      .space-source:disabled { opacity: 0.55; cursor: progress; }
+      .space-field-label { display: block; margin: 0.75rem 0 0.35rem; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #a8a29e; }
+      .space-field-label:first-child { margin-top: 0; }
+      .space-field-label span { font-weight: 500; letter-spacing: 0.02em; text-transform: none; }
+      .space-field {
+        width: 100%; min-width: 0; height: 2.2rem; padding: 0 0.65rem; border: 0; border-radius: 0.6rem; background: #f5f5f4;
+        font-size: 0.85rem; color: #1c1917; outline: none;
+      }
+      .space-field::placeholder { color: #a8a29e; }
+      .space-field:focus { background: #fff; box-shadow: 0 0 0 2px rgba(28, 25, 23, 0.12); }
+      .space-field.is-invalid { background: #fff; box-shadow: 0 0 0 2px rgba(225, 29, 72, 0.35); }
+      .space-field-row { display: flex; gap: 0.4rem; }
+      .space-insert-pop .space-seg button[aria-checked="true"] { background: #fff; color: #1c1917; box-shadow: 0 1px 3px rgba(28, 25, 23, 0.1); }
+      .space-pop-actions { display: flex; align-items: center; justify-content: flex-end; gap: 0.35rem; margin-top: 0.85rem; }
+      .space-pop-btn {
+        flex-shrink: 0; height: 2.2rem; padding: 0 0.85rem; border-radius: 0.6rem;
+        font-size: 0.75rem; font-weight: 600; color: #57534e; white-space: nowrap;
+      }
+      .space-pop-btn:hover:not(:disabled) { background: #f5f5f4; color: #1c1917; }
+      .space-pop-btn.is-primary { background: #1c1917; color: #fff; }
+      .space-pop-btn.is-primary:hover:not(:disabled) { background: #292524; color: #fff; }
+      .space-pop-btn.is-danger { margin-right: auto; padding: 0 0.5rem; color: #be123c; }
+      .space-pop-btn:disabled { opacity: 0.6; cursor: progress; }
+      .space-pop-link { font-weight: 600; color: #57534e; text-decoration: underline; text-decoration-color: #d6d3d1; text-underline-offset: 2px; white-space: nowrap; }
+      .space-pop-link:hover { color: #1c1917; text-decoration-color: currentColor; }
+      .space-doc-body [data-note-editor] a.space-link {
+        color: #1c1917; text-decoration: underline; text-decoration-color: rgba(168, 162, 158, 0.7);
+        text-decoration-thickness: 1px; text-underline-offset: 3px; transition: text-decoration-color 120ms ease;
+      }
+      .space-doc-body [data-note-editor] a.space-link:hover { text-decoration-color: #1c1917; }
+      .space-doc-body .space-bookmark, .space-doc-body .space-file {
+        display: flex; align-items: center; gap: 0.8rem; max-width: 34rem; margin: 0.5rem 0;
+        border: 1px solid #e7e5e4; border-radius: 0.9rem; background: #fff; color: #1c1917; text-decoration: none;
+        line-height: 1.35; cursor: pointer; user-select: none; -webkit-user-select: none;
+        box-shadow: 0 1px 2px rgba(28, 25, 23, 0.04); transition: border-color 140ms ease, box-shadow 140ms ease;
+      }
+      .space-doc-body .space-bookmark { padding: 0.7rem 0.85rem 0.7rem 0.7rem; }
+      .space-doc-body .space-file { max-width: 26rem; padding: 0.55rem 0.85rem 0.55rem 0.55rem; }
+      .space-doc-body .space-bookmark:hover, .space-doc-body .space-file:hover { border-color: #d6d3d1; box-shadow: 0 6px 18px rgba(28, 25, 23, 0.07); }
+      .space-bookmark-icon {
+        display: flex; width: 2.4rem; height: 2.4rem; flex-shrink: 0; align-items: center; justify-content: center; overflow: hidden;
+        border-radius: 0.65rem; background: #f5f5f4 center / 1.1rem no-repeat;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23a8a29e' stroke-width='1.2'%3E%3Ccircle cx='8' cy='8' r='6.2'/%3E%3Cpath d='M1.8 8h12.4M8 1.8c1.7 1.8 2.5 3.8 2.5 6.2S9.7 12.4 8 14.2C6.3 12.4 5.5 10.4 5.5 8S6.3 3.6 8 1.8z'/%3E%3C/svg%3E");
+      }
+      .space-bookmark-icon img { width: 1.25rem; height: 1.25rem; border-radius: 0.2rem; background: #f5f5f4; }
+      .space-card-text { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 0.1rem; }
+      .space-card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9rem; font-weight: 600; color: #1c1917; }
+      .space-card-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.74rem; color: #a8a29e; }
+      .space-bookmark-go { display: flex; flex-shrink: 0; color: #a8a29e; transition: color 140ms ease; }
+      .space-bookmark-go svg { width: 0.95rem; height: 0.95rem; }
+      .space-bookmark:hover .space-bookmark-go { color: #1c1917; }
+      .space-file-icon {
+        display: flex; width: 2.4rem; height: 2.4rem; flex-shrink: 0; align-items: center; justify-content: center; border-radius: 0.6rem;
+        background: color-mix(in srgb, var(--tint, #78716c) 12%, #fff); color: var(--tint, #78716c);
+        font-size: 0.6rem; font-weight: 800; letter-spacing: 0.04em;
+      }
+      .space-file-icon.is-cloud { background: #f5f5f4; color: #57534e; }
+      .space-file-icon svg { width: 1.3rem; height: 1.3rem; }
       .space-doc-placeholder {
         display: flex; min-height: 50vh; flex-direction: column; align-items: center; justify-content: center;
         border: 1px dashed #d6d3d1; border-radius: 1.25rem; background: rgba(245, 245, 244, 0.5); padding: 2rem; text-align: center;

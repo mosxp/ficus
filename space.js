@@ -20,7 +20,7 @@
   const MIN_GAP = 76;
   const CLOSE_MS = 180;
   const NOTE_POPOVERS = "#note-color-picker, #note-emoji-picker, #note-table-picker, #note-list-picker";
-  const SPACE_POPOVERS = "#space-color-pop, #space-size-pop, #space-list-pop, #space-icon-pop";
+  const SPACE_POPOVERS = "#space-color-pop, #space-size-pop, #space-list-pop, #space-icon-pop, #space-file-pop, #space-link-pop";
   const FORMAT_POPOVERS = `${NOTE_POPOVERS}, ${SPACE_POPOVERS}`;
 
   const FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72];
@@ -50,6 +50,34 @@
   // Custom bullets are stored inside the dot's HTML, so they're shrunk to a small PNG first.
   const LIST_ICON_PX = 72;
   const STICKER_LIBRARY_URL = "/api/scrapbook/stickers";
+  const LINK_STYLE_KEY = "ficus_space_link_style_v1";
+  const LINK_PREVIEW_URL = "/api/link-preview";
+  const LINK_PREVIEW_WAIT_MS = 4500;
+  const CLOUD_SOURCES = {
+    gdrive: {
+      label: "Google Drive",
+      home: "https://drive.google.com/drive/my-drive",
+      host: /(^|\.)(drive|docs)\.google\.com$/i,
+      // Title suffixes Google adds to shared pages, and the sign-in page private files redirect to.
+      suffix: /\s+[-–]\s+Google (Drive|Docs|Sheets|Slides|Forms)$/i,
+      junk: /^(Google Drive|Google Docs|Sign[- ]in|Meet Google Drive)/i,
+    },
+    dropbox: {
+      label: "Dropbox",
+      home: "https://www.dropbox.com/home",
+      host: /(^|\.)dropbox(usercontent)?\.com$/i,
+      suffix: /\s+[-–|]\s+Dropbox$/i,
+      junk: /^(Dropbox|Log in|Sign in)/i,
+    },
+  };
+  const FILE_TINTS = [
+    [/^(pdf)$/, "#b4532a"],
+    [/^(docx?|pages|odt|rtf|txt|md|epub)$/, "#3f6c8f"],
+    [/^(xlsx?|csv|numbers|ods|json)$/, "#4d7c63"],
+    [/^(pptx?|key|odp)$/, "#b45309"],
+    [/^(png|jpe?g|gif|webp|heic|heif)$/, "#8b5e83"],
+    [/^(m4a|mp3|wav|aac|ogg|oga|opus|flac|caf|weba|mp4|mov|m4v|webm)$/, "#6b5b95"],
+  ];
 
   let spaceDots = [];
   let loadedKey = null;
@@ -65,7 +93,12 @@
   let drag = null;
   const el = {};
   // Toolbar controls of the open text editor, plus the editor selection they act on.
-  const fmt = { sizeInput: null, colorBtn: null, listBtn: null, savedRange: null, colorMode: "text", lastText: null, lastHighlight: null };
+  const fmt = {
+    sizeInput: null, colorBtn: null, listBtn: null, fileBtn: null, linkBtn: null, fileInput: null,
+    savedRange: null, colorMode: "text", lastText: null, lastHighlight: null,
+  };
+  // An attachment upload in flight (it outlives its popover) and the message to show when the popover reopens.
+  const attach = { busy: false, status: "", error: false };
   // The user's scrapbook sticker library, fetched once per page; `sheet` holds pieces sliced from an upload.
   const stickers = { items: null, loading: null, failed: false, sheet: null, busy: false, status: "" };
 
@@ -326,7 +359,12 @@
     fmt.sizeInput = null;
     fmt.colorBtn = null;
     fmt.listBtn = null;
+    fmt.fileBtn = null;
+    fmt.linkBtn = null;
+    fmt.fileInput = null;
     fmt.savedRange = null;
+    attach.status = "";
+    attach.error = false;
     stickers.sheet = null;
     stickers.status = "";
     if (!editor) return;
@@ -601,6 +639,8 @@
     document.querySelectorAll(SPACE_POPOVERS).forEach((pop) => pop.remove());
     fmt.colorBtn?.setAttribute("aria-expanded", "false");
     fmt.listBtn?.setAttribute("aria-expanded", "false");
+    fmt.fileBtn?.setAttribute("aria-expanded", "false");
+    fmt.linkBtn?.setAttribute("aria-expanded", "false");
     fmt.sizeInput?.closest(".space-fs")?.querySelector("[data-space-fs-menu]")?.setAttribute("aria-expanded", "false");
   }
 
@@ -1003,7 +1043,13 @@
   }
 
   function onEditorKeyDown(event) {
-    if (event.key !== "Enter" || !(event.ctrlKey || event.metaKey)) return;
+    if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey) return;
+    if (event.key.toLowerCase() === "k" && fmt.linkBtn) {
+      event.preventDefault();
+      if (!document.getElementById("space-link-pop")) openLinkPopover(fmt.linkBtn);
+      return;
+    }
+    if (event.key !== "Enter") return;
     const sel = window.getSelection();
     const item = sel.rangeCount ? checklistItemAt(sel.anchorNode) : null;
     if (!item) return;
@@ -1317,6 +1363,519 @@
     if (!stickers.items) loadStickerLibrary().then(refreshIconPicker);
   }
 
+  /* ---------- Attachments and links ---------- */
+
+  // Attachment and bookmark cards are non-editable <a> blocks with Space-only classes: index.html's chip
+  // formatter rewrites [data-chip] / .smart-* elements and turns "@Name" text outside links into contact chips.
+
+  const SOURCE_ICONS = {
+    device: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 12.5V3.5M6.4 7 10 3.5 13.6 7"/><path d="M3.5 12v2.5A1.5 1.5 0 0 0 5 16h10a1.5 1.5 0 0 0 1.5-1.5V12"/></svg>',
+    gdrive: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M7 3h6l5.5 9.5-2.8 4.5H4.3l-2.8-4.5z"/><path d="M7 3l5.5 9.5h6M4.3 17 10 7.5"/></svg>',
+    dropbox: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round" aria-hidden="true"><path d="M6 3 1.5 6 6 9l4-3zM14 3l-4 3 4 3 4.5-3zM1.5 12 6 15l4-3-4-3zM18.5 12 14 9l-4 3 4 3zM6 16.3 10 19l4-2.7-4-2.6z"/></svg>',
+  };
+  const EXTERNAL_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6.5 3.5h6v6M12.5 3.5 4 12"/></svg>';
+  const CARD_SELECTOR = ".space-bookmark, .space-file";
+  const BLOCK_TAGS = /^(P|DIV|H[1-6]|UL|OL|BLOCKQUOTE|PRE|TABLE|HR|FIGURE)$/;
+  const TEXT_BLOCKS = /^(P|DIV|H[1-6]|BLOCKQUOTE|PRE)$/;
+
+  function formatBytes(bytes) {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n <= 0) return "";
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+    const mb = n / (1024 * 1024);
+    return `${mb < 10 ? mb.toFixed(1) : Math.round(mb)} MB`;
+  }
+
+  function fileExt(name) {
+    const match = /\.([a-z0-9]{1,5})$/i.exec(String(name || "").trim());
+    return match ? match[1].toLowerCase() : "";
+  }
+
+  function hostOf(url) {
+    try { return new URL(url).hostname.replace(/^www\./i, ""); } catch (_) { return ""; }
+  }
+
+  // "example.com/page" is accepted as https; anything that isn't a web address comes back empty.
+  function normalizeUrl(raw) {
+    let value = String(raw || "").trim();
+    if (!value || /\s/.test(value)) return "";
+    if (!/^https?:\/\//i.test(value)) {
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return "";
+      value = `https://${value.replace(/^\/+/, "")}`;
+    }
+    try {
+      const url = new URL(value);
+      return url.hostname.includes(".") || url.hostname === "localhost" ? url.href : "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  // The address without its scheme, for an inline link left without a label.
+  function displayUrl(url) {
+    try {
+      const parsed = new URL(url);
+      const path = `${parsed.pathname}${parsed.search}`.replace(/\/$/, "");
+      const text = `${parsed.hostname.replace(/^www\./i, "")}${path}`;
+      return text.length > 60 ? `${text.slice(0, 59)}…` : text;
+    } catch (_) {
+      return url;
+    }
+  }
+
+  // Best-effort page title via the app's link preview; never holds the insert up for long.
+  async function previewTitle(url, source) {
+    const timeout = new Promise((resolve) => setTimeout(() => resolve(null), LINK_PREVIEW_WAIT_MS));
+    try {
+      const res = await Promise.race([fetch(`${LINK_PREVIEW_URL}?url=${encodeURIComponent(url)}`).catch(() => null), timeout]);
+      if (!res?.ok) return "";
+      const data = await res.json();
+      let title = String(data?.title || "").replace(/\s+/g, " ").trim();
+      if (source) {
+        title = title.replace(source.suffix, "").trim();
+        if (source.junk.test(title)) title = "";
+      }
+      // Pages that can't be read sometimes come back titled with a scrap of their own address.
+      if (title && decodeURIComponent(url).toLowerCase().includes(title.toLowerCase())) title = "";
+      return title.slice(0, 200);
+    } catch (_) {
+      return "";
+    }
+  }
+
+  // Dropbox share links end in the file name (/scl/fi/<id>/<name>, /s/<id>/<name>); Drive links don't.
+  function cloudNameFromUrl(source, url) {
+    if (source !== "dropbox") return "";
+    try {
+      const parts = new URL(url).pathname.split("/").filter(Boolean);
+      const last = parts.length >= 3 ? decodeURIComponent(parts[parts.length - 1]) : "";
+      return last && (fileExt(last) || !/^[\w-]{12,}$/.test(last)) ? last : "";
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function cloudFallbackName(source, url) {
+    if (source === "dropbox") return "Dropbox file";
+    const kind = /docs\.google\.com\/(document|spreadsheets|presentation|forms)\//i.exec(url)?.[1]?.toLowerCase();
+    return { document: "Google Doc", spreadsheets: "Google Sheet", presentation: "Google Slides", forms: "Google Form" }[kind] || "Google Drive file";
+  }
+
+  function fileCardHtml({ url, name, bytes = 0, mime = "", source = "device" }) {
+    const cloud = CLOUD_SOURCES[source];
+    const ext = fileExt(name);
+    const tint = FILE_TINTS.find(([pattern]) => pattern.test(ext))?.[1] || "#78716c";
+    const icon = cloud
+      ? `<span class="space-file-icon is-cloud">${SOURCE_ICONS[source]}</span>`
+      : `<span class="space-file-icon" style="--tint:${tint}">${escapeAttr((ext || "file").slice(0, 4).toUpperCase())}</span>`;
+    const meta = cloud ? cloud.label : [ext.toUpperCase(), formatBytes(bytes)].filter(Boolean).join(" · ") || "File";
+    return `<a class="space-file" href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" contenteditable="false" draggable="false"`
+      + ` data-space-file="${source}" data-url="${escapeAttr(url)}" data-title="${escapeAttr(name)}" data-filename="${escapeAttr(name)}"`
+      + ` data-bytes="${Number(bytes) || 0}" data-mime="${escapeAttr(mime)}" title="${escapeAttr(name)}">`
+      + `${icon}<span class="space-card-text"><span class="space-card-title">${escapeAttr(name)}</span><span class="space-card-sub">${escapeAttr(meta)}</span></span></a>`;
+  }
+
+  function bookmarkCardHtml(url, title) {
+    const host = hostOf(url);
+    const favicon = host
+      ? `<img src="https://www.google.com/s2/favicons?domain=${encodeURIComponent(host)}&amp;sz=64" alt="" loading="lazy" referrerpolicy="no-referrer" />`
+      : "";
+    return `<a class="space-bookmark" href="${escapeAttr(url)}" target="_blank" rel="noopener noreferrer" contenteditable="false" draggable="false" data-space-bookmark title="${escapeAttr(url)}">`
+      + `<span class="space-bookmark-icon">${favicon}</span>`
+      + `<span class="space-card-text"><span class="space-card-title">${escapeAttr(title || host || url)}</span><span class="space-card-sub">${escapeAttr(host || url)}</span></span>`
+      + `<span class="space-bookmark-go">${EXTERNAL_ICON}</span></a>`;
+  }
+
+  // An editable inline link under the caret (cards and the shared editor's link chips aren't).
+  function linkAt(node) {
+    const host = node?.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    const link = host?.closest?.("a[href]");
+    return link && !link.matches(`${CARD_SELECTOR}, [contenteditable="false"]`) && editorRoot()?.contains(link) ? link : null;
+  }
+
+  function placeCaret(range) {
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+    fmt.savedRange = range.cloneRange();
+  }
+
+  /** Puts a card on its own line after the caret's block (or in place of an empty line), then moves the caret below it. */
+  function insertCard(html) {
+    if (!restoreSelection()) return null;
+    const root = editorRoot();
+    const range = window.getSelection().getRangeAt(0);
+    range.collapse(false);
+    const holder = document.createElement("div");
+    holder.innerHTML = html;
+    const card = holder.firstElementChild;
+    let top = range.startContainer;
+    if (top === root) {
+      root.insertBefore(card, root.childNodes[range.startOffset] || null);
+    } else {
+      while (top.parentNode !== root) top = top.parentNode;
+      if (top.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.test(top.tagName)) {
+        const blank = TEXT_BLOCKS.test(top.tagName) && !top.textContent.replace(/[\s\u200b\u00a0]/g, "") && !top.querySelector("img, [contenteditable='false']");
+        if (blank) top.replaceWith(card);
+        else top.after(card);
+      } else {
+        range.insertNode(card);
+      }
+    }
+    let next = card.nextSibling;
+    while (next?.nodeType === Node.TEXT_NODE && !next.nodeValue.trim() && next.nextSibling) next = next.nextSibling;
+    const usable = next && !next.matches?.(CARD_SELECTOR)
+      && (next.nodeType === Node.TEXT_NODE ? next.nodeValue.trim() : TEXT_BLOCKS.test(next.tagName));
+    if (!usable) {
+      next = document.createElement("p");
+      next.append(document.createElement("br"));
+      card.after(next);
+    }
+    const after = document.createRange();
+    if (next.nodeType === Node.TEXT_NODE) after.setStart(next, 0);
+    else after.selectNodeContents(next);
+    after.collapse(true);
+    placeCaret(after);
+    card.scrollIntoView({ block: "nearest" });
+    syncEditorContent();
+    return card;
+  }
+
+  function insertInlineLink(url, label, existing) {
+    if (!restoreSelection()) return;
+    let link = existing?.isConnected ? existing : null;
+    if (link) {
+      if (link.textContent !== label) link.textContent = label;
+    } else {
+      const range = window.getSelection().getRangeAt(0);
+      link = document.createElement("a");
+      link.textContent = label;
+      range.deleteContents();
+      range.insertNode(link);
+    }
+    link.href = url;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.title = url;
+    link.classList.add("space-link");
+    const after = document.createRange();
+    after.setStartAfter(link);
+    after.collapse(true);
+    placeCaret(after);
+    syncEditorContent();
+  }
+
+  function removeLink(link) {
+    if (!link?.isConnected || !restoreSelection()) return;
+    const first = link.firstChild;
+    const last = link.lastChild;
+    link.replaceWith(...link.childNodes);
+    if (first && last) {
+      const range = document.createRange();
+      range.setStartBefore(first);
+      range.setEndAfter(last);
+      placeCaret(range);
+    }
+    syncEditorContent();
+  }
+
+  // Device files open in the app's file preview; everything else in a new tab.
+  function onEditorClick(event) {
+    const card = event.target.closest?.(CARD_SELECTOR);
+    const link = card || (event.ctrlKey || event.metaKey ? event.target.closest?.("a[href]") : null);
+    if (!link || !editorRoot()?.contains(link)) return;
+    event.preventDefault();
+    if (link.dataset.spaceFile === "device" && typeof window.openNoteFileChip === "function") {
+      window.openNoteFileChip(link);
+      return;
+    }
+    window.open(link.href, "_blank", "noopener,noreferrer");
+  }
+
+  function filePopoverHtml() {
+    const sources = [["device", "From device"], ["gdrive", "Google Drive"], ["dropbox", "Dropbox"]];
+    const note = attach.status || "Upload from this device, or link a file from Google Drive or Dropbox.";
+    return `
+      <div class="space-icon-head"><span>Attach a file</span></div>
+      <div class="space-source-grid">
+        ${sources.map(([key, label]) => (
+          `<button type="button" class="space-source" data-space-source="${key}"${attach.busy ? " disabled" : ""}>${SOURCE_ICONS[key]}<span>${label}</span></button>`
+        )).join("")}
+      </div>
+      <p class="space-icon-note${attach.status ? " is-status" : ""}${attach.error ? " is-error" : ""}" role="status">${escapeAttr(note)}</p>`;
+  }
+
+  function cloudPaneHtml(source) {
+    const info = CLOUD_SOURCES[source];
+    return `
+      <div class="space-icon-head">
+        <button type="button" class="space-icon-back" data-space-file-back aria-label="Back">‹</button><span>${info.label}</span>
+      </div>
+      <div class="space-field-row">
+        <input type="url" class="space-field" data-space-cloud-url placeholder="Paste a ${info.label} share link" autocomplete="off" spellcheck="false" aria-label="${info.label} share link" />
+        <button type="button" class="space-pop-btn is-primary" data-space-cloud-add>Attach</button>
+      </div>
+      <p class="space-icon-note" role="status">${cloudNoteHtml(info)}</p>`;
+  }
+
+  function cloudNoteHtml(info) {
+    return `The file's name is filled in for you. <a class="space-pop-link" href="${info.home}" target="_blank" rel="noopener noreferrer">Open ${info.label} ↗</a>`;
+  }
+
+  // Editing a field that was flagged puts the dialog's usual hint back.
+  function clearFieldError(field, hintHtml) {
+    if (!field.classList.contains("is-invalid")) return;
+    field.classList.remove("is-invalid");
+    const status = field.closest(".space-pop")?.querySelector("[role='status']");
+    if (!status) return;
+    status.innerHTML = hintHtml;
+    status.classList.remove("is-error");
+  }
+
+  function refreshFilePopover() {
+    const pop = document.getElementById("space-file-pop");
+    if (pop?.dataset.view === "sources") pop.innerHTML = filePopoverHtml();
+  }
+
+  function setFieldError(pop, field, message) {
+    field.classList.add("is-invalid");
+    const status = pop.querySelector("[role='status']");
+    if (status) {
+      status.textContent = message;
+      status.classList.add("is-error");
+    }
+    field.focus();
+  }
+
+  async function uploadAttachment(file) {
+    if (!file || attach.busy || !editor) return;
+    const target = editor;
+    const size = formatBytes(file.size);
+    attach.busy = true;
+    attach.error = false;
+    attach.status = `Uploading ${file.name}${size ? ` (${size})` : ""}…`;
+    refreshFilePopover();
+    try {
+      const body = new FormData();
+      body.append("file", file);
+      const res = await fetch("/api/upload", { method: "POST", body });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.url) {
+        throw new Error(typeof data?.detail === "string" && data.detail ? data.detail : "The upload didn't go through.");
+      }
+      attach.status = "";
+      if (editor !== target) return;
+      document.getElementById("space-file-pop")?.remove();
+      fmt.fileBtn?.setAttribute("aria-expanded", "false");
+      insertCard(fileCardHtml({ url: data.url, name: file.name || data.filename || "Attachment", bytes: file.size || data.bytes, mime: file.type }));
+    } catch (err) {
+      attach.error = true;
+      const reason = String(err?.message || "").trim();
+      attach.status = `Couldn't attach ${file.name}. ${reason}${reason && !/[.!?]$/.test(reason) ? "." : ""}`.trim();
+    } finally {
+      attach.busy = false;
+    }
+    if (attach.error && editor === target && fmt.fileBtn) {
+      if (document.getElementById("space-file-pop")) refreshFilePopover();
+      else openFilePopover(fmt.fileBtn);
+    }
+  }
+
+  async function addCloudFile(pop) {
+    const source = pop.dataset.view;
+    const info = CLOUD_SOURCES[source];
+    const field = pop.querySelector("[data-space-cloud-url]");
+    const button = pop.querySelector("[data-space-cloud-add]");
+    if (!info || !field || !button || button.disabled) return;
+    const url = normalizeUrl(field.value);
+    if (!url || !info.host.test(new URL(url).hostname)) {
+      setFieldError(pop, field, `That doesn't look like a ${info.label} link.`);
+      return;
+    }
+    const target = editor;
+    button.disabled = true;
+    button.textContent = "Attaching…";
+    const name = cloudNameFromUrl(source, url) || await previewTitle(url, info) || cloudFallbackName(source, url);
+    if (!target || editor !== target) return;
+    closeSpacePopovers();
+    insertCard(fileCardHtml({ url, name, source }));
+  }
+
+  function openFilePopover(anchor) {
+    const wasOpen = document.getElementById("space-file-pop");
+    closeSpacePopovers();
+    document.querySelectorAll(NOTE_POPOVERS).forEach((pop) => pop.remove());
+    if (wasOpen) return;
+    const pop = document.createElement("div");
+    pop.id = "space-file-pop";
+    pop.className = "space-pop space-insert-pop";
+    pop.setAttribute("role", "dialog");
+    pop.setAttribute("aria-label", "Attach a file");
+    const show = (view) => {
+      pop.dataset.view = view;
+      pop.innerHTML = view === "sources" ? filePopoverHtml() : cloudPaneHtml(view);
+      placePopover(pop, anchor);
+      pop.querySelector("[data-space-cloud-url]")?.focus();
+    };
+    pop.addEventListener("mousedown", keepEditorFocus);
+    pop.addEventListener("focusin", showSavedHighlight);
+    pop.addEventListener("click", (event) => {
+      const source = event.target.closest("[data-space-source]");
+      if (source) {
+        if (source.dataset.spaceSource === "device") fmt.fileInput?.click();
+        else show(source.dataset.spaceSource);
+        return;
+      }
+      if (event.target.closest("[data-space-file-back]")) show("sources");
+      else if (event.target.closest("[data-space-cloud-add]")) addCloudFile(pop);
+    });
+    pop.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && event.target.matches("[data-space-cloud-url]")) {
+        event.preventDefault();
+        addCloudFile(pop);
+      }
+    });
+    pop.addEventListener("input", (event) => {
+      const info = CLOUD_SOURCES[pop.dataset.view];
+      if (info && event.target.matches("[data-space-cloud-url]")) clearFieldError(event.target, cloudNoteHtml(info));
+    });
+    show("sources");
+    anchor.setAttribute("aria-expanded", "true");
+  }
+
+  function readLinkStyle() {
+    try { return localStorage.getItem(LINK_STYLE_KEY) === "card" ? "card" : "inline"; } catch (_) { return "inline"; }
+  }
+
+  function linkStyleNote(style) {
+    return style === "card"
+      ? "A card with the site's icon, title and domain. Opens in a new tab."
+      : "Text in the line. Ctrl/⌘-click it to open the page.";
+  }
+
+  async function submitLink(pop, existing) {
+    const urlField = pop.querySelector("[data-space-link-url]");
+    const labelField = pop.querySelector("[data-space-link-label]");
+    const button = pop.querySelector("[data-space-link-insert]");
+    if (!urlField || !labelField || !button || button.disabled) return;
+    const url = normalizeUrl(urlField.value);
+    if (!url) {
+      setFieldError(pop, urlField, "Enter a web address, like example.com.");
+      return;
+    }
+    const style = pop.dataset.style;
+    let label = labelField.value.replace(/\s+/g, " ").trim();
+    try { localStorage.setItem(LINK_STYLE_KEY, style); } catch (_) {}
+    if (style !== "card") {
+      closeSpacePopovers();
+      insertInlineLink(url, label || displayUrl(url), existing);
+      return;
+    }
+    const target = editor;
+    if (!label) {
+      button.disabled = true;
+      button.textContent = "Fetching title…";
+      label = await previewTitle(url);
+      if (!target || editor !== target) return;
+    }
+    closeSpacePopovers();
+    // A link turned into a card is replaced by it.
+    if (existing?.isConnected) {
+      const spot = document.createRange();
+      spot.setStartBefore(existing);
+      spot.collapse(true);
+      fmt.savedRange = spot;
+      existing.remove();
+    }
+    insertCard(bookmarkCardHtml(url, label || hostOf(url)));
+  }
+
+  function openLinkPopover(anchor) {
+    const wasOpen = document.getElementById("space-link-pop");
+    closeSpacePopovers();
+    document.querySelectorAll(NOTE_POPOVERS).forEach((pop) => pop.remove());
+    if (wasOpen) return;
+    const range = rangeInEditor(fmt.savedRange) ? fmt.savedRange : null;
+    const existing = range ? linkAt(range.startContainer) || linkAt(range.commonAncestorContainer) : null;
+    const selected = range && !range.collapsed ? range.toString().replace(/\s+/g, " ").trim() : "";
+    const selectedUrl = selected && /^\S+\.\S{2,}$/.test(selected) ? normalizeUrl(selected) : "";
+    const url = existing ? existing.getAttribute("href") || "" : selectedUrl ? selected : "";
+    const label = existing ? existing.textContent : selectedUrl ? "" : selected.slice(0, 200);
+    const style = existing ? "inline" : readLinkStyle();
+    const pop = document.createElement("div");
+    pop.id = "space-link-pop";
+    pop.className = "space-pop space-insert-pop";
+    pop.setAttribute("role", "dialog");
+    pop.setAttribute("aria-label", existing ? "Edit link" : "Insert link");
+    pop.dataset.style = style;
+    pop.innerHTML = `
+      <label class="space-field-label" for="space-link-url">URL</label>
+      <input id="space-link-url" type="url" class="space-field" data-space-link-url placeholder="https://…" value="${escapeAttr(url)}" autocomplete="off" spellcheck="false" />
+      <label class="space-field-label" for="space-link-label">Label / Title <span>(optional)</span></label>
+      <input id="space-link-label" type="text" class="space-field" data-space-link-label maxlength="200" placeholder="Uses the page's address if empty" value="${escapeAttr(label)}" autocomplete="off" />
+      <p class="space-field-label">Display</p>
+      <div class="space-seg" role="radiogroup" aria-label="Display style">
+        <button type="button" role="radio" data-space-link-style="inline" aria-checked="${style === "inline"}">Inline text link</button>
+        <button type="button" role="radio" data-space-link-style="card" aria-checked="${style === "card"}">Bookmark card</button>
+      </div>
+      <p class="space-icon-note" role="status">${linkStyleNote(style)}</p>
+      <div class="space-pop-actions">
+        ${existing ? '<button type="button" class="space-pop-btn is-danger" data-space-link-remove>Remove link</button>' : ""}
+        <button type="button" class="space-pop-btn" data-space-link-cancel>Cancel</button>
+        <button type="button" class="space-pop-btn is-primary" data-space-link-insert>${existing ? "Save" : "Insert"}</button>
+      </div>`;
+    pop.addEventListener("mousedown", keepEditorFocus);
+    pop.addEventListener("focusin", showSavedHighlight);
+    pop.addEventListener("click", (event) => {
+      const styleBtn = event.target.closest("[data-space-link-style]");
+      if (styleBtn) {
+        pop.dataset.style = styleBtn.dataset.spaceLinkStyle;
+        pop.querySelectorAll("[data-space-link-style]").forEach((btn) => btn.setAttribute("aria-checked", String(btn === styleBtn)));
+        const status = pop.querySelector("[role='status']");
+        status.textContent = linkStyleNote(pop.dataset.style);
+        status.classList.remove("is-error");
+        return;
+      }
+      if (event.target.closest("[data-space-link-insert]")) submitLink(pop, existing);
+      else if (event.target.closest("[data-space-link-remove]")) {
+        closeSpacePopovers();
+        removeLink(existing);
+      } else if (event.target.closest("[data-space-link-cancel]")) {
+        closeSpacePopovers();
+        restoreSelection();
+      }
+    });
+    pop.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && event.target.matches(".space-field")) {
+        event.preventDefault();
+        submitLink(pop, existing);
+      }
+    });
+    pop.addEventListener("input", (event) => {
+      if (event.target.matches(".space-field")) clearFieldError(event.target, linkStyleNote(pop.dataset.style));
+    });
+    placePopover(pop, anchor);
+    anchor.setAttribute("aria-expanded", "true");
+    const first = pop.querySelector(url ? "[data-space-link-label]" : "[data-space-link-url]");
+    first?.focus();
+    if (url) first?.select();
+  }
+
+  function ownToolbarButton(original, extraClass, title, open) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = `${original.className} ${extraClass}`;
+    btn.innerHTML = original.innerHTML;
+    btn.title = title;
+    btn.setAttribute("aria-haspopup", "dialog");
+    btn.setAttribute("aria-expanded", "false");
+    btn.addEventListener("mousedown", (event) => event.preventDefault());
+    btn.addEventListener("click", () => open(btn));
+    original.replaceWith(btn);
+    return btn;
+  }
+
   function buildSizeControl() {
     const wrap = document.createElement("div");
     wrap.className = "space-fs";
@@ -1374,13 +1933,36 @@
 
   /**
    * Reshapes the shared editor toolbar for Space: no Person/Place, Word-style sizes, a full colour palette,
-   * and one List menu in place of the separate Checkbox and Emoji buttons.
+   * one List menu in place of the separate Checkbox and Emoji buttons, and Space's own File and Link dialogs.
    */
   function enhanceToolbar(host) {
     const toolbar = host.querySelector(".note-toolbar-shell");
     if (!toolbar) return;
     toolbar.querySelectorAll('[data-note-chip="contact"], [data-note-chip="place"], [data-note-cmd="checklist"], [data-note-emoji-toggle]')
       .forEach((btn) => btn.remove());
+
+    const fileChip = toolbar.querySelector('[data-note-chip="file"]');
+    if (fileChip) {
+      fmt.fileBtn = ownToolbarButton(fileChip, "space-attach-btn", "Attach a file", (btn) => {
+        if (!attach.busy) {
+          attach.status = "";
+          attach.error = false;
+        }
+        openFilePopover(btn);
+      });
+      const input = document.createElement("input");
+      input.type = "file";
+      input.hidden = true;
+      input.addEventListener("change", () => {
+        const file = input.files?.[0];
+        input.value = "";
+        uploadAttachment(file);
+      });
+      fmt.fileBtn.after(input);
+      fmt.fileInput = input;
+    }
+    const linkChip = toolbar.querySelector('[data-note-chip="link"]');
+    if (linkChip) fmt.linkBtn = ownToolbarButton(linkChip, "space-link-btn", "Insert link (Ctrl+K)", openLinkPopover);
 
     const listToggle = toolbar.querySelector("[data-note-list-toggle]");
     if (listToggle) {
@@ -1427,6 +2009,7 @@
       root.addEventListener("mousedown", onEditorMouseDown);
       root.addEventListener("keydown", onEditorKeyDown);
       root.addEventListener("input", onEditorInput);
+      root.addEventListener("click", onEditorClick);
     }
     showCurrentSize();
   }
@@ -1622,7 +2205,7 @@
     document.addEventListener("selectionchange", onSelectionChange);
     document.addEventListener("pointerdown", (event) => {
       if (!document.querySelector(SPACE_POPOVERS)) return;
-      if (event.target.closest?.(`${SPACE_POPOVERS}, .space-color-btn, .space-list-btn, [data-space-fs-menu]`)) return;
+      if (event.target.closest?.(`${SPACE_POPOVERS}, .space-color-btn, .space-list-btn, .space-attach-btn, .space-link-btn, [data-space-fs-menu]`)) return;
       closeSpacePopovers();
     }, true);
     window.addEventListener("resize", () => {
