@@ -17,7 +17,7 @@
   "use strict";
 
   // Pages whose data lives in Supabase; index.html locks the other nav tabs on the static site.
-  window.FICUS_ONLINE_VIEWS = ["cover", "sparks", "habits", "today", "tasks", "projects", "vision", "reference", "legacy"];
+  window.FICUS_ONLINE_VIEWS = ["cover", "sparks", "habits", "today", "tasks", "projects", "vision", "reference", "legacy", "space"];
 
   const config = window.FICUS_SUPABASE_CONFIG || {};
   const nativeFetch = window.fetch.bind(window);
