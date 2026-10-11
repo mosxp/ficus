@@ -2571,7 +2571,7 @@
   class ScrapboardCanvas {
     /**
      * @param {HTMLElement} mountEl
-     * @param {{ visionId?: number|string, onSave?: Function, onChange?: Function, onStageChange?: Function,
+     * @param {{ onSave?: Function, onChange?: Function, onStageChange?: Function,
      *           autosaveMs?: number, state?: object, stage?: "display"|"edit", readOnly?: boolean, compact?: boolean,
      *           background?: {pattern?: string, tone?: string, image?: string} }} options
      */
@@ -2579,7 +2579,6 @@
       if (!mountEl) throw new Error("ScrapboardCanvas requires a mount element");
       this.mount = mountEl;
       this.options = options || {};
-      this.visionId = this.options.visionId || null;
       this.autosaveMs = this.options.autosaveMs == null ? 900 : this.options.autosaveMs;
       this.onSave = typeof this.options.onSave === "function" ? this.options.onSave : null;
       this.onChange = typeof this.options.onChange === "function" ? this.options.onChange : null;
@@ -6518,28 +6517,20 @@
       if (this.onChange) {
         try { this.onChange(this.getState()); } catch (err) { console.warn(err); }
       }
-      if (!this.autosaveMs || !(this.onSave || this.visionId)) return;
+      if (!this.autosaveMs || !this.onSave) return;
       clearTimeout(this._saveTimer);
       this._saveTimer = setTimeout(() => this.saveNow(), this.autosaveMs);
     }
 
     async saveNow() {
-      if (!this.onSave && !this.visionId) return;
+      if (!this.onSave) return;
       clearTimeout(this._saveTimer);
       const payload = {
         canvas: this.getState(),
         thumbnail_data: this.getThumbnailDataUrl(720),
       };
       try {
-        if (this.onSave) {
-          await this.onSave(payload);
-        } else {
-          await fetch("/api/visions/" + this.visionId + "/canvas", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(payload),
-          });
-        }
+        await this.onSave(payload);
         this._dirty = false;
       } catch (_) {
         /* retry on next edit */
@@ -6889,7 +6880,7 @@
       clearTimeout(this._saveTimer);
       clearTimeout(this._statusTimer);
       this._commitNoteEditor();
-      if (this._dirty && (this.onSave || this.visionId)) {
+      if (this._dirty && this.onSave) {
         try { this.saveNow(); } catch (_) {}
       }
       if (this._raf) cancelAnimationFrame(this._raf);

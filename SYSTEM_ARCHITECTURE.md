@@ -1,94 +1,109 @@
-# SYSTEM ELEMENT HIERARCHY
+# FICUS v1.0 ARCHITECTURE
 
-> Permanent architecture lock for Soft Bento Sparks.  
-> Do not collapse, rename, or conflate layers below without an explicit architecture revision.
-
----
-
-## 1. CONTAINERS
-
-High-level views and workspaces that group logs, blocks, and calendar items:
-
-| Container | Role |
-|-----------|------|
-| **Vision Board** | Long-horizon goals workspace; can link Tasks, Habits, Projects. |
-| **Project Journal (Project Box)** | Project-scoped workspace for phases, notes, links, files, and linked logs. |
-| **Daily Journal Page** | Column 2 Daily Stream — chronological journal surface for the browsing day. |
-| **Notepad** | Formerly Day Scratchpad. Column 1 ambient workspace; also visible across calendar spreads. Persistent date-attached notes and checklists. |
+> Source of truth for how the app is put together. Update it when a layer changes.
 
 ---
 
-## 2. LOGS (Journal / Diary Ecosystem)
+## 1. Views
 
-Chronological, rapid-capture stream entries. Logs are **not** calendar scheduling entities.
+FICUS has two views, switched by the square tabs in the top nav (`showView` in `index.html`):
 
-| Sign | Name | Meaning |
-|------|------|---------|
-| ⚡ | **Spark** | Unfiled / inbox log that requires attention or triage. |
-| ○ | **Task Log** | Journal entry with an **optional 1:1** link to a Calendar Task Item. |
-| □ | **Event Log** | Journal entry with an **optional 1:1** link to a Calendar Event Item. |
-| : | **Log** | Pure journal note with attached Blocks only (no calendar item slot). |
+| View | Role |
+|------|------|
+| **Cover** | Landing page and sign-in. The app stays on Cover while it's locked. |
+| **Space** | The whole workspace: a canvas of dots joined by arrows (`space.js`). |
 
-### Dual-ecosystem rule (strict)
-
-```
-: Log       → Attached Blocks only
-□ Event Log → Max 1 Calendar Event Item + Attached Blocks
-○ Task Log  → Max 1 Calendar Task Item + Attached Blocks
-```
-
-- A **Task Log / Event Log** is a journal shell (title, recorded time, blocks, capsules).
-- A **Calendar Task / Event Item** is the Time Management entity (schedule, status, project).
-- Linkage is **optional**, **1:1**, and must never treat “opening a log” as “opening the scheduler” by default.
-- Bridge context when opening management from a log: `{ origin: 'stream_log', log_id }`.
+The Projects, Vision Board, Vault, Notepad, Tracker, Logs and Time pages were removed in v1.0.
 
 ---
 
-## 3. BLOCKS (Universal 2-Stage Engine)
+## 2. Space
 
-Modular content items that attach to Logs or Containers. Every block has exactly **2 states**:
+### Dots
+
+Every dot has a type, a title and a page:
+
+| Type | Page |
+|------|------|
+| **Text** | A rich note. Child dots show up as tags in the text. |
+| **Board** | A free canvas of cards (a scrapboard). Child dots are cards. |
+| **Block** | A grid of blocks (see section 3). Child dots are blocks. |
+| **Hub** | Holds nothing of its own. Its page lists its children as cards, sorted by drag and drop. |
+
+The shape of a dot is the `Dot` typedef beside `cleanDot` in `space.js`:
+`{ id, type, title, property, x, y, content, parentId, children[], appearance: { color, size }, createdAt, updatedAt }`.
+Appearance defaults to gray `#8C8C8C` at size 1, and the size slider runs from 0.5 to 3.
+
+### Links
+
+- A link is an arrow from a parent to a child. Each parent stores its links in its `children` list.
+- `parentId` is the child's first parent. A dot can have several parents.
+- Two dots can link each other (A → B and B → A). Such a pair is drawn as one line with arrowheads at both ends.
+- The tab bar of an open dot shows its parents: "↑" for a parent, "↔" for a two-way link.
+- Deleting a dot with its children keeps any child that links back to it. That child only loses the arrows between them.
+
+### Views of the graph
+
+- **Graph:** custom force-directed physics in the style of d3 forces (charge, centre gravity, link springs, collisions). It does not use the d3 library.
+- **Orbit:** a planetary layout.
+  - Each star (a dot nothing links to) holds its children on a ring, and they hold theirs in turn.
+  - Two dots linked both ways are binary stars: peers rather than parent and child.
+
+### Storage
+
+Space saves only in the browser, in `localStorage`, one set of keys per user (`<user id>`, or `local` when signed out):
+
+| Key prefix | Holds |
+|------------|-------|
+| `ficus_space_dots_v1:` | The dots and their links. |
+| `ficus_space_board_v1:` | Board dot canvases. |
+| `ficus_space_blocks_v1:` | Block dot layouts. |
+| `ficus_space_block_board_v1:` | Scrapboards inside block dots. |
+
+The Supabase tables `space_dots` and `space_dot_links` (`supabase/10_v1_space_graph_overhaul.sql`) are groundwork for cloud sync. Space doesn't read or write them yet.
+
+---
+
+## 3. Blocks (universal 2-stage engine)
+
+Block dots and the note editor share one block engine (`attachUBlock`, `BLOCK_TYPE_META` in `index.html`). Every block has exactly two states:
 
 | State | Behavior |
 |-------|----------|
-| **STATE 1 — DISPLAY** | Clean, minimal visual card. |
-| **STATE 2 — SETTINGS** | Triggered on click/tap for inline configuration. |
+| **Display** | A clean, minimal card. |
+| **Settings** | Opened on click or tap, for inline configuration. |
 
-### Supported block types
+The block types are Rich Note, Photo, Link, Checklist, File, Photo Album, Audio / Voice, Video and Scrapboard.
 
-| Type | Notes |
-|------|--------|
-| 🖼️ **Photo Block** | Full-width image; caption input & delete in Settings. |
-| 🔗 **Link Block** | Compact pill vs Card Preview display modes. |
-| 📝 **Rich Note Block** | Lightweight formatted text payload. |
-
-Blocks are **not** Logs and are **not** Time Management Items.
+The shared note editor (`canvas-editor.js`) adds smart chips: "@" mentions for contacts, places, links and photos.
 
 ---
 
-## 4. TIME MANAGEMENT ITEMS (Calendar / Tasks Page Engine)
+## 4. Backends
 
-Structured scheduling entities managed primarily on the Tasks page:
+`index.html` calls `/api/...`. Who answers depends on how the app is served.
 
-| Item | Responsibility |
-|------|----------------|
-| **Event** | Timing models (Point in Time, Time Range, Multi-Day), accent colors, daily themes. |
-| **Task** | Status, due date, priority levels, project assignment, checklist. |
-| **Notepad** | Persistent notes and checklist items attached to specific calendar dates (Container + date-scoped workspace; not a stream Log). |
+**Local server (`main.py`, FastAPI with SQLite in `database.py`).** It serves the page and the scripts in `FRONTEND_SCRIPTS`, and answers:
+- contacts;
+- checklist templates;
+- uploads;
+- place search;
+- the scrapbook libraries (sticky pads, stickers, palettes, GIFs, handwriting).
 
-Management modals (`#event-editor-modal`, `#task-drawer`) are **shared global components**. They may be opened from the Tasks page directly, or bridged from Event Log / Task Log with stream context, then return to the originating log with a status capsule after save.
+**Static site (GitHub Pages).** `ficus_cloud.js` answers the same requests from Supabase:
+- checklist templates;
+- scrapbook pads, stickers, palettes and GIF search;
+- uploads, stored in the `uploads` bucket.
 
----
+Contacts and the saved-GIF library come back empty until they're ported.
 
-## Naming & anti-drift rules
-
-1. **Notepad** is the only user-facing and ID prefix for the former Scratchpad / Day Scratchpad surface.
-2. Never label a journal Task Log or Event Log as if it were a Calendar Task/Event Item (and vice versa).
-3. Do not add a third block interaction state; keep Display ↔ Settings only.
-4. Do not attach more than one Calendar Task or Event Item to a single Task Log / Event Log.
-5. Column 1 (ambient / Notepad / habits focus) stays on **real today** when Column 2 browses archive dates.
+Supabase schema changes are numbered SQL files in `supabase/`, run in order in the SQL Editor. File 10 drops the retired modules' tables. It keeps `sparks` and `tags` as an archive and includes a commented-out drop for them.
 
 ---
 
-## Readiness
+## Anti-drift rules
 
-This document is the source of truth for hierarchy. Future features must map cleanly onto Containers → Logs → Blocks → Time Management Items without inventing parallel ecosystems.
+1. Keep blocks to two states: Display and Settings.
+2. A link is directional. Two-way links are two arrows, never one merged record.
+3. New dot types must be added to `DOT_TYPES` in `space.js`, the `Dot` typedef, and the `space_dots.type` check in SQL.
+4. Default to gray (`#8C8C8C`) and square (90-degree) corners in new UI.
