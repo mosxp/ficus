@@ -526,6 +526,113 @@
     return eventFields(event);
   }
 
+  /* ---------- Dot links in event descriptions ---------- */
+
+  /* A dot linked to an event leaves its address in the event's description, one bullet per dot under a single
+     header (an existing header is reused, never repeated):
+       [the event's own notes]
+
+       ---
+       🔗 Ficus Workspaces:
+       • https://ficus.website/#dot_1
+       • https://ficus.website/#dot_2
+     Descriptions written in Google Calendar are HTML with <br> between lines; those made through the API may be
+     plain text with \n. Lines are compared on their text, without tags. */
+  const BACKLINK_HEADER = "\u{1F517} Ficus Workspaces:";
+  const BACKLINK_RULE = "---";
+  const BULLET = /^\u2022\s*/;
+
+  const isHtmlText = (text) => /<\/?(br|p|div|span|a|b|i|u|ul|ol|li)\b/i.test(text);
+  // The line break the description already uses, else <br> for HTML and \n for plain text.
+  const lineSep = (text) => (isHtmlText(text) ? "<br>" : /\r\n/.exec(text)?.[0] || "\n");
+  const lineText = (line) => line.replace(/<[^>]*>/g, "").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").trim();
+  const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // The url, not as the start of a longer dot id.
+  const urlPattern = (url) => new RegExp(`${escapeRegExp(url)}(?![\\w-])`);
+
+  // [{ text, sep }]: each line and the separator after it ("" after the last).
+  function splitLines(text) {
+    const parts = text.split(/(\r?\n|<br\s*\/?>)/i);
+    const lines = [];
+    for (let i = 0; i < parts.length; i += 2) lines.push({ text: parts[i], sep: parts[i + 1] || "" });
+    return lines;
+  }
+  const joinLines = (lines, sep) => lines.map((line, i) => line.text + (i < lines.length - 1 ? line.sep || sep : "")).join("");
+
+  // The description with `url` added under the header, or null if it's there already.
+  function withBacklink(description, url) {
+    const text = String(description || "");
+    if (urlPattern(url).test(lineText(text)) || urlPattern(url).test(text)) return null;
+    const sep = lineSep(text);
+    const lines = splitLines(text);
+    const header = lines.findIndex((line) => lineText(line.text) === BACKLINK_HEADER);
+    if (header >= 0) {
+      let last = header;
+      while (last + 1 < lines.length && BULLET.test(lineText(lines[last + 1].text))) last += 1;
+      lines.splice(last + 1, 0, { text: `\u2022 ${url}`, sep: lines[last].sep || sep });
+      return joinLines(lines, sep);
+    }
+    const body = text.replace(/(?:\s|<br\s*\/?>|&nbsp;)+$/i, "");
+    return [...(body ? [body, ""] : []), BACKLINK_RULE, BACKLINK_HEADER, `\u2022 ${url}`].join(sep);
+  }
+
+  // The description without `url`'s bullet (and without the header and rule once no bullets are left), or null
+  // if it has no such bullet.
+  function withoutBacklink(description, url) {
+    const text = String(description || "");
+    const sep = lineSep(text);
+    const lines = splitLines(text);
+    const at = lines.findIndex((line) => {
+      const shown = lineText(line.text);
+      return BULLET.test(shown) && shown.replace(BULLET, "") === url;
+    });
+    if (at < 0) return null;
+    lines.splice(at, 1);
+    const header = lines.findIndex((line) => lineText(line.text) === BACKLINK_HEADER);
+    if (header >= 0 && !(header + 1 < lines.length && BULLET.test(lineText(lines[header + 1].text)))) {
+      let from = header;
+      if (from > 0 && lineText(lines[from - 1].text) === BACKLINK_RULE) from -= 1;
+      while (from > 0 && !lineText(lines[from - 1].text)) from -= 1;
+      lines.splice(from, header + 1 - from);
+    }
+    return joinLines(lines, sep);
+  }
+
+  // The event's description, read fresh; a deleted event is a 410.
+  async function eventDescription(eventId) {
+    const missing = () => new DriveError("This event isn't in your Google Calendar any more.", 410);
+    let event;
+    try {
+      event = await calendarCall((calendar) => calendar.events.get({ calendarId: "primary", eventId }));
+    } catch (err) {
+      throw gone(err) ? missing() : err;
+    }
+    if (event.status === "cancelled") throw missing();
+    return String(event.description || "");
+  }
+
+  const patchDescription = (eventId, description) => calendarCall((calendar) => calendar.events.patch({
+    calendarId: "primary",
+    eventId,
+    resource: { description },
+  }));
+
+  // Puts `url` (a dot's address) in the event's description. Whether it was added; false if it was there already.
+  async function addEventBacklink(eventId, url) {
+    const description = withBacklink(await eventDescription(eventId), url);
+    if (description == null) return false;
+    await patchDescription(eventId, description);
+    return true;
+  }
+
+  // Takes `url`'s line out of the event's description. Whether it was there.
+  async function removeEventBacklink(eventId, url) {
+    const description = withoutBacklink(await eventDescription(eventId), url);
+    if (description == null) return false;
+    await patchDescription(eventId, description);
+    return true;
+  }
+
   /* ---------- Tasks requests (the user's default task list) ---------- */
 
   const DEFAULT_TASKLIST = "@default";
@@ -664,6 +771,8 @@
     createEvent,
     getEvent,
     updateEvent,
+    addEventBacklink,
+    removeEventBacklink,
     listTasks,
     createTask,
     getTask,

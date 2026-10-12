@@ -194,9 +194,12 @@
 
   /** @typedef {{ color: string, size: number }} DotAppearance */
   /** @typedef {Object<string, string[]>} DotTags  Type → its Names, e.g. { Subject: ["Pharmacology"] }. */
+  /** @typedef {{ eventId: string, title: string, startTime: string, endTime: string, htmlLink: string }} LinkedEvent
+       A Google Calendar event linked to a dot. All-day events' times are dates ("2026-10-13", the end the day after
+       it finishes); timed ones' are date-times with their offset. */
   /** @typedef {{ id: string, type: "text" | "board" | "block" | "hub", title: string, property: string, x: number,
        y: number, content: string, parentId: string | null, children: string[], appearance: DotAppearance,
-       tags: DotTags, createdAt: string, updatedAt: string }} Dot */
+       tags: DotTags, linkedEvents: LinkedEvent[], createdAt: string, updatedAt: string }} Dot */
 
   /** @returns {Dot | null} */
   function cleanDot(raw) {
@@ -217,9 +220,29 @@
         : [],
       appearance: cleanAppearance(raw.appearance),
       tags: cleanTags(raw.tags),
+      linkedEvents: cleanLinkedEvents(raw.linkedEvents),
       createdAt: raw.createdAt || new Date().toISOString(),
       updatedAt: raw.updatedAt || raw.createdAt || new Date().toISOString(),
     };
+  }
+
+  /** @returns {LinkedEvent[]} One per event, in the order linked. */
+  function cleanLinkedEvents(raw) {
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set();
+    return raw.flatMap((event) => {
+      const eventId = typeof event?.eventId === "string" ? event.eventId.trim() : "";
+      if (!eventId || seen.has(eventId)) return [];
+      seen.add(eventId);
+      const text = (value) => (typeof value === "string" ? value.trim() : "");
+      return [{
+        eventId,
+        title: text(event.title),
+        startTime: text(event.startTime),
+        endTime: text(event.endTime),
+        htmlLink: /^https:\/\//.test(event.htmlLink || "") ? event.htmlLink : "",
+      }];
+    });
   }
 
   // { color, size }: a hex colour (the default gray if missing) and a size multiplier from 0.5 to 3, in tenths.
@@ -393,6 +416,7 @@
       children: [],
       appearance: { color: DOT_DEFAULT_COLOR, size: 1 },
       tags: {},
+      linkedEvents: [],
       createdAt: now,
       updatedAt: now,
     };
@@ -12720,6 +12744,7 @@
       }));
       return group;
     }));
+    box.append(...(dot.linkedEvents || []).map((event) => linkedEventPill(dot, event)));
     const add = document.createElement("button");
     add.type = "button";
     add.className = "space-dot-tag space-dot-tag-add";
@@ -12727,7 +12752,14 @@
     add.setAttribute("aria-haspopup", "dialog");
     add.setAttribute("aria-expanded", "false");
     add.addEventListener("click", () => toggleTagPopover(dot.id));
-    box.append(add);
+    const link = document.createElement("button");
+    link.type = "button";
+    link.className = "space-dot-tag space-dot-event-add";
+    link.textContent = "\u{1F4C5} Link Event";
+    link.title = "Link a Google Calendar event to this dot";
+    link.setAttribute("aria-haspopup", "dialog");
+    link.addEventListener("click", () => void linkDotEvent(dot.id, link));
+    box.append(add, link);
     box.hidden = false;
   }
 
@@ -12759,6 +12791,154 @@
     dot.updatedAt = new Date().toISOString();
     saveDots();
     return true;
+  }
+
+  /* ---------- Linked Calendar events ---------- */
+
+  /* A dot can be linked to any number of Google Calendar events (dot.linkedEvents). They show as pills in its header
+     after its tags, each opening the event in Google Calendar in a new tab. 📅 Link Event picks one in the Calendar
+     Event sheet (Find Event or New Event; the canvas's sheet makes a block instead). Linking also leaves the dot's
+     address in the event's description (see addEventBacklink in ficus_drive.js), so the event links back here; the
+     pill's ✕ unlinks it, offering to take that address out of the description too. */
+
+  // A dot's address: opening it opens Ficus on that dot (see openLinkedDot).
+  const DOT_LINK_BASE = "https://ficus.website/#";
+  const dotLink = (id) => `${DOT_LINK_BASE}${encodeURIComponent(id)}`;
+  const toast = (message) => window.showAppToast?.(message);
+  const CALENDAR_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4.5" width="18" height="17" rx="2"/><path d="M16 2.5v4M8 2.5v4M3 10h18"/></svg>';
+
+  // "Tue, Oct 13" for an all-day event, "Tue, Oct 13, 3:00 PM" for a timed one, with the year when it isn't this one.
+  function linkedEventWhen(event) {
+    const allDay = /^\d{4}-\d{2}-\d{2}$/.test(event.startTime);
+    const start = new Date(allDay ? `${event.startTime}T00:00` : event.startTime);
+    if (!event.startTime || Number.isNaN(start.getTime())) return "";
+    const options = { weekday: "short", month: "short", day: "numeric" };
+    if (start.getFullYear() !== new Date().getFullYear()) options.year = "numeric";
+    if (!allDay) Object.assign(options, { hour: "numeric", minute: "2-digit" });
+    return start.toLocaleString(undefined, options);
+  }
+
+  function linkedEventPill(dot, event) {
+    const box = el.detailTags;
+    const title = event.title || "(No title)";
+    const when = linkedEventWhen(event);
+    const pill = document.createElement("div");
+    pill.className = "space-dot-event";
+    const link = document.createElement(event.htmlLink ? "a" : "span");
+    link.className = "space-dot-event-link";
+    link.innerHTML = CALENDAR_ICON;
+    if (event.htmlLink) {
+      link.href = event.htmlLink;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.title = `Open “${title}” in Google Calendar`;
+    }
+    const name = document.createElement("span");
+    name.className = "space-dot-event-title";
+    name.textContent = title;
+    link.append(name);
+    if (when) {
+      const time = document.createElement("span");
+      time.className = "space-dot-event-when";
+      time.textContent = when;
+      link.append(time);
+    }
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "space-dot-event-remove";
+    remove.textContent = "\u2715";
+    remove.title = "Unlink event";
+    remove.setAttribute("aria-label", `Unlink event ${title}`);
+    remove.addEventListener("click", () => {
+      const index = [...box.querySelectorAll(".space-dot-event-remove")].indexOf(remove);
+      const unlinked = unlinkDotEvent(dot.id, event.eventId);
+      if (!unlinked) return;
+      renderDotTags();
+      (box.querySelectorAll(".space-dot-event-remove")[index] || box.querySelector(".space-dot-event-add"))?.focus();
+      offerBacklinkRemoval(dot.id, unlinked);
+    });
+    pill.append(link, remove);
+    return pill;
+  }
+
+  // The Calendar Event sheet, then the event picked or made goes on the dot and its address in the event.
+  async function linkDotEvent(id, button) {
+    const engine = window.UniversalBlockEngine;
+    if (button.getAttribute("aria-busy") === "true" || typeof engine?.pickCalendarEvent !== "function") return;
+    button.setAttribute("aria-busy", "true");
+    let picked;
+    try {
+      picked = await engine.pickCalendarEvent({ heading: "Link Calendar Event" });
+    } finally {
+      button.removeAttribute("aria-busy");
+    }
+    const dot = findDot(id);
+    if (!picked?.eventId || !dot) return;
+    const linked = dot.linkedEvents || [];
+    if (linked.some((known) => known.eventId === picked.eventId)) {
+      toast(`“${picked.title || "That event"}” is already linked to this dot.`);
+      return;
+    }
+    const [event] = cleanLinkedEvents([{
+      eventId: picked.eventId,
+      title: picked.title,
+      startTime: picked.start,
+      endTime: picked.end,
+      htmlLink: picked.htmlLink,
+    }]);
+    dot.linkedEvents = [...linked, event];
+    dot.updatedAt = new Date().toISOString();
+    saveDots();
+    if (openDotId === id) renderDotTags();
+    // The sheet only hands back an event once Google has let Ficus into the calendar, so no popup is needed here.
+    const drive = window.FicusDrive;
+    if (!drive?.session || typeof drive.addEventBacklink !== "function") return;
+    try {
+      await drive.addEventBacklink(event.eventId, dotLink(id));
+    } catch (err) {
+      if (!err?.cancelled) {
+        toast(`Linked, but Google Calendar didn't take this dot's link: ${err?.message || "no answer from Google."}`);
+      }
+    }
+  }
+
+  // Takes the event off the dot. The event it was, or null.
+  function unlinkDotEvent(id, eventId) {
+    const dot = findDot(id);
+    const event = dot?.linkedEvents?.find((known) => known.eventId === eventId);
+    if (!event) return null;
+    dot.linkedEvents = dot.linkedEvents.filter((known) => known !== event);
+    dot.updatedAt = new Date().toISOString();
+    saveDots();
+    return event;
+  }
+
+  /* Asks whether to take the dot's address out of the unlinked event's description too. Run straight from the ✕'s
+     click (window.confirm keeps it there), so that a run-out sign-in or missing Calendar permission can bring up
+     Google's popup first. */
+  function offerBacklinkRemoval(id, event) {
+    const drive = window.FicusDrive;
+    if (!drive?.session || typeof drive.removeEventBacklink !== "function") return;
+    const title = event.title || "this event";
+    if (!window.confirm(`Unlinked “${title}”.\n\nAlso remove this dot's link from the event's description in Google Calendar?`)) return;
+    let access = Promise.resolve();
+    if (!drive.tokenLive || !drive.hasCalendar) {
+      if (!drive.ready) {
+        drive.prepare().catch(() => {});
+        toast("Still connecting to Google, so the link was left in Google Calendar.");
+        return;
+      }
+      access = drive.tokenLive ? drive.connectCalendar() : drive.reconnect().then(() => store()?.retry?.());
+    }
+    void (async () => {
+      try {
+        await access;
+        const removed = await drive.removeEventBacklink(event.eventId, dotLink(id));
+        toast(removed ? "Removed this dot's link from Google Calendar." : "This dot's link wasn't in the event's description.");
+      } catch (err) {
+        if (!err?.cancelled) toast(err?.message || "Google Calendar didn't answer. Try again.");
+      }
+    })();
   }
 
   /* The master tag list: Types and Names made in Manage Tags, kept whether or not any dot carries them yet, as
@@ -14115,7 +14295,34 @@
     if (!openDotId) render();
     if (shown && !openDotId) scatterDots();
     if (shown) void syncGoogleBlocks();
+    if (shown) openLinkedDot();
   }
+
+  /* A dot's address (dotLink, e.g. in a linked event's description) is Ficus with #<dot id>: once Space is showing,
+     and so after signing in, it opens that dot and the # is dropped. A # that isn't one of this user's dots is left. */
+  function linkedDotId() {
+    try {
+      return decodeURIComponent(location.hash.slice(1));
+    } catch {
+      return "";
+    }
+  }
+
+  function openLinkedDot() {
+    const id = linkedDotId();
+    if (!id || !active || !findDot(id)) return;
+    history.replaceState(history.state, "", location.pathname + location.search);
+    openDot(id);
+  }
+
+  window.addEventListener("hashchange", () => {
+    const id = linkedDotId();
+    if (!id || !ready) return;
+    loadDots();
+    if (!findDot(id)) return;
+    if (active) openLinkedDot();
+    else window.showView?.("space");
+  });
 
   window.renderDotContent = renderDotContent;
   window.FicusSpace = {
@@ -14128,6 +14335,7 @@
         children: [...dot.children],
         appearance: { ...dot.appearance },
         tags: Object.fromEntries(Object.entries(dot.tags || {}).map(([type, names]) => [type, [...names]])),
+        linkedEvents: (dot.linkedEvents || []).map((event) => ({ ...event })),
       }));
     },
     get links() {
