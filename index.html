@@ -18,7 +18,7 @@
     <script src="canvas-editor.js?v=2"></script>
     <script src="scrapboard.js?v=26"></script>
     <script src="quick_line.js?v=2"></script>
-    <script src="space.js?v=83" defer></script>
+    <script src="space.js?v=84" defer></script>
     <script src="collection.js?v=19" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -29,15 +29,16 @@
           localStorage.setItem("ficus_storage_epoch", APP_STORAGE_EPOCH);
         }
       } catch (_) {}
-      // The Google Cloud OAuth client (type "Web application") that signs users in and reaches their Drive and
-      // Calendar. Its Authorized JavaScript origins must list every address Ficus is served from, and the project
-      // needs the Google Drive API and Google Calendar API enabled.
+      // The Google Cloud OAuth client (type "Web application") that signs users in and reaches their Drive, Calendar
+      // and Tasks. Its Authorized JavaScript origins must list every address Ficus is served from, the project needs
+      // the Google Drive, Google Calendar and Google Tasks APIs enabled, and its consent screen the scopes Ficus asks
+      // for (drive.file, calendar.events and tasks).
       window.FICUS_GOOGLE_CONFIG = {
         clientId: "245135305204-l479tldfvcu4vvg09m31vbtph2m81fve.apps.googleusercontent.com",
       };
     </script>
     <!-- Bump ?v= whenever these change so browsers never pair them with a different index.html. -->
-    <script src="ficus_drive.js?v=3"></script>
+    <script src="ficus_drive.js?v=4"></script>
     <script src="ficus_cloud.js?v=15"></script>
     <script src="ficus_store.js?v=2"></script>
     <script>
@@ -2733,13 +2734,51 @@
       .block-cal-refresh[aria-busy="true"] svg { animation: block-cal-spin 0.8s linear infinite; }
       @keyframes block-cal-spin { to { transform: rotate(360deg); } }
       @media (prefers-reduced-motion: reduce) { .block-cal-refresh[aria-busy="true"] svg { animation: none; } }
-      /* The Calendar Event sheet: find one of the user's upcoming Google Calendar events, or make one. */
-      #block-calendar-sheet {
+      /* A Google Task block: a tick box beside the task's title, due day and notes, and a link to it in Google Tasks. */
+      .block-task-card { display: flex; flex-direction: column; justify-content: center; padding: 0.75rem; border: 1px solid #e7e5e4; background: #fff; }
+      .grid-widget-body > .block-task-card { height: 100%; border: 0; }
+      .block-task-main { display: flex; min-width: 0; align-items: center; gap: 0.5rem; }
+      /* The box's label is its hit area (larger under a finger); touch-action keeps a quick second tap from zooming. */
+      .block-task-check {
+        display: inline-flex; width: 1.75rem; height: 1.75rem; flex-shrink: 0; align-items: center; justify-content: center;
+        margin-left: -0.25rem; cursor: pointer; touch-action: manipulation; -webkit-tap-highlight-color: transparent;
+      }
+      @media (hover: none), (pointer: coarse) {
+        .block-task-check { width: 2.75rem; height: 2.75rem; margin: -0.5rem -0.25rem -0.5rem -0.75rem; }
+      }
+      .block-task-check input {
+        width: 1.15rem; height: 1.15rem; flex-shrink: 0; margin: 0; cursor: pointer; appearance: none; -webkit-appearance: none;
+        border: 1.5px solid #a8a29e; border-radius: 0; background: #fff; transition: background 120ms ease, border-color 120ms ease;
+      }
+      .block-task-check:hover input:not(:disabled) { border-color: #57534e; }
+      .block-task-check input:checked {
+        border-color: #1c1917; background: #1c1917 center / 0.8rem no-repeat
+          url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%23fff' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3.5 8.5l3 3 6-7'/%3E%3C/svg%3E");
+      }
+      .block-task-check input:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      .block-task-check input:disabled { cursor: default; opacity: 0.5; }
+      .block-task-card[aria-busy="true"] .block-task-check, .block-task-card[aria-busy="true"] .block-task-check input { cursor: progress; }
+      .block-task-text { display: block; min-width: 0; flex: 1; }
+      .block-task-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85rem; font-weight: 600; line-height: 1.25; color: #1c1917; }
+      .block-task-card.is-done .block-task-title { color: #a8a29e; text-decoration: line-through; }
+      .block-task-due { display: block; margin-top: 0.15rem; font-size: 0.72rem; line-height: 1.3; color: #8c8c8c; }
+      .block-task-due.is-overdue { color: #be123c; }
+      .block-task-card.is-done .block-task-due.is-overdue { color: #8c8c8c; }
+      .block-task-due.is-gone { font-style: italic; }
+      .block-task-notes {
+        display: -webkit-box; margin-top: 0.15rem; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+        white-space: pre-line; font-size: 0.72rem; line-height: 1.3; color: #a8a29e;
+      }
+      /* In the Find Task list, an empty box before each task. */
+      .block-task-dot { width: 1rem; height: 1rem; flex-shrink: 0; margin: 0 0.15rem; border: 1.5px solid #a8a29e; }
+      /* The Calendar Event and Google Task sheets: find one of the user's upcoming Google Calendar events or open
+         Google Tasks, or make one. */
+      #block-calendar-sheet, #block-task-sheet {
         position: fixed; inset: 0; z-index: 1000; display: flex; align-items: flex-end; justify-content: center;
         padding: 0.75rem; background: rgba(28, 25, 23, 0.25);
       }
-      @media (min-width: 640px) { #block-calendar-sheet { align-items: center; } }
-      #block-calendar-sheet, #block-calendar-sheet * { border-radius: 0; }
+      @media (min-width: 640px) { #block-calendar-sheet, #block-task-sheet { align-items: center; } }
+      #block-calendar-sheet, #block-calendar-sheet *, #block-task-sheet, #block-task-sheet * { border-radius: 0; }
       .cal-sheet {
         display: flex; width: 100%; max-width: 24rem; max-height: calc(100dvh - 1.5rem); flex-direction: column;
         border: 1px solid #e7e5e4; background: #fff; box-shadow: 0 24px 48px rgba(28, 25, 23, 0.18), 0 2px 6px rgba(28, 25, 23, 0.08);
@@ -2761,6 +2800,8 @@
         background: #fafaf9; font-size: 1rem; color: #1c1917;
       }
       .cal-sheet-field:focus { border-color: #8c8c8c; background: #fff; }
+      textarea.cal-sheet-field { height: auto; min-height: 5rem; padding: 0.5rem 0.75rem; resize: vertical; line-height: 1.4; }
+      .cal-sheet-optional { font-weight: 500; letter-spacing: 0; text-transform: none; }
       /* All day: a square switch, gray when off and dark when on. */
       .cal-sheet-switch {
         display: flex; align-items: center; gap: 0.6rem; margin-top: 0.75rem; cursor: pointer;
@@ -7736,9 +7777,10 @@
         video: { symbol: "\u25B7", label: "Video", type: "video" },
         scrapboard: { symbol: "\u2726", label: "Scrapboard", type: "scrapboard" },
         calendar: { symbol: "\u{1F4C5}", label: "Calendar Event", type: "calendar" },
+        task: { symbol: "\u2705", label: "Google Task", type: "task" },
       };
       const MEDIA_BLOCK_TYPES = ["file", "album", "scrapboard", "audio", "video"];
-      const ADD_BLOCK_MENU_TYPES = ["note", "photo", "link", "checklist", "file", "album", "scrapboard", "audio", "calendar", "video"];
+      const ADD_BLOCK_MENU_TYPES = ["note", "photo", "link", "checklist", "file", "album", "scrapboard", "audio", "calendar", "task", "video"];
       function isMediaBlockType(type) {
         return MEDIA_BLOCK_TYPES.includes(String(type || ""));
       }
@@ -9283,6 +9325,451 @@
           }
         })();
       }
+      /* ── Google Task blocks ──
+         { type: "task", taskId, tasklistId, title, status, due, notes, webViewLink }: a task in the user's default
+         Google Tasks list, found or made in the Google Task sheet. `status` is "needsAction" or "completed", and `due`
+         a day ("2026-10-13") or "". Ticking the card's box ticks the task off in Google Tasks there and then; the
+         refresh button (and opening a block dot, see space.js) pulls the task's latest from Google. A block whose
+         task was deleted in Google keeps its last details, marked `deleted`. */
+      // The blocks (by id) whose tick is on its way to Google; their boxes stay still until Google answers.
+      const taskBusy = new Set();
+      function taskDueDate(day) {
+        const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(day || ""));
+        return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3])) : null;
+      }
+      function startOfToday() {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        return today;
+      }
+      // "Due today", "Due tomorrow", "Due yesterday" or "Due Tue, Oct 13", with the year only when it isn't this one.
+      function taskDueText(day) {
+        const due = taskDueDate(day);
+        if (!due) return "";
+        const today = startOfToday();
+        const days = Math.round((due - today) / 86400000);
+        if (days === 0) return "Due today";
+        if (days === 1) return "Due tomorrow";
+        if (days === -1) return "Due yesterday";
+        const format = { weekday: "short", month: "short", day: "numeric" };
+        if (due.getFullYear() !== today.getFullYear()) format.year = "numeric";
+        return `Due ${due.toLocaleDateString(undefined, format)}`;
+      }
+      function taskOverdue(task) {
+        const due = taskDueDate(task?.due);
+        return Boolean(due) && task.status !== "completed" && due < startOfToday();
+      }
+      function taskCardMainHtml(block) {
+        const title = String(block.title || "").trim() || "(No title)";
+        const done = block.status === "completed";
+        const busy = taskBusy.has(String(block.id));
+        const link = !block.deleted && /^https:\/\//.test(String(block.webViewLink || "")) ? block.webViewLink : "";
+        const due = block.deleted ? "No longer in your Google Tasks" : taskDueText(block.due);
+        const notes = block.deleted ? "" : String(block.notes || "").trim();
+        return `<div class="block-task-main">
+            <label class="block-task-check" title="${done ? "Mark as not done" : "Mark as done"}">
+              <input type="checkbox" data-ublock-task-toggle${done ? " checked" : ""}${busy || block.deleted || !block.taskId ? " disabled" : ""} aria-label="${escapeHtml(title)}: done" />
+            </label>
+            <div class="block-task-text">
+              <p class="block-task-title">${escapeHtml(title)}</p>
+              ${due ? `<p class="block-task-due${block.deleted ? " is-gone" : taskOverdue(block) ? " is-overdue" : ""}">${escapeHtml(due)}</p>` : ""}
+              ${notes ? `<p class="block-task-notes">${escapeHtml(notes)}</p>` : ""}
+            </div>
+            ${block.taskId ? `<button type="button" data-ublock-task-refresh class="block-cal-refresh" title="Get the latest from Google Tasks" aria-label="Refresh ${escapeHtml(title)} from Google Tasks">${CALENDAR_REFRESH_ICON}</button>` : ""}
+            ${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer" data-ublock-open-link class="block-cal-open" title="Open in Google Tasks" aria-label="Open ${escapeHtml(title)} in Google Tasks">${externalArrowIconSvg()}</a>` : ""}
+            ${pencilIconButton('data-ublock-open="1"', "Edit task")}
+          </div>`;
+      }
+      function renderTaskBlockDisplayHtml(block, opts = {}) {
+        const done = block.status === "completed";
+        return `<div class="block-task-card${done ? " is-done" : ""}${block.deleted ? " is-gone" : ""}" ${ublockMetaAttrs(block, opts)} data-ublock-state="display"${taskBusy.has(String(block.id)) ? ' aria-busy="true"' : ""}>
+          ${taskCardMainHtml(block)}
+        </div>`;
+      }
+      function taskBlockFields(task) {
+        return {
+          taskId: String(task.taskId || ""),
+          tasklistId: String(task.tasklistId || "@default"),
+          title: String(task.title || "").trim(),
+          status: task.status === "completed" ? "completed" : "needsAction",
+          due: String(task.due || ""),
+          notes: String(task.notes || ""),
+          webViewLink: String(task.webViewLink || ""),
+        };
+      }
+      // Brings a task block up to date with `latest` (FicusDrive.getTask's answer, null once the task is deleted in
+      // Google). Whether anything changed.
+      function applyTask(block, latest) {
+        if (!latest) {
+          if (block.deleted) return false;
+          block.deleted = true;
+          return true;
+        }
+        const next = taskBlockFields(latest);
+        const changed = Boolean(block.deleted) || Object.keys(next).some((key) => block[key] !== next[key]);
+        Object.assign(block, next);
+        delete block.deleted;
+        return changed;
+      }
+      // Shows a task block's tick (and whether it's waiting on Google) on its cards without drawing them again, so
+      // the box keeps its focus. Read-only copies elsewhere are left as they are.
+      function paintTaskBlock(root, block) {
+        const { ublockSource: source, ublockOwnerId: ownerId } = root.dataset;
+        const busy = taskBusy.has(String(block.id));
+        document.querySelectorAll(`[data-ublock-type="task"][data-ublock-id="${CSS.escape(String(block.id))}"]`).forEach((card) => {
+          if (card.dataset.ublockSource !== source || card.dataset.ublockOwnerId !== ownerId) return;
+          card.classList.toggle("is-done", block.status === "completed");
+          if (busy) card.setAttribute("aria-busy", "true");
+          else card.removeAttribute("aria-busy");
+          const box = card.querySelector("[data-ublock-task-toggle]");
+          if (!box) return;
+          box.checked = block.status === "completed";
+          box.disabled = busy || Boolean(block.deleted);
+          box.closest("label")?.setAttribute("title", box.checked ? "Mark as not done" : "Mark as done");
+        });
+      }
+      function closeTaskSheet() {
+        document.getElementById("block-task-sheet")?._close?.(null);
+      }
+      /** Find Task lists the tasks not yet done in the user's default list (the search box narrows them down); New
+          Task makes one. Given `editing` (a task block), it opens on Edit Task instead, the form filled in from the
+          block, and saving changes the task in Google Tasks; Find Task then switches the block to another task.
+          Resolves the task's fields, or null. */
+      function openTaskSheet({ editing = null } = {}) {
+        closeTaskSheet();
+        return new Promise((resolve) => {
+          const drive = window.FicusDrive;
+          const editId = editing?.taskId && !editing.deleted ? String(editing.taskId) : "";
+          const formTab = `<button type="button" role="tab" id="task-tab-new" class="cal-sheet-tab" data-task-tab="new" aria-controls="task-pane-new">${editId ? "Edit Task" : "New Task"}</button>`;
+          const findTab = `<button type="button" role="tab" id="task-tab-find" class="cal-sheet-tab" data-task-tab="find" aria-controls="task-pane-find">Find Task</button>`;
+          const overlay = document.createElement("div");
+          overlay.id = "block-task-sheet";
+          overlay.innerHTML = `<div class="cal-sheet" role="dialog" aria-modal="true" aria-labelledby="block-task-sheet-title">
+              <div class="cal-sheet-head">
+                <span aria-hidden="true">${blockTypeSymbol("task")}</span>
+                <h3 id="block-task-sheet-title">${editing ? "Edit Google Task" : "Google Task"}</h3>
+                <button type="button" data-task-close class="cal-sheet-close" aria-label="Close">✕</button>
+              </div>
+              <div class="cal-sheet-tabs" role="tablist" aria-label="Google task">
+                ${editId ? formTab + findTab : findTab + formTab}
+              </div>
+              <div class="cal-sheet-body">
+                <div data-task-connect class="cal-sheet-connect" hidden>
+                  <p data-task-connect-text></p>
+                  <button type="button" data-task-connect-btn class="cal-sheet-primary"></button>
+                </div>
+                <div id="task-pane-find" role="tabpanel" aria-labelledby="task-tab-find" data-task-pane="find">
+                  <form data-task-search role="search">
+                    <input type="search" class="cal-sheet-field" placeholder="Search your tasks" aria-label="Search your tasks" enterkeyhint="search" autocomplete="off" />
+                  </form>
+                  <div data-task-results class="cal-sheet-results"></div>
+                </div>
+                <form id="task-pane-new" role="tabpanel" aria-labelledby="task-tab-new" data-task-pane="new" novalidate>
+                  <label class="cal-sheet-label" for="task-new-title">Title</label>
+                  <input id="task-new-title" name="title" type="text" class="cal-sheet-field" maxlength="1024" placeholder="Task title" autocomplete="off" />
+                  <label class="cal-sheet-label" for="task-new-due">Due Date <span class="cal-sheet-optional">(optional)</span></label>
+                  <input id="task-new-due" name="due" type="date" class="cal-sheet-field" />
+                  <label class="cal-sheet-label" for="task-new-notes">Notes <span class="cal-sheet-optional">(optional)</span></label>
+                  <textarea id="task-new-notes" name="notes" class="cal-sheet-field" rows="3" maxlength="8192" placeholder="Add details"></textarea>
+                  <button type="submit" class="cal-sheet-primary">${editId ? "Save Changes" : "Create Task"}</button>
+                </form>
+                <p data-task-status class="cal-sheet-note" role="status" hidden></p>
+              </div>
+            </div>`;
+          document.body.appendChild(overlay);
+          const $ = (sel) => overlay.querySelector(sel);
+          const tabs = [...overlay.querySelectorAll("[data-task-tab]")];
+          const findPane = $("[data-task-pane='find']");
+          const form = $("[data-task-pane='new']");
+          const search = $("[data-task-search] input");
+          const results = $("[data-task-results]");
+          const connect = $("[data-task-connect]");
+          const connectBtn = $("[data-task-connect-btn]");
+          const submit = form.querySelector("button[type='submit']");
+          const status = $("[data-task-status]");
+          const touch = window.matchMedia?.("(pointer: coarse)").matches;
+          let tab = editId ? "new" : "find";
+          // While Google needs a click first ("signin", "reconnect" or "tasks"), the connect panel stands in for the tabs.
+          let blocked = null;
+          // The open tasks, fetched once when Find Task first shows; the search box filters them here.
+          let tasks = null;
+          let loadSeq = 0;
+          const setStatus = (text, error = false) => {
+            status.textContent = text || "";
+            status.hidden = !text;
+            status.classList.toggle("is-error", Boolean(error));
+          };
+          const close = (value) => {
+            if (!overlay.isConnected) return;
+            loadSeq += 1;
+            document.removeEventListener("keydown", onKey, true);
+            overlay.remove();
+            resolve(value);
+          };
+          overlay._close = close;
+          const onKey = (event) => {
+            if (event.key !== "Escape") return;
+            event.stopPropagation();
+            close(null);
+          };
+          document.addEventListener("keydown", onKey, true);
+          overlay.addEventListener("click", (event) => {
+            event.stopPropagation();
+            if (event.target === overlay || event.target.closest("[data-task-close]")) close(null);
+          });
+          const paint = () => {
+            connect.hidden = !blocked;
+            for (const button of tabs) {
+              const on = button.dataset.taskTab === tab;
+              button.setAttribute("aria-selected", String(on));
+              button.tabIndex = on ? 0 : -1;
+            }
+            findPane.hidden = Boolean(blocked) || tab !== "find";
+            form.hidden = Boolean(blocked) || tab !== "new";
+          };
+          const block = (kind) => {
+            blocked = kind;
+            $("[data-task-connect-text]").textContent = kind === "signin" ? "Sign in with Google to use tasks."
+              : kind === "reconnect" ? "Your Google sign-in has run out. Reconnect to reach your tasks."
+                : "Ficus needs your permission to find, add and tick off tasks in your Google Tasks.";
+            connectBtn.textContent = kind === "reconnect" ? "Reconnect Google" : "Connect Google Tasks";
+            connectBtn.hidden = kind === "signin";
+            setStatus("");
+            paint();
+          };
+          // Failures only a click can fix bring up the connect panel; the rest show under the form.
+          const fail = (err) => {
+            if (drive?.AuthError && err instanceof drive.AuthError) block("reconnect");
+            else if (drive?.TasksAccessError && err instanceof drive.TasksAccessError) block("tasks");
+            else setStatus(err?.message || "Google Tasks didn't answer. Try again.", true);
+          };
+          const showResults = () => {
+            if (!tasks) return;
+            const words = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+            const shown = tasks.filter((task) => {
+              const text = `${task.title} ${task.notes}`.toLowerCase();
+              return words.every((word) => text.includes(word));
+            });
+            results.replaceChildren(...shown.map((task) => {
+              const button = document.createElement("button");
+              const due = taskDueText(task.due);
+              button.type = "button";
+              button.className = "cal-sheet-result";
+              button.innerHTML = `<span class="block-task-dot" aria-hidden="true"></span><span class="block-task-text"><span class="block-task-title">${escapeHtml(task.title || "(No title)")}</span>${due ? `<span class="block-task-due${taskOverdue(task) ? " is-overdue" : ""}">${escapeHtml(due)}</span>` : ""}</span>`;
+              button.addEventListener("click", () => close(task));
+              return button;
+            }));
+            setStatus(shown.length ? "" : words.length ? "No open tasks match that." : "No open tasks in your list.");
+          };
+          const loadTasks = async () => {
+            const seq = ++loadSeq;
+            setStatus("Getting your tasks…");
+            try {
+              const list = await drive.listTasks();
+              if (seq !== loadSeq) return;
+              tasks = list;
+              showResults();
+            } catch (err) {
+              if (seq !== loadSeq) return;
+              results.replaceChildren();
+              fail(err);
+            }
+          };
+          const showTab = (next, focus = true) => {
+            tab = next;
+            setStatus("");
+            paint();
+            if (blocked) return;
+            if (tab === "find") {
+              if (tasks) showResults();
+              else loadTasks();
+            }
+            if (focus && !touch) (tab === "find" ? search : form.elements.namedItem("title")).focus();
+          };
+          // Opens on the tabs if the token is good and carries Tasks, else on the connect panel.
+          const begin = () => {
+            if (!drive?.session) return block("signin");
+            if (!drive.tokenLive) return block("reconnect");
+            if (!drive.hasTasks) return block("tasks");
+            blocked = null;
+            showTab(tab);
+          };
+          for (const button of tabs) {
+            button.addEventListener("click", () => showTab(button.dataset.taskTab));
+            button.addEventListener("keydown", (event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              const other = tabs.find((row) => row !== button);
+              other.focus();
+              showTab(other.dataset.taskTab, false);
+            });
+          }
+          search.addEventListener("input", showResults);
+          $("[data-task-search]").addEventListener("submit", (event) => {
+            event.preventDefault();
+            if (tasks) showResults();
+            else loadTasks();
+          });
+          const titleField = form.elements.namedItem("title");
+          const dueField = form.elements.namedItem("due");
+          const notesField = form.elements.namedItem("notes");
+          titleField.value = editing?.title || "";
+          dueField.value = /^\d{4}-\d{2}-\d{2}$/.test(editing?.due || "") ? editing.due : "";
+          notesField.value = editing?.notes || "";
+          form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            if (submit.disabled) return;
+            const title = titleField.value.trim();
+            if (!title) {
+              setStatus("Give the task a title.", true);
+              titleField.focus();
+              return;
+            }
+            if (dueField.value && !/^\d{4}-\d{2}-\d{2}$/.test(dueField.value)) return setStatus("Pick a due date, or leave it empty.", true);
+            const fields = { title, due: dueField.value, notes: notesField.value.trim() };
+            submit.disabled = true;
+            setStatus(editId ? "Saving it to your tasks…" : "Adding it to your tasks…");
+            try {
+              close(await (editId ? drive.updateTask(editing.tasklistId, editId, fields) : drive.createTask(fields)));
+            } catch (err) {
+              fail(err);
+            } finally {
+              submit.disabled = false;
+            }
+          });
+          // Google's popup has to open straight from this click.
+          connectBtn.addEventListener("click", async () => {
+            if (!drive.ready) {
+              drive.prepare().catch(() => {});
+              setStatus("Still connecting to Google. Try again in a moment.");
+              return;
+            }
+            const asked = blocked;
+            connectBtn.disabled = true;
+            setStatus("");
+            try {
+              if (asked === "reconnect") {
+                await drive.reconnect();
+                window.FicusStore?.retry?.();
+              } else {
+                await drive.connectTasks();
+              }
+              if (overlay.isConnected) begin();
+            } catch (err) {
+              if (!overlay.isConnected || err?.cancelled) return;
+              fail(err);
+              if (asked === "tasks") setStatus(err?.message || "Google Tasks couldn't be connected.", true);
+            } finally {
+              connectBtn.disabled = false;
+            }
+          });
+          begin();
+        });
+      }
+      // Saves a task block that's taken on its task's latest details, straight through to Drive. Without `redraw` its
+      // cards are left as they are (they already show it).
+      async function saveTaskBlock(root, list, { redraw = true } = {}) {
+        const source = root.dataset.ublockSource || "tray";
+        const { ublockOwnerId: ownerId, ublockOwnerKind: ownerKind } = root.dataset;
+        const saved = await persistUBlockOwner(source, ownerId, ownerKind, list);
+        if (redraw) refreshUBlockHosts(source);
+        if (saved) void window.FicusStore?.flush?.();
+        return saved;
+      }
+      // The pencil: edits the task in Google Tasks (or switches the block to another one) in the sheet.
+      async function editTaskBlock(root) {
+        const { list, block } = uBlockFromRoot(root);
+        if (!block) return;
+        const task = await openTaskSheet({ editing: { ...block } });
+        if (!task) return;
+        applyTask(block, task);
+        await saveTaskBlock(root, list);
+      }
+      /* What a click on a task card needs before Google can be asked anything: a promise that settles once the token
+         is live and carries Tasks (opening Google's popup, so it has to run straight from the click), or null (with
+         a toast saying why) if there's no asking yet. */
+      function taskAccess(what) {
+        const drive = window.FicusDrive;
+        if (!drive?.session) {
+          showAppToast(`Sign in with Google to ${what}.`);
+          return null;
+        }
+        if (drive.tokenLive && drive.hasTasks) return Promise.resolve();
+        if (!drive.ready) {
+          drive.prepare().catch(() => {});
+          showAppToast("Still connecting to Google. Try again in a moment.");
+          return null;
+        }
+        return drive.tokenLive ? drive.connectTasks() : drive.reconnect().then(() => window.FicusStore?.retry?.());
+      }
+      // The refresh button: the task's latest title, tick and due date from Google.
+      function refreshTaskBlock(button) {
+        const root = button.closest("[data-ublock]");
+        const { list, block } = root ? uBlockFromRoot(root) : {};
+        const drive = window.FicusDrive;
+        if (!block?.taskId || !drive || button.getAttribute("aria-busy") === "true" || taskBusy.has(String(block.id))) return;
+        const access = taskAccess("refresh tasks");
+        if (!access) return;
+        button.setAttribute("aria-busy", "true");
+        void (async () => {
+          try {
+            await access;
+            const latest = await drive.getTask(block.tasklistId, block.taskId);
+            if (!applyTask(block, latest)) {
+              showAppToast("Already up to date with Google Tasks.");
+              return;
+            }
+            await saveTaskBlock(root, list);
+            showAppToast(latest ? "Updated from Google Tasks." : "This task was deleted in Google Tasks.");
+          } catch (err) {
+            if (!err?.cancelled) showAppToast(err?.message || "Google Tasks didn't answer. Try again.");
+          } finally {
+            button.removeAttribute("aria-busy");
+          }
+        })();
+      }
+      /* The card's box (clicked, tapped or toggled from the keyboard): ticks the task off in Google Tasks, or back on,
+         straight away. The card shows the new tick while Google is asked and goes back if Google can't be reached; the
+         block is saved once Google has answered. */
+      function toggleTaskBlock(box) {
+        const root = box.closest("[data-ublock]");
+        const { list, block } = root ? uBlockFromRoot(root) : {};
+        const done = box.checked;
+        const drive = window.FicusDrive;
+        if (!block || block.type !== "task" || !block.taskId || block.deleted || taskBusy.has(String(block.id)) || !drive) {
+          box.checked = !done;
+          return;
+        }
+        const access = taskAccess("tick off tasks");
+        if (!access) {
+          box.checked = !done;
+          return;
+        }
+        const before = block.status;
+        block.status = done ? "completed" : "needsAction";
+        taskBusy.add(String(block.id));
+        paintTaskBlock(root, block);
+        const shown = () => JSON.stringify([taskBlockFields(block), Boolean(block.deleted)]);
+        const painted = shown();
+        void (async () => {
+          try {
+            await access;
+            applyTask(block, await drive.setTaskStatus(block.tasklistId, block.taskId, done));
+          } catch (err) {
+            block.status = before;
+            if (err?.status === 410) {
+              block.deleted = true;
+              showAppToast("This task was deleted in Google Tasks.");
+            } else if (!err?.cancelled) {
+              showAppToast(err?.message || "Google Tasks didn't answer. Try again.");
+            }
+          } finally {
+            taskBusy.delete(String(block.id));
+            paintTaskBlock(root, block);
+          }
+          await saveTaskBlock(root, list, { redraw: shown() !== painted });
+        })();
+      }
       function applyMediaBlockSettings(block, root) {
         const title = root?.querySelector("[data-ublock-title]");
         if (title) block.title = String(title.value || "").trim();
@@ -9332,6 +9819,9 @@
         }
         if (block.type === "calendar") {
           return renderCalendarBlockDisplayHtml(block, opts);
+        }
+        if (block.type === "task") {
+          return renderTaskBlockDisplayHtml(block, opts);
         }
         return "";
       }
@@ -9449,14 +9939,17 @@
         } else if (kind === "calendar") {
           const event = await openCalendarEventSheet();
           block = event ? { id: newBlockId(), type: "calendar", ...calendarBlockFields(event) } : null;
+        } else if (kind === "task") {
+          const task = await openTaskSheet();
+          block = task ? { id: newBlockId(), type: "task", ...taskBlockFields(task) } : null;
         }
         const list = getList();
         if (!block || !list) return null;
         if (hostSelector && uBlockSettingsKey?.startsWith(`${source}:`)) flushOpenUBlockSettings(hostSelector);
         list.push(block);
         if (persist && !(await persist(list))) return null;
-        // A calendar block is done once its event is picked, so it goes straight onto the page shut.
-        if (kind !== "calendar" && (kind !== "note" || !inlineNoteEditing)) uBlockSettingsKey = uBlockKey(source, block.id);
+        // A calendar or task block is done once its event or task is picked, so it goes straight onto the page shut.
+        if (kind !== "calendar" && kind !== "task" && (kind !== "note" || !inlineNoteEditing)) uBlockSettingsKey = uBlockKey(source, block.id);
         rerender();
         requestAnimationFrame(() => {
           const host = hostSelector ? document.querySelector(hostSelector) : document;
@@ -10533,6 +11026,8 @@
             createMediaBlocks,
             attachBlock: attachUBlock,
             applyCalendarEvent,
+            // A block whose tick is on its way to Google is left to that answer.
+            applyTask: (block, latest) => !taskBusy.has(String(block.id)) && applyTask(block, latest),
             flushSettings: flushOpenUBlockSettings,
             settingsKey: () => uBlockSettingsKey,
             /** Replace photo for a block whose settings controls live outside its card. */
@@ -10552,13 +11047,14 @@
         wireScrapboardEmbeds();
         wireFilePreviewTriggers();
         document.addEventListener("click", (event) => {
-          const refresh = event.target.closest?.("[data-ublock-calendar-refresh]");
-          if (!refresh || event.target.closest("#block-calendar-sheet")) return;
+          const refresh = event.target.closest?.("[data-ublock-calendar-refresh], [data-ublock-task-refresh]");
+          if (!refresh || event.target.closest("#block-calendar-sheet, #block-task-sheet")) return;
           event.preventDefault();
-          refreshCalendarBlock(refresh);
+          if (refresh.hasAttribute("data-ublock-task-refresh")) refreshTaskBlock(refresh);
+          else refreshCalendarBlock(refresh);
         });
         document.addEventListener("click", async (event) => {
-          if (event.target.closest("#block-media-sheet, #block-calendar-sheet, [id$='add-block-menu'], #ql-field-popover")) return;
+          if (event.target.closest("#block-media-sheet, #block-calendar-sheet, #block-task-sheet, [id$='add-block-menu'], #ql-field-popover")) return;
           // Read from the path as dispatched: a click can re-render the popover it lands in, leaving its target
           // detached by the time this runs (and the path is gone once the handler awaits).
           const inOpenSettings = event.composedPath().some((node) => node instanceof Element && node.matches("[data-ublock-state='settings']"));
@@ -10600,7 +11096,7 @@
             return;
           }
           if (event.target.closest("[data-ublock] .scrapboard-root")) return;
-          if (event.target.closest("[data-ublock-calendar-refresh]")) return;
+          if (event.target.closest("[data-ublock-calendar-refresh], [data-ublock-task-refresh]")) return;
           const mediaReplace = event.target.closest("[data-ublock-media-replace]");
           if (mediaReplace) {
             event.preventDefault();
@@ -10702,7 +11198,9 @@
               const openRoot = document.querySelector(`[data-ublock-state="settings"][data-ublock="1"]`);
               if (openRoot) await commitUBlockSettings(openRoot);
             }
-            if (uBlockFromRoot(root).block?.type === "calendar") await editCalendarBlock(root);
+            const openType = uBlockFromRoot(root).block?.type;
+            if (openType === "calendar") await editCalendarBlock(root);
+            else if (openType === "task") await editTaskBlock(root);
             else openUBlockSettings(source, blockId);
             return;
           }
@@ -10710,6 +11208,11 @@
             const openRoot = document.querySelector(`[data-ublock-state="settings"][data-ublock="1"]`);
             if (openRoot) await commitUBlockSettings(openRoot);
           }
+        });
+        // Not async: Google's popup (when the sign-in has run out) has to open straight from the tick.
+        document.addEventListener("change", (event) => {
+          const box = event.target.closest?.("[data-ublock-task-toggle]");
+          if (box) toggleTaskBlock(box);
         });
         document.addEventListener("change", async (event) => {
           const box = event.target.closest("[data-ublock-check-toggle]");

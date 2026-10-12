@@ -8209,8 +8209,8 @@
   const BLOCK_REPLACE_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.5 6A4.75 4.75 0 0 0 3.6 4.6L2.5 5.8M2.5 2.8v3h3M3.5 10a4.75 4.75 0 0 0 8.9 1.4l1.1-1.2M13.5 13.2v-3h-3" /></svg>';
   const BLOCK_LINK_ICON = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 11.5a3.5 3.5 0 0 0 5 0l2.5-2.5a3.5 3.5 0 0 0-5-5l-1 1" /><path d="M11.5 8.5a3.5 3.5 0 0 0-5 0L4 11a3.5 3.5 0 0 0 5 5l1-1" /></svg>';
   // Block types whose settings open in place at their display size, with their controls floating outside the
-  // block; the others grow to fit their settings panel. (A calendar event block's settings are the engine's Calendar
-  // Event sheet, so it never opens in the grid.)
+  // block; the others grow to fit their settings panel. (Calendar event and Google task blocks' settings are the
+  // engine's Calendar Event and Google Task sheets, so they never open in the grid.)
   const IN_PLACE_TYPES = new Set(["note", "photo", "link", "file", "album", "audio", "video", "scrapboard", "frame"]);
   // Where those floating controls sit (kept EDIT_CHROME_MARGIN inside the page): Done / Delete EDIT_ACTIONS_LIFT
   // above one top corner, and the rest below the block, its bottom edge `drop` under the block's, centred on the
@@ -8228,9 +8228,9 @@
     frame: { corner: "right", drop: 75, span: false, start: true },
   };
   // The grid's Add Block menu, in groups split by a rule: Add child dot (which turns the menu into a pick of dot
-  // types), frames and the two blocks you write or draw on, then the ones that hold a link, file, media or calendar
-  // event. (Checklists live inside rich notes.)
-  const BLOCK_ADD_MENU = [["childdot", "frame", "note", "scrapboard"], ["link", "file", "photo", "album", "video", "audio", "calendar"]];
+  // types), frames and the two blocks you write or draw on, then the ones that hold a link, file, media, calendar
+  // event or Google task. (Checklists live inside rich notes.)
+  const BLOCK_ADD_MENU = [["childdot", "frame", "note", "scrapboard"], ["link", "file", "photo", "album", "video", "audio", "calendar", "task"]];
   const BLOCK_ADD_ICONS = {
     childdot: CHILD_DOT_ICON,
     frame: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="14" height="14" rx="2.5" /><path d="M3 7.5h14" /></svg>',
@@ -8407,7 +8407,7 @@
       view.observer.observe(container);
     }
     renderBlockWidgets();
-    void syncCalendarBlocks(dot.id);
+    void syncGoogleBlocks(dot.id);
   }
 
   function paintBlockLayout(view) {
@@ -11152,55 +11152,86 @@
     view.saveTimer = setTimeout(saveBlockDot, BLOCK_AUTOSAVE_MS);
   }
 
-  /* Calendar Event blocks follow their events in Google Calendar. When Space opens (every block dot's) and when a
-     block dot opens (its own), each event not looked up in the last CALENDAR_CHECK_MS is fetched again, a few at a
-     time, and its blocks take on any new title or times, or are marked deleted. Without a live token carrying
-     Calendar this quietly does nothing (each card's refresh button asks Google for access). */
-  const CALENDAR_CHECK_MS = 60 * 1000;
-  const CALENDAR_FETCHES = 3;
-  const calendarChecked = new Map();
+  /* Calendar Event and Google Task blocks follow their events and tasks in Google. When Space opens (every block
+     dot's) and when a block dot opens (its own), each event or task not looked up in the last GOOGLE_CHECK_MS is
+     fetched again, a few at a time, and its blocks take on what changed there (a new title or time, a task ticked
+     off), or are marked deleted. Without a live token carrying Calendar (or Tasks) that kind quietly does nothing
+     (each card's refresh button asks Google for access). */
+  const GOOGLE_CHECK_MS = 60 * 1000;
+  const GOOGLE_FETCHES = 3;
+  // Per block type: whether the token may ask, the key of what a block follows, how to fetch it, and how a block
+  // takes it on; `checked` is when each key was last looked up.
+  const GOOGLE_BLOCKS = {
+    calendar: {
+      allowed: (drive) => drive.hasCalendar,
+      key: (block) => String(block.eventId || ""),
+      fetch: (drive, block) => drive.getEvent(block.eventId),
+      apply: (engine, block, latest) => engine.applyCalendarEvent?.(block, latest),
+      denied: (drive, err) => err instanceof drive.CalendarAccessError,
+      checked: new Map(),
+    },
+    task: {
+      allowed: (drive) => drive.hasTasks,
+      key: (block) => (block.taskId ? `${block.tasklistId || "@default"}/${block.taskId}` : ""),
+      fetch: (drive, block) => drive.getTask(block.tasklistId, block.taskId),
+      apply: (engine, block, latest) => engine.applyTask?.(block, latest),
+      denied: (drive, err) => err instanceof drive.TasksAccessError,
+      checked: new Map(),
+    },
+  };
 
-  function calendarBlocksOf(dotId) {
+  function googleBlocksOf(dotId, type) {
+    const kind = GOOGLE_BLOCKS[type];
     const blocks = blockView?.dotId === dotId ? blockView.blocks : (readBlockState(dotId)?.blocks || []).map((item) => item?.block);
-    return blocks.filter((block) => block?.type === "calendar" && block.eventId);
+    return blocks.filter((block) => block?.type === type && kind.key(block));
   }
 
-  async function syncCalendarBlocks(onlyDotId = null) {
+  function syncGoogleBlocks(onlyDotId = null) {
+    return Promise.all(Object.keys(GOOGLE_BLOCKS).map((type) => syncGoogleType(type, onlyDotId)));
+  }
+
+  async function syncGoogleType(type, onlyDotId) {
     const drive = window.FicusDrive;
-    if (!drive?.hasCalendar || !drive.tokenLive || typeof window.UniversalBlockEngine?.applyCalendarEvent !== "function") return;
+    const kind = GOOGLE_BLOCKS[type];
+    if (!drive?.tokenLive || !kind.allowed(drive) || !window.UniversalBlockEngine) return;
     const dotIds = onlyDotId ? [onlyDotId] : spaceDots.filter((dot) => dot.type === "block").map((dot) => dot.id);
     const now = Date.now();
-    const queue = [...new Set(dotIds.flatMap((id) => calendarBlocksOf(id).map((block) => String(block.eventId))))]
-      .filter((eventId) => !(now - (calendarChecked.get(eventId) || 0) < CALENDAR_CHECK_MS));
-    if (!queue.length) return;
-    for (const eventId of queue) calendarChecked.set(eventId, now);
+    const due = new Map();
+    for (const block of dotIds.flatMap((id) => googleBlocksOf(id, type))) {
+      const key = kind.key(block);
+      if (!due.has(key) && !(now - (kind.checked.get(key) || 0) < GOOGLE_CHECK_MS)) due.set(key, block);
+    }
+    if (!due.size) return;
+    const queue = [...due];
+    for (const [key] of queue) kind.checked.set(key, now);
     const latest = new Map();
     const fetchSome = async () => {
       while (queue.length) {
-        const eventId = queue.shift();
+        const [key, block] = queue.shift();
         try {
-          latest.set(eventId, await drive.getEvent(eventId));
+          latest.set(key, await kind.fetch(drive, block));
         } catch (err) {
-          calendarChecked.delete(eventId);
+          kind.checked.delete(key);
           // Without access, or a connection, the rest would fail the same way.
-          if (err instanceof drive.AuthError || err instanceof drive.CalendarAccessError || !err?.status) {
-            for (const rest of queue.splice(0)) calendarChecked.delete(rest);
+          if (err instanceof drive.AuthError || kind.denied(drive, err) || !err?.status) {
+            for (const [rest] of queue.splice(0)) kind.checked.delete(rest);
           }
         }
       }
     };
-    await Promise.all(Array.from({ length: CALENDAR_FETCHES }, fetchSome));
-    if (latest.size) applyCalendarEvents(dotIds, latest);
+    await Promise.all(Array.from({ length: GOOGLE_FETCHES }, fetchSome));
+    if (latest.size) applyGoogleBlocks(type, dotIds, latest);
   }
 
-  function applyCalendarEvents(dotIds, latest) {
+  function applyGoogleBlocks(type, dotIds, latest) {
     const engine = window.UniversalBlockEngine;
-    const update = (block) => latest.has(String(block.eventId)) && engine.applyCalendarEvent(block, latest.get(String(block.eventId)));
+    const kind = GOOGLE_BLOCKS[type];
+    const update = (block) => latest.has(kind.key(block)) && kind.apply(engine, block, latest.get(kind.key(block)));
     for (const dotId of dotIds) {
       if (!findDot(dotId)) continue;
       const view = blockView?.dotId === dotId ? blockView : null;
       if (view) {
-        const changed = calendarBlocksOf(dotId).filter(update);
+        const changed = googleBlocksOf(dotId, type).filter(update);
         if (!changed.length) continue;
         // Just the cards change, so a block being edited, dragged or drawn carries on undisturbed.
         for (const block of changed) {
@@ -11212,7 +11243,7 @@
         saveBlockDot();
       } else {
         const state = readBlockState(dotId);
-        const changed = (state?.blocks || []).map((item) => item?.block).filter((block) => block?.type === "calendar" && block.eventId && update(block));
+        const changed = (state?.blocks || []).map((item) => item?.block).filter((block) => block?.type === type && kind.key(block) && update(block));
         if (changed.length) store()?.setPage("block", dotId, state, dotId);
       }
     }
@@ -12370,7 +12401,7 @@
     "data-ublock-media-replace", "data-ublock-check-add", "data-ublock-check-remove", "data-sbx-add",
     "data-ublock-album-add", "data-ublock-album-remove", "data-ublock-album-move", "data-ublock-album-layout",
     "data-ublock-sb-add", "data-ublock-sb-remove", "data-ublock-sb-move", "data-ublock-sb-layout", "data-ublock-link-mode",
-    "data-ublock-calendar-refresh"];
+    "data-ublock-calendar-refresh", "data-ublock-task-refresh", "data-ublock-task-toggle"];
 
   function lockReadBlock(body) {
     for (const hook of READ_BLOCK_HOOKS) {
@@ -14083,7 +14114,7 @@
     loadDots();
     if (!openDotId) render();
     if (shown && !openDotId) scatterDots();
-    if (shown) void syncCalendarBlocks();
+    if (shown) void syncGoogleBlocks();
   }
 
   window.renderDotContent = renderDotContent;

@@ -11,8 +11,9 @@
  * where ficus_sw.js reads the token to serve uploads at /drive-file/<file id>.
  *
  * The same token can carry the calendar.events scope, for Calendar Event blocks (find or make events in the
- * user's primary calendar). Drive is required; Calendar is optional, so someone who unticks it (or signed in
- * before Ficus asked for it) still gets in, and is asked again only when they add a calendar block.
+ * user's primary calendar), and the tasks scope, for Google Task blocks (find, make and tick off tasks in their
+ * default task list). Drive is required; Calendar and Tasks are optional, so someone who unticks one (or signed in
+ * before Ficus asked for it) still gets in, and is asked again only when they add or use such a block.
  */
 (function () {
   "use strict";
@@ -20,11 +21,13 @@
   const config = window.FICUS_GOOGLE_CONFIG || {};
   const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
   const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events";
-  const SCOPES = `${DRIVE_SCOPE} ${CALENDAR_SCOPE} openid email profile`;
+  const TASKS_SCOPE = "https://www.googleapis.com/auth/tasks";
+  const SCOPES = `${DRIVE_SCOPE} ${CALENDAR_SCOPE} ${TASKS_SCOPE} openid email profile`;
   const GIS_SRC = "https://accounts.google.com/gsi/client";
   const GAPI_SRC = "https://apis.google.com/js/api.js";
   const DISCOVERY = "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest";
   const CALENDAR_DISCOVERY = "https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest";
+  const TASKS_DISCOVERY = "https://www.googleapis.com/discovery/v1/apis/tasks/v1/rest";
   const DRIVE_API = "https://www.googleapis.com/drive/v3";
   const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
   const USERINFO = "https://www.googleapis.com/oauth2/v3/userinfo";
@@ -87,6 +90,8 @@
   class AuthError extends DriveError {}
   // The token works but doesn't carry the Calendar scope: only connectCalendar() (from a click) can fix it.
   class CalendarAccessError extends DriveError {}
+  // The same for the Tasks scope and connectTasks().
+  class TasksAccessError extends DriveError {}
 
   function driveError(status, message) {
     if (status === 401) return new AuthError("Google Drive needs you to reconnect.", 401);
@@ -129,6 +134,7 @@
         });
         await window.gapi.client.init({ discoveryDocs: [DISCOVERY] });
         calendarApi().catch(() => {});
+        tasksApi().catch(() => {});
         if (session?.accessToken) window.gapi.client.setToken({ access_token: session.accessToken });
         tokenClient = window.google.accounts.oauth2.initTokenClient({
           client_id: config.clientId,
@@ -154,11 +160,23 @@
     return calendarLoading;
   }
 
+  // The Tasks API (gapi.client.tasks), loaded the same way.
+  let tasksLoading = null;
+  function tasksApi() {
+    if (window.gapi?.client?.tasks) return Promise.resolve(window.gapi.client.tasks);
+    if (!tasksLoading) {
+      tasksLoading = Promise.resolve(window.gapi.client.load(TASKS_DISCOVERY)).then(() => window.gapi.client.tasks);
+      tasksLoading.catch(() => { tasksLoading = null; });
+    }
+    return tasksLoading;
+  }
+
   /* ---------- Session ---------- */
 
   const SESSION_KEY = "session";
-  // { uid, email, name, picture, accessToken, expiresAt, calendar }; uid is the Google account's stable id ("sub"),
-  // and calendar says whether the token carries the Calendar scope.
+  // { uid, email, name, picture, accessToken, expiresAt, calendar, tasks }; uid is the Google account's stable id
+  // ("sub"), and calendar / tasks say whether the token carries the Calendar / Tasks scope (missing from sessions
+  // kept before Ficus asked for Tasks, which then count as without it until the next token).
   let session = null;
   const listeners = new Set();
 
@@ -226,6 +244,7 @@
         accessToken: response.access_token,
         expiresAt: Date.now() + (Number(response.expires_in) || 3600) * 1000,
         calendar: window.google.accounts.oauth2.hasGrantedAllScopes(response, CALENDAR_SCOPE),
+        tasks: window.google.accounts.oauth2.hasGrantedAllScopes(response, TASKS_SCOPE),
       };
     });
   }
@@ -243,9 +262,9 @@
     return requestToken({ hint }).then(keep);
   }
 
-  // A fresh token for the signed-in user (from a click), asking for every scope again, Calendar included. Rejects
-  // if a different account was picked. `consent` shows Google's consent screen even if nothing new is asked for,
-  // so a Calendar box unticked before can be ticked.
+  // A fresh token for the signed-in user (from a click), asking for every scope again, Calendar and Tasks included.
+  // Rejects if a different account was picked. `consent` shows Google's consent screen even if nothing new is asked
+  // for, so a Calendar or Tasks box unticked before can be ticked.
   function reconnect({ consent = false } = {}) {
     if (!session) return Promise.reject(new DriveError("No one is signed in."));
     const uid = session.uid;
@@ -259,6 +278,13 @@
   async function connectCalendar() {
     const next = await reconnect({ consent: true });
     if (!next.calendar) throw new CalendarAccessError("Ficus can't reach your calendar without it. Tick the Google Calendar box when Google asks.");
+    return next;
+  }
+
+  // From a click: asks Google for the Tasks scope, the same way.
+  async function connectTasks() {
+    const next = await reconnect({ consent: true });
+    if (!next.tasks) throw new TasksAccessError("Ficus can't reach your tasks without it. Tick the Google Tasks box when Google asks.");
     return next;
   }
 
@@ -376,20 +402,23 @@
 
   /* ---------- Calendar requests (the user's primary calendar) ---------- */
 
-  function calendarError(err) {
+  // A failed Calendar or Tasks call as an AuthError, `AccessError` (the scope is missing) or DriveError.
+  function googleError(err, service, AccessError, what) {
     const status = Number(err?.status ?? err?.result?.error?.code) || 0;
     const body = err?.result?.error || {};
     const reasons = `${body.status || ""} ${(body.errors || []).map((row) => row.reason).join(" ")} ${body.message || ""}`;
     if (status === 401) return new AuthError("Google needs you to reconnect.", 401);
     if (status === 403 && /insufficient|scope/i.test(reasons)) {
-      return new CalendarAccessError("Ficus isn't allowed to use your calendar yet.", 403);
+      return new AccessError(`Ficus isn't allowed to use ${what} yet.`, 403);
     }
     if (status === 403 && /accessNotConfigured|SERVICE_DISABLED|has not been used|is disabled/i.test(reasons)) {
-      return new DriveError("The Google Calendar API isn't turned on for Ficus yet (in its Google Cloud project).", 403);
+      return new DriveError(`The ${service} API isn't turned on for Ficus yet (in its Google Cloud project).`, 403);
     }
-    if (!status) return new DriveError("Google Calendar couldn't be reached. Check the connection.", 0);
-    return new DriveError(body.message || `Google Calendar answered ${status}.`, status);
+    if (!status) return new DriveError(`${service} couldn't be reached. Check the connection.`, 0);
+    return new DriveError(body.message || `${service} answered ${status}.`, status);
   }
+
+  const calendarError = (err) => googleError(err, "Google Calendar", CalendarAccessError, "your calendar");
 
   async function calendarCall(run) {
     bearer();
@@ -497,10 +526,112 @@
     return eventFields(event);
   }
 
+  /* ---------- Tasks requests (the user's default task list) ---------- */
+
+  const DEFAULT_TASKLIST = "@default";
+
+  async function tasksCall(run) {
+    bearer();
+    if (!session.tasks) throw new TasksAccessError("Connect Google Tasks to use tasks.", 403);
+    await prepare();
+    let tasks;
+    try {
+      tasks = await tasksApi();
+    } catch (_) {
+      throw new DriveError("Google Tasks couldn't be reached. Check the connection.", 0);
+    }
+    try {
+      return (await run(tasks)).result;
+    } catch (err) {
+      throw googleError(err, "Google Tasks", TasksAccessError, "your tasks");
+    }
+  }
+
+  /* What a Google Task block keeps of a task. Google keeps only the day of a due date (as midnight UTC), so `due` is
+     that day ("2026-10-13"), or "" for none; `status` is "needsAction" or "completed". */
+  function taskFields(task, tasklistId = DEFAULT_TASKLIST) {
+    return {
+      taskId: String(task.id || ""),
+      tasklistId: String(tasklistId || DEFAULT_TASKLIST),
+      title: String(task.title || "").trim(),
+      status: task.status === "completed" ? "completed" : "needsAction",
+      due: /^\d{4}-\d{2}-\d{2}/.test(task.due || "") ? task.due.slice(0, 10) : "",
+      notes: String(task.notes || ""),
+      webViewLink: /^https:\/\//.test(task.webViewLink || "") ? task.webViewLink : "",
+    };
+  }
+
+  const dueValue = (day) => (day ? `${day}T00:00:00.000Z` : null);
+
+  // The default list's tasks not yet done (up to 300), those due soonest first, then the most recently changed.
+  async function listTasks() {
+    const items = [];
+    let pageToken;
+    for (let page = 0; page < 3; page += 1) {
+      const result = await tasksCall((api) => api.tasks.list({
+        tasklist: DEFAULT_TASKLIST, showCompleted: false, showHidden: false, maxResults: 100, pageToken,
+      }));
+      items.push(...(result.items || []));
+      pageToken = result.nextPageToken;
+      if (!pageToken) break;
+    }
+    const due = (task) => task.due || "\uffff";
+    return items
+      .filter((task) => !task.deleted && task.status !== "completed")
+      .sort((a, b) => due(a).localeCompare(due(b)) || String(b.updated || "").localeCompare(String(a.updated || "")))
+      .map((task) => taskFields(task));
+  }
+
+  // Makes a task in the default list: { title, due ("2026-10-13" or ""), notes }.
+  async function createTask(fields) {
+    const resource = { title: String(fields.title || "").trim(), notes: String(fields.notes || "").trim() || undefined };
+    if (fields.due) resource.due = dueValue(fields.due);
+    return taskFields(await tasksCall((api) => api.tasks.insert({ tasklist: DEFAULT_TASKLIST, resource })));
+  }
+
+  // The task as it is now in Google Tasks, or null if it's been deleted there.
+  async function getTask(tasklistId, taskId) {
+    try {
+      const task = await tasksCall((api) => api.tasks.get({ tasklist: tasklistId || DEFAULT_TASKLIST, task: taskId }));
+      return task.deleted ? null : taskFields(task, tasklistId);
+    } catch (err) {
+      if (gone(err)) return null;
+      throw err;
+    }
+  }
+
+  // Patches a task, rejecting with a 410 DriveError if it's gone from Google Tasks.
+  async function patchTask(tasklistId, taskId, resource) {
+    let task;
+    try {
+      task = await tasksCall((api) => api.tasks.patch({ tasklist: tasklistId || DEFAULT_TASKLIST, task: taskId, resource }));
+    } catch (err) {
+      if (gone(err)) throw new DriveError("This task isn't in your Google Tasks any more.", 410);
+      throw err;
+    }
+    if (task.deleted) throw new DriveError("This task isn't in your Google Tasks any more.", 410);
+    return taskFields(task, tasklistId);
+  }
+
+  // Ticks a task off (done) or back on. Undoing it clears the time it was completed, as Google asks.
+  function setTaskStatus(tasklistId, taskId, done) {
+    return patchTask(tasklistId, taskId, done ? { status: "completed" } : { status: "needsAction", completed: null });
+  }
+
+  // Changes a task's { title, due, notes } (an empty due or notes clears it).
+  function updateTask(tasklistId, taskId, fields) {
+    return patchTask(tasklistId, taskId, {
+      title: String(fields.title || "").trim(),
+      due: dueValue(fields.due),
+      notes: String(fields.notes || "").trim(),
+    });
+  }
+
   window.FicusDrive = {
     DriveError,
     AuthError,
     CalendarAccessError,
+    TasksAccessError,
     MASTER_NAME,
     get configured() {
       return Boolean(config.clientId);
@@ -518,16 +649,26 @@
     get hasCalendar() {
       return Boolean(session?.calendar);
     },
+    // Whether the current token carries the Tasks scope.
+    get hasTasks() {
+      return Boolean(session?.tasks);
+    },
     prepare,
     restore,
     signIn,
     reconnect,
     connectCalendar,
+    connectTasks,
     signOut,
     searchEvents,
     createEvent,
     getEvent,
     updateEvent,
+    listTasks,
+    createTask,
+    getTask,
+    setTaskStatus,
+    updateTask,
     // Calls back with (session, tokenLive) whenever either changes.
     onChange(listener) {
       listeners.add(listener);
