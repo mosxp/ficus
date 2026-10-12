@@ -1,15 +1,13 @@
 /* FICUS Space: a full-screen graph canvas of dots.
  *
- * Dots live in `spaceDots` and are kept in this browser's localStorage (one list
- * per signed-in user) until a Supabase `space_dots` table exists. Positions are
+ * Dots live in `spaceDots` and are kept in the user's Google Drive through FicusStore
+ * (ficus_store.js), with their pages and the tag library. Positions are
  * stored relative to the canvas centre so the graph stays centred on resize.
  * index.html calls FicusSpace.setActive() from showView().
  */
 (function () {
   "use strict";
 
-  const STORAGE_PREFIX = "ficus_space_dots_v1:";
-  const BOARD_PREFIX = "ficus_space_board_v1:";
   const BOARD_AUTOSAVE_MS = 900;
   const BOARD_ZOOM_MIN = 0.1;
   const BOARD_ZOOM_MAX = 4;
@@ -22,9 +20,6 @@
   const BOARD_GAP = 16;
   // However far the board is panned, at least this much of it stays on screen.
   const BOARD_KEEP_VISIBLE = 64;
-  const BLOCK_PREFIX = "ficus_space_blocks_v1:";
-  // A scrapboard block's mini board: its objects and background, saved per block id.
-  const BLOCK_BOARD_PREFIX = "ficus_space_block_board_v1:";
   // The Universal Block Engine source name a block dot registers its list under.
   const BLOCK_SOURCE = "space-block";
   const BLOCK_AUTOSAVE_MS = 400;
@@ -58,7 +53,7 @@
   const MIN_GAP = 76;
   const CLOSE_MS = 180;
   const NOTE_POPOVERS = "#note-color-picker, #note-emoji-picker, #note-table-picker, #note-list-picker";
-  const SPACE_POPOVERS = "#space-color-pop, #space-size-pop, #space-list-pop, #space-icon-pop, #space-file-pop, #space-link-pop, #space-photo-pop, #space-table-pop, #space-table-menu, #space-split-pop, #space-settings-pop, #space-board-pop, #space-block-pop, #space-add-block-menu, #space-child-pop";
+  const SPACE_POPOVERS = "#space-color-pop, #space-size-pop, #space-list-pop, #space-icon-pop, #space-file-pop, #space-link-pop, #space-photo-pop, #space-table-pop, #space-table-menu, #space-split-pop, #space-settings-pop, #space-board-pop, #space-block-pop, #space-add-block-menu, #space-child-pop, #space-tag-pop";
   const FORMAT_POPOVERS = `${NOTE_POPOVERS}, ${SPACE_POPOVERS}`;
 
   const FONT_SIZES = [10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 48, 72];
@@ -195,14 +190,13 @@
 
   /* ---------- State ---------- */
 
-  function storageKey() {
-    return STORAGE_PREFIX + (window.ficusAuthUser?.id || "local");
-  }
+  const store = () => window.FicusStore;
 
   /** @typedef {{ color: string, size: number }} DotAppearance */
+  /** @typedef {Object<string, string[]>} DotTags  Type → its Names, e.g. { Subject: ["Pharmacology"] }. */
   /** @typedef {{ id: string, type: "text" | "board" | "block" | "hub", title: string, property: string, x: number,
        y: number, content: string, parentId: string | null, children: string[], appearance: DotAppearance,
-       createdAt: string, updatedAt: string }} Dot */
+       tags: DotTags, createdAt: string, updatedAt: string }} Dot */
 
   /** @returns {Dot | null} */
   function cleanDot(raw) {
@@ -222,6 +216,7 @@
         ? [...new Set(raw.children.filter((id) => typeof id === "string" && id !== raw.id))]
         : [],
       appearance: cleanAppearance(raw.appearance),
+      tags: cleanTags(raw.tags),
       createdAt: raw.createdAt || new Date().toISOString(),
       updatedAt: raw.updatedAt || raw.createdAt || new Date().toISOString(),
     };
@@ -236,20 +231,41 @@
     };
   }
 
+  const TAG_TEXT_MAX = 60;
+  const cleanTagText = (value) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, TAG_TEXT_MAX);
+  // Tag Types and Names match ignoring case ("status" is "Status"), keeping the spelling met first.
+  const sameTag = (a, b) => a.localeCompare(b, undefined, { sensitivity: "accent" }) === 0;
+
+  /* { Type: [Name, ...] }: trimmed, each Type once and each Name once under it, a Type with no Names dropped (kept
+     with `keepEmpty`, for the master list). Built with Object.fromEntries so a Type such as "__proto__" stays an
+     ordinary key. */
+  function cleanTags(raw, { keepEmpty = false } = {}) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+    const entries = [];
+    for (const [rawType, rawNames] of Object.entries(raw)) {
+      const type = cleanTagText(rawType);
+      if (!type || !Array.isArray(rawNames)) continue;
+      let entry = entries.find(([known]) => sameTag(known, type));
+      if (!entry) entries.push(entry = [type, []]);
+      for (const rawName of rawNames) {
+        const name = cleanTagText(rawName);
+        if (name && !entry[1].some((known) => sameTag(known, name))) entry[1].push(name);
+      }
+    }
+    return Object.fromEntries(keepEmpty ? entries : entries.filter(([, names]) => names.length));
+  }
+
   const clampDotSize = (size) => Math.round(Math.min(Math.max(size, DOT_SIZE_MIN), DOT_SIZE_MAX) * 10) / 10;
   const dotColor = (dot) => dot?.appearance?.color || DOT_DEFAULT_COLOR;
   const dotRadius = (dot) => DOT_CORE_RADIUS * (dot?.appearance?.size || 1);
 
+  // The signed-in user's dots, read from FicusStore once per user.
   function loadDots() {
-    const key = storageKey();
+    const key = store()?.uid || null;
     if (key === loadedKey) return;
     loadedKey = key;
-    try {
-      const parsed = JSON.parse(localStorage.getItem(key) || "[]");
-      spaceDots = Array.isArray(parsed) ? parsed.map(cleanDot).filter(Boolean) : [];
-    } catch (_) {
-      spaceDots = [];
-    }
+    const list = key ? store().getDots() : [];
+    spaceDots = Array.isArray(list) ? list.map(cleanDot).filter(Boolean) : [];
     tidyLinks();
   }
 
@@ -320,14 +336,11 @@
     return true;
   }
 
+  // Hands the list to FicusStore, which saves it to Google Drive in the background.
   function saveDots() {
     clearTimeout(saveTimer);
     saveTimer = null;
-    try {
-      localStorage.setItem(loadedKey || storageKey(), JSON.stringify(spaceDots));
-    } catch (err) {
-      console.warn("Space dots could not be saved", err);
-    }
+    if (loadedKey && loadedKey === store()?.uid) store().saveDots(spaceDots);
   }
 
   function scheduleSave() {
@@ -379,6 +392,7 @@
       parentId: parent ? parent.id : null,
       children: [],
       appearance: { color: DOT_DEFAULT_COLOR, size: 1 },
+      tags: {},
       createdAt: now,
       updatedAt: now,
     };
@@ -465,7 +479,10 @@
     renderOrbits();
     renderLinks();
     syncSimulation();
-    if (openDotId) renderParentLinks();
+    if (openDotId) {
+      renderParentLinks();
+      renderConnections();
+    }
     if (hubView) renderHubChildren(hubView);
   }
 
@@ -1279,7 +1296,7 @@
     render();
     showToast(placed
       ? `Linked \u201c${from.title}\u201d \u2192 \u201c${to.title}\u201d.`
-      : `Linked \u201c${from.title}\u201d \u2192 \u201c${to.title}\u201d, but this browser is out of room to add it to the page.`);
+      : `Linked \u201c${from.title}\u201d \u2192 \u201c${to.title}\u201d, but it couldn't be added to the page.`);
   }
 
   // False if the parent's page couldn't be saved with the child on it (the link itself stands).
@@ -1340,7 +1357,7 @@
       .map((o) => ({ x: Number(o.x) || 0, y: Number(o.y) || 0, w: Number(o.w) || 0, h: Number(o.h) || 0 }));
     const y = clearCardRow(cards, x, w, h, height / 2 - h / 2, height);
     objects.push({ id: newBoardObjectId(), type: DOT_CARD, dotId: child.id, title: child.title, x, y, w, h, baseH: h, rotation: 0 });
-    localStorage.setItem(boardKey(parentId), JSON.stringify({ ...saved, objects }));
+    store()?.setPage("board", parentId, { ...saved, objects }, parentId);
   }
 
   /* A child dot block on a block dot's saved grid, in the first free place past its blocks (below them, or to their
@@ -1360,7 +1377,7 @@
     const rect = { left: right ? main : g, top: right ? g : main, width: BLOCK_DEFAULT_COLS * g, height: BLOCK_DEFAULT_ROWS * g };
     const block = { id: newWidgetId(), type: CHILD_BLOCK, dotId: child.id, title: child.title };
     items.push({ id: block.id, type: block.type, ...rect, block });
-    localStorage.setItem(blockKey(parentId), JSON.stringify({ ...saved, blocks: items }));
+    store()?.setPage("block", parentId, { ...saved, blocks: items }, parentId);
   }
 
   // The block grid's cell size, as index.html sets it on .block-dot-container.
@@ -2404,6 +2421,7 @@
     fmt.linkBtn?.setAttribute("aria-expanded", "false");
     fmt.childBtn?.setAttribute("aria-expanded", "false");
     hubView?.addBtn.setAttribute("aria-expanded", "false");
+    el.detailTags?.querySelector(".space-dot-tag-add")?.setAttribute("aria-expanded", "false");
     fmt.tableBtn?.setAttribute("aria-expanded", "false");
     fmt.settingsBtn?.setAttribute("aria-expanded", "false");
     boardView?.gear.setAttribute("aria-expanded", "false");
@@ -3902,7 +3920,7 @@
     field.focus();
   }
 
-  // Stores the file with the app's uploads (Supabase Storage on the web) and returns { url, bytes, filename }.
+  // Stores the file with the user's uploads (in their Google Drive) and returns { url, bytes, filename }.
   async function uploadToApp(file) {
     const body = new FormData();
     body.append("file", file);
@@ -5535,6 +5553,7 @@
 
   // A hover guide left on a border would drift off it as the page (or the sideways editor) scrolls.
   function onPageScroll() {
+    placeTagPopover();
     if (tableEdit.hover && !tableEdit.drag && !tableEdit.guide?.classList.contains("is-touch")) hideGuide();
     placeColumnHandle();
   }
@@ -6042,10 +6061,11 @@
     return parseFloat(match[1]) * { px: 1, pt: 4 / 3, in: 96, cm: 96 / 2.54 }[(match[2] || "px").toLowerCase()];
   }
 
-  // Web images come in as Space photos; Word's local file:// and cid: images can't be loaded, so they're dropped.
+  // Web images and Ficus's own uploads come in as Space photos; Word's local file:// and cid: images can't be
+  // loaded, so they're dropped.
   function pastedImage(el) {
     const src = (el.getAttribute("src") || "").trim();
-    if (!/^(https?:|data:image\/)/i.test(src)) return null;
+    if (!/^(https?:|data:image\/|\/drive-file\/)/i.test(src)) return null;
     const width = Math.round(Number(el.getAttribute("width")) || pastedWidth(el, parseDeclarations(el.getAttribute("style"))));
     const height = Math.round(Number(el.getAttribute("height")) || 0);
     const box = document.createElement("span");
@@ -6618,17 +6638,8 @@
   /* ---------- Board dots (the scrapboard.js drawing canvas) ---------- */
 
   // One saved board per dot: ScrapboardCanvas.getState()'s { objects, background } plus the board's { size }.
-  function boardKey(id) {
-    return `${BOARD_PREFIX}${window.ficusAuthUser?.id || "local"}:${id}`;
-  }
-
   function readBoardState(id) {
-    try {
-      const raw = localStorage.getItem(boardKey(id));
-      return raw ? JSON.parse(raw) : null;
-    } catch (_) {
-      return null;
-    }
+    return store()?.getPage("board", id) || null;
   }
 
   /* A board saves one object list in stacking order: the first object is painted first (at the back), the last
@@ -6839,7 +6850,6 @@
       view.height = clampBoardSide(saved.size.height);
     }
     buildBoardDom(view);
-    let warned = false;
     try {
       // Boards open for reading, so a stray tap can't draw; the pencil at the top right switches to editing.
       board = new window.ScrapboardCanvas(view.surface, {
@@ -6848,13 +6858,7 @@
         state: { objects: refreshBoardCards(readBoardObjects(saved), view.width), background: saved?.background },
         onSave(payload) {
           const state = { objects: payload.canvas.objects, background: payload.canvas.background, size: { width: view.width, height: view.height } };
-          try {
-            localStorage.setItem(boardKey(id), JSON.stringify(state));
-          } catch (err) {
-            if (!warned) showToast("This board is too large to save on this device.");
-            warned = true;
-            throw err;
-          }
+          store()?.setPage("board", id, state, id);
           const savedDot = findDot(id);
           if (savedDot) {
             savedDot.updatedAt = new Date().toISOString();
@@ -7237,16 +7241,10 @@
      out of the sheet, so `owns(target)` says which presses are on the board; view is the one whose Objects panel
      follows the board. */
   function adaptBoardEngine(b, view, owns) {
-    // saveNow() would otherwise repaint the whole board into a JPEG preview on every autosave; Space never shows it.
-    b.getThumbnailDataUrl = () => null;
+    adaptBoardPainting(b);
 
-    // Child dot cards are Space's own kind of object: painted from .board-child-card, and framed for resizing and
-    // rotating with square handles and a square rotate knob, at the engine's own handle positions.
-    const drawObject = b._drawObject;
-    b._drawObject = function (ctx, o) {
-      if (o.type === DOT_CARD) drawDotCard(this, ctx, o);
-      else drawObject.call(this, ctx, o);
-    };
+    // Child dot cards are framed for resizing and rotating with square handles and a square rotate knob, at the
+    // engine's own handle positions.
     const drawTransformFrame = b._drawTransformFrame;
     b._drawTransformFrame = function (ctx, o, dx, dy) {
       if (o.type !== DOT_CARD || this._cutTargetId) return drawTransformFrame.call(this, ctx, o, dx, dy);
@@ -7277,19 +7275,7 @@
     // Space switches between editing and reading itself, and closing the dot is "done", so Done and Escape only save.
     b.done = () => (b._dirty ? b.saveNow() : Promise.resolve());
 
-    // Hidden objects (isVisible: false) keep their place in the stack, but painting, picking, lasso selection and
-    // the eraser all work as though they weren't there.
-    const withVisibleObjects = (method) => function (...args) {
-      const live = this.objects;
-      if (!live.some(isHiddenObject)) return method.apply(this, args);
-      this.objects = live.filter((o) => !isHiddenObject(o));
-      try {
-        return method.apply(this, args);
-      } finally {
-        this.objects = live;
-      }
-    };
-    b._drawObjects = withVisibleObjects(b._drawObjects);
+    // Hidden objects are passed over by picking, lasso selection and the eraser too.
     b._hitTest = withVisibleObjects(b._hitTest);
     b._selectInPolygon = withVisibleObjects(b._selectInPolygon);
     const eraseAt = b._eraseAt;
@@ -7358,12 +7344,37 @@
     document.addEventListener("pointerdown", b._onDocPointerDown, true);
   }
 
+  /* How every Space board is painted, editable or read-only: child dot cards are Space's own kind of object, drawn
+     from .board-child-card, and hidden objects (isVisible: false) keep their place in the stack but aren't painted. */
+  function adaptBoardPainting(b) {
+    // saveNow() would otherwise repaint the whole board into a JPEG preview on every autosave; Space never shows it.
+    b.getThumbnailDataUrl = () => null;
+    const drawObject = b._drawObject;
+    b._drawObject = function (ctx, o) {
+      if (o.type === DOT_CARD) drawDotCard(this, ctx, o);
+      else drawObject.call(this, ctx, o);
+    };
+    b._drawObjects = withVisibleObjects(b._drawObjects);
+  }
+
+  // An engine method run as though the board's hidden objects weren't on it.
+  const withVisibleObjects = (method) => function (...args) {
+    const live = this.objects;
+    if (!live.some(isHiddenObject)) return method.apply(this, args);
+    this.objects = live.filter((o) => !isHiddenObject(o));
+    try {
+      return method.apply(this, args);
+    } finally {
+      this.objects = live;
+    }
+  };
+
   /** ScrapboardCanvas._resize, with the pixel density following the board's zoom within BOARD_MAX_PIXELS. */
-  function sizeBoardCanvas(b) {
+  function sizeBoardCanvas(b, zoom = boardView?.zoom || 1) {
     if (!b.wrap) return;
     const w = Math.max(1, b.wrap.offsetWidth);
     const h = Math.max(1, b.wrap.offsetHeight);
-    const wanted = Math.ceil(Math.min(window.devicePixelRatio || 1, 2) * (boardView?.zoom || 1) * 4 - 1e-3) / 4;
+    const wanted = Math.ceil(Math.min(window.devicePixelRatio || 1, 2) * zoom * 4 - 1e-3) / 4;
     const budget = Math.floor(Math.sqrt(BOARD_MAX_PIXELS / (w * h)) * 4) / 4;
     const dpr = Math.max(0.25, Math.min(3, wanted, budget));
     if (w === b._cssW && h === b._cssH && dpr === b._dpr) return;
@@ -8225,17 +8236,8 @@
   const BLOCK_PLAY_ICON = '<svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="10.5" stroke="currentColor" stroke-width="1.5" /><path d="M10 8.4v7.2a.6.6 0 0 0 .92.5l5.6-3.6a.6.6 0 0 0 0-1l-5.6-3.6a.6.6 0 0 0-.92.5z" fill="currentColor" /></svg>';
   const NOTE_STYLE_CMDS = ["bold", "italic", "underline", "strikeThrough"];
 
-  function blockKey(id) {
-    return `${BLOCK_PREFIX}${window.ficusAuthUser?.id || "local"}:${id}`;
-  }
-
   function readBlockState(id) {
-    try {
-      const raw = localStorage.getItem(blockKey(id));
-      return raw ? JSON.parse(raw) : null;
-    } catch (_) {
-      return null;
-    }
+    return store()?.getPage("block", id) || null;
   }
 
   function snapToGrid(value, grid) {
@@ -8498,14 +8500,20 @@
   // elsewhere. (Not the whole frame: the blocks inside it are blocks of their own, so a click on one is elsewhere.)
   function buildFrameCard(view, block, index) {
     const id = String(block.id);
+    const root = frameNode(block);
+    Object.assign(root.querySelector(".frame-header").dataset, {
+      ublock: "1", ublockId: id, ublockType: "frame", ublockIndex: String(index), ublockSource: BLOCK_SOURCE,
+      ublockOwnerId: view.dotId, ublockState: blockSettingsOpenFor(id) ? "settings" : "display",
+    });
+    return root;
+  }
+
+  // A frame: its header (with the title) on the side it's set to, and the box its blocks sit in.
+  function frameNode(block) {
     const root = document.createElement("div");
     root.className = "frame-block";
     const header = document.createElement("div");
     header.className = "frame-header";
-    Object.assign(header.dataset, {
-      ublock: "1", ublockId: id, ublockType: "frame", ublockIndex: String(index), ublockSource: BLOCK_SOURCE,
-      ublockOwnerId: view.dotId, ublockState: blockSettingsOpenFor(id) ? "settings" : "display",
-    });
     const title = document.createElement("span");
     title.className = "frame-title";
     header.append(title);
@@ -8779,15 +8787,9 @@
       block.title = dot.title;
       queueBlockSave(view);
     }
-    const title = String(block.title || "").trim() || "Untitled dot";
-    const portal = document.createElement("div");
-    portal.className = "child-dot-portal";
-    portal.classList.toggle("is-missing", !dot);
-    portal.dataset.dotId = block.dotId || "";
-    portal.dataset.type = dot?.type || "missing";
+    const portal = childPortalNode(block, dot);
     portal.tabIndex = 0;
     portal.setAttribute("role", "link");
-    portal.setAttribute("aria-label", dot ? `Open ${title}` : `${title} (deleted from Space)`);
     portal.addEventListener("keydown", (event) => {
       if (event.target !== portal || (event.key !== "Enter" && event.key !== " ")) return;
       event.preventDefault();
@@ -8795,6 +8797,18 @@
       if (view.editing) startPortalRename(view, portal);
       else openBoardCard(portal.dataset.dotId);
     });
+    return portal;
+  }
+
+  // The portal's look, for the child `dot` (null once deleted from Space, when the block's last title stands in).
+  function childPortalNode(block, dot) {
+    const title = String((dot ? dot.title : block.title) || "").trim() || "Untitled dot";
+    const portal = document.createElement("div");
+    portal.className = "child-dot-portal";
+    portal.classList.toggle("is-missing", !dot);
+    portal.dataset.dotId = block.dotId || "";
+    portal.dataset.type = dot?.type || "missing";
+    portal.setAttribute("aria-label", dot ? `Open ${title}` : `${title} (deleted from Space)`);
     const preview = document.createElement("div");
     preview.className = "child-dot-preview";
     const kind = document.createElement("span");
@@ -9464,16 +9478,11 @@
      stroke never adds, moves or resizes a block. The engine's tool dock, Background and Clear all (the block's Done
      stands in for its own) and their menus move out to a capsule under the block, beside an Objects button whose
      panel opens next to the block. */
-  function blockBoardKey(id) {
-    return `${BLOCK_BOARD_PREFIX}${window.ficusAuthUser?.id || "local"}:${id}`;
-  }
 
   // Saved under the block's id; failing that (a block the engine made), the first board on its record.
   function readBlockBoard(block) {
-    try {
-      const raw = localStorage.getItem(blockBoardKey(block.id));
-      if (raw) return JSON.parse(raw);
-    } catch (_) {}
+    const saved = store()?.getPage("block_board", String(block.id));
+    if (saved) return saved;
     const canvas = Array.isArray(block.boards) ? block.boards[0]?.canvas : null;
     return canvas && typeof canvas === "object" ? canvas : null;
   }
@@ -9505,20 +9514,13 @@
     host.style.position = "absolute";
     const mini = { id, view, host, board: null, editing: false, chromeEl: null, objectsBtn: null, draggingObject: null, panelFrame: 0, panelRows: "", panelSelection: "" };
     const saved = readBlockBoard(block);
-    let warned = false;
     try {
       mini.board = new window.ScrapboardCanvas(host, {
         stage: "display",
         autosaveMs: BOARD_AUTOSAVE_MS,
         state: { objects: readBoardObjects(saved), background: saved?.background },
         onSave(payload) {
-          try {
-            localStorage.setItem(blockBoardKey(id), JSON.stringify({ objects: payload.canvas.objects, background: payload.canvas.background }));
-          } catch (err) {
-            if (!warned) showToast("This scrapboard is too large to save on this device.");
-            warned = true;
-            throw err;
-          }
+          store()?.setPage("block_board", id, { objects: payload.canvas.objects, background: payload.canvas.background }, view.dotId);
           const dot = findDot(view.dotId);
           if (dot) {
             dot.updatedAt = new Date().toISOString();
@@ -10546,7 +10548,7 @@
     renderBlockWidgets();
     // Its mini board has let go (saving as it did); the drawing goes with the block.
     if (block.type === "scrapboard") {
-      try { localStorage.removeItem(blockBoardKey(id)); } catch (_) {}
+      store()?.removePage("block_board", id);
     }
     saveBlockDot();
     if (isChildBlock(block)) unlinkBlockChild(view, block.dotId);
@@ -10983,12 +10985,7 @@
         return { id, type: block.type, left: rect.left, top: rect.top, width: rect.width, height: rect.height, ...(parentId ? { parentId } : {}), block };
       }),
     };
-    try {
-      localStorage.setItem(blockKey(view.dotId), JSON.stringify(state));
-    } catch (_) {
-      showToast("This browser is out of room, so the latest change to this dot wasn't saved.");
-      return;
-    }
+    store()?.setPage("block", view.dotId, state, view.dotId);
     const dot = findDot(view.dotId);
     if (dot) {
       dot.updatedAt = new Date().toISOString();
@@ -11170,21 +11167,15 @@
     view.list.replaceChildren(...children.map((dot) => hubCard(view, dot)));
   }
 
-  // Reading, a card is a link. Editing, it's a list item that drags, with its grip (left) and ✕ (right).
-  function hubCard(view, dot) {
-    const label = DOT_TYPES[dot.type]?.label || "Dot";
+  const dotTypeLabel = (dot) => DOT_TYPES[dot.type]?.label || "Dot";
+
+  // A child's card as the hub lists it: its type's colour, its title and its kind, named as a link to open it.
+  function hubCardNode(dot) {
+    const label = dotTypeLabel(dot);
     const card = document.createElement("div");
     card.className = "hub-child-card";
     card.dataset.dotId = dot.id;
-    card.tabIndex = 0;
-    if (view.editing) {
-      card.draggable = true;
-      card.setAttribute("role", "listitem");
-      card.setAttribute("aria-label", `${dot.title}, ${label}. Enter renames it; Alt + Up or Down moves it.`);
-    } else {
-      card.setAttribute("role", "link");
-      card.setAttribute("aria-label", `Open ${dot.title}, ${label}`);
-    }
+    card.setAttribute("aria-label", `Open ${dot.title}, ${label}`);
     const type = document.createElement("span");
     type.className = "space-type-dot";
     type.dataset.type = dot.type;
@@ -11197,6 +11188,20 @@
     kind.setAttribute("aria-hidden", "true");
     kind.textContent = label;
     card.append(type, title, kind);
+    return card;
+  }
+
+  // Reading, a card is a link. Editing, it's a list item that drags, with its grip (left) and ✕ (right).
+  function hubCard(view, dot) {
+    const card = hubCardNode(dot);
+    card.tabIndex = 0;
+    if (view.editing) {
+      card.draggable = true;
+      card.setAttribute("role", "listitem");
+      card.setAttribute("aria-label", `${dot.title}, ${dotTypeLabel(dot)}. Enter renames it; Alt + Up or Down moves it.`);
+    } else {
+      card.setAttribute("role", "link");
+    }
     if (!view.editing) return card;
     const grip = document.createElement("span");
     grip.className = "hub-child-grip";
@@ -11482,6 +11487,8 @@
     el.detailModal.classList.add("hidden");
     el.detailModal.classList.remove("is-closing", "is-horizontal", "is-board", "is-blocks");
     el.view.classList.remove("space-doc-open");
+    stopMini(mini);
+    mini.drag = null;
     document.querySelectorAll(FORMAT_POPOVERS).forEach((pop) => pop.remove());
     destroyEditor();
     destroyBoard();
@@ -11549,12 +11556,1774 @@
     box.hidden = !parents.length;
   }
 
+  /* ---------- Connection sidebar ---------- */
+
+  /* A collapsible panel on the left of the open dot's page: the network button before its badges slides it in,
+     Hide slides it out, and the choice is remembered. Its top lists the dot's parents and children, each opening
+     that dot in the tab; its bottom is the Local Orbit, a small force graph of just the dot (held at the centre),
+     its parents drawn above it and its children below (a dot linked both ways beside it), with the arrows among
+     them. Its dots can be dragged and clicked open. The mini graph keeps positions of its own, never the dots'
+     x / y, and redraws whenever the tab changes dot or Space renders. */
+  const CONNECTIONS_KEY = "ficus_space_connections_v1";
+  const MINI = {
+    scale: 0.8,
+    charge: -90,
+    pull: 0.12,
+    collidePadding: 14,
+    // Room between the dots and the edges (their names run wider than they are, and hang below them); a name not yet
+    // measured is taken as this many px either side of its dot.
+    labelHalf: 40,
+    topRoom: 10,
+    labelRoom: 18,
+    labelGap: 5,
+    labelMax: 16,
+    // A parent (or child) arc's dots are this many radians apart, closer when there are many, within this span.
+    arcStep: 0.95,
+    arcSpan: 2.6,
+    sideStep: 0.35,
+    sideSpan: 0.8,
+  };
+  /* A mini graph: `nodes` is id → { id, role, rank, count, r, labelHalf, x, y, vx, vy, fx, fy, tx, ty }, from the
+     graph centre, drawn in `svg` (sized to `box`) with its arrows in `linkLayer`, its dots in `nodeLayer` and the
+     arrowheads #<arrow> and #<arrow>-reverse. It moves only while live(). With `around`, children ring the centre
+     rather than hang below it. This one is the sidebar's (its elements are set in init); read-only pages draw
+     their own (newMiniGraph). */
+  const newMiniGraph = (fields) => ({
+    nodes: new Map(), links: [], structure: "", look: "", alpha: 0, alphaTarget: 0, frame: 0, drag: null, width: 0, height: 0,
+    box: null, svg: null, linkLayer: null, nodeLayer: null, arrow: "mini-arrowhead", around: false, live: () => false, ...fields,
+  });
+  const mini = newMiniGraph({ open: false, familyKey: "", live: () => mini.open && Boolean(openDotId) });
+
+  function setConnectionsOpen(open, remember = true) {
+    mini.open = open;
+    el.detailModal.classList.toggle("has-connections", open);
+    el.connectionToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    el.connectionToggle.title = open ? "Hide connections" : "Show connections";
+    if (remember) {
+      try { localStorage.setItem(CONNECTIONS_KEY, open ? "open" : "closed"); } catch (_) {}
+    }
+    if (open) {
+      renderConnections();
+      startMini(mini);
+      return;
+    }
+    stopMini(mini);
+    if (el.connectionSidebar.contains(document.activeElement)) el.connectionToggle.focus({ preventScroll: true });
+  }
+
+  function renderConnections() {
+    const dot = openDotId ? findDot(openDotId) : null;
+    if (!dot) return;
+    const parents = parentDots(dot.id);
+    const children = dot.children.map(findDot).filter(Boolean);
+    renderFamily(dot, parents, children);
+    renderMini(mini, dot, parents, children);
+  }
+
+  function renderFamily(dot, parents, children) {
+    const both = new Set(parents.filter((parent) => dot.children.includes(parent.id)).map((parent) => parent.id));
+    const entry = (item) => [item.id, item.title, item.type, dotColor(item), both.has(item.id)];
+    const key = JSON.stringify([parents.map(entry), children.map(entry)]);
+    if (key === mini.familyKey) return;
+    mini.familyKey = key;
+    el.connectionFamily.replaceChildren(
+      ...familySection("Parents", "No parent dots.", parents, both),
+      ...familySection("Children", "No child dots.", children, both),
+    );
+  }
+
+  function familySection(label, emptyText, dots, both) {
+    const head = document.createElement("h3");
+    head.className = "connection-family-head";
+    const count = document.createElement("small");
+    count.textContent = String(dots.length);
+    head.append(label, count);
+    if (!dots.length) {
+      const empty = document.createElement("p");
+      empty.className = "connection-family-empty";
+      empty.textContent = emptyText;
+      return [head, empty];
+    }
+    const list = document.createElement("ul");
+    list.className = "connection-family-list";
+    list.setAttribute("aria-label", label);
+    list.append(...dots.map((dot) => {
+      const item = document.createElement("li");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "connection-item";
+      button.dataset.dotId = dot.id;
+      const kind = DOT_TYPES[dot.type]?.label.toLowerCase() || "dot";
+      const mutual = both.has(dot.id);
+      button.title = mutual ? `Open ${dot.title} (linked both ways)` : `Open ${dot.title}`;
+      button.setAttribute("aria-label", `Open ${kind} ${dot.title}${mutual ? ", linked both ways" : ""}`);
+      const marker = document.createElement("span");
+      marker.className = "space-type-dot";
+      marker.dataset.type = dot.type;
+      marker.style.setProperty("--dot-default", dotColor(dot));
+      marker.setAttribute("aria-hidden", "true");
+      const title = document.createElement("span");
+      title.className = "connection-item-title";
+      title.textContent = dot.title;
+      button.append(marker, title);
+      if (mutual) {
+        const arrow = document.createElement("span");
+        arrow.className = "connection-item-both";
+        arrow.setAttribute("aria-hidden", "true");
+        arrow.textContent = "\u2194";
+        button.append(arrow);
+      }
+      item.append(button);
+      return item;
+    }));
+    return [head, list];
+  }
+
+  // Opens a dot from the lists, keeping focus in them: on the dot just left (now in the other list) if it's there.
+  function openConnection(id) {
+    const from = openDotId;
+    openDot(id);
+    if (openDotId !== id) return;
+    el.connectionFamily.scrollTop = 0;
+    const items = [...el.connectionFamily.querySelectorAll(".connection-item")];
+    (items.find((item) => item.dataset.dotId === from) || items[0] || el.connectionHide).focus({ preventScroll: true });
+  }
+
+  /* The mini graph's dots: the open dot, its parents, its children, and (beside it) any dot linked both ways with
+     it, which is neither above nor below. Its arrows are every link among them, two-way ones drawn once with a head
+     at each end, as on the canvas. A dot already shown keeps its place, so opening a neighbour glides the graph
+     round to it. */
+  function renderMini(g, dot, parents, children) {
+    const back = new Set(dot.children);
+    const peers = parents.filter((parent) => back.has(parent.id));
+    const peerIds = new Set(peers.map((peer) => peer.id));
+    const groups = [
+      ["center", [dot]],
+      ["parent", parents.filter((parent) => !peerIds.has(parent.id))],
+      ["child", children.filter((child) => !peerIds.has(child.id))],
+      ["peer", peers],
+    ];
+    const shown = new Map(groups.flatMap(([, list]) => list.map((item) => [item.id, item])));
+    const pairs = new Set();
+    for (const item of shown.values()) {
+      for (const target of item.children) if (target !== item.id && shown.has(target)) pairs.add(`${item.id}\n${target}`);
+    }
+    const links = [];
+    for (const pair of pairs) {
+      const [source, target] = pair.split("\n");
+      const mutual = pairs.has(`${target}\n${source}`);
+      if (mutual && source > target) continue;
+      links.push({ source, target, mutual });
+    }
+    const structure = [
+      ...groups.map(([role, list]) => `${role}:${list.map((item) => item.id).join(",")}`),
+      links.map(({ source, target }) => `${source}>${target}`).join(","),
+    ].join("|");
+    const look = [...shown.values()].map((item) => `${item.title}\n${item.type}\n${dotColor(item)}\n${item.appearance.size}`).join("\n");
+    if (structure === g.structure && look === g.look) return;
+    const reshaped = structure !== g.structure;
+    g.structure = structure;
+    g.look = look;
+    const before = g.nodes;
+    g.nodes = new Map();
+    for (const [role, list] of groups) {
+      list.forEach((item, rank) => {
+        const old = before.get(item.id);
+        g.nodes.set(item.id, {
+          id: item.id, role, rank, count: list.length, r: dotRadius(item) * MINI.scale,
+          x: old ? old.x : NaN, y: old ? old.y : NaN, vx: 0, vy: 0, fx: null, fy: null, tx: 0, ty: 0,
+        });
+      });
+    }
+    g.links = links;
+    if (g.drag && !g.nodes.has(g.drag.id)) g.drag = null;
+    measureMini(g);
+    aimMini(g);
+    // Newcomers start just out from the centre and drift out to their places.
+    for (const node of g.nodes.values()) {
+      if (Number.isFinite(node.x)) continue;
+      node.x = node.tx * 0.15 + Math.random() - 0.5;
+      node.y = node.ty * 0.15 + Math.random() - 0.5;
+    }
+    buildMini(g, shown);
+    if (reshaped) reheatMini(g, 1);
+    else drawMini(g);
+  }
+
+  // The orbit's size in px (the SVG's user units, centred on the open dot); false if it hasn't changed.
+  function measureMini(g) {
+    const width = g.box.clientWidth || 280;
+    const height = g.box.clientHeight || 250;
+    if (width === g.width && height === g.height) return false;
+    g.width = width;
+    g.height = height;
+    g.svg.setAttribute("viewBox", `${-width / 2} ${-height / 2} ${width} ${height}`);
+    return true;
+  }
+
+  // Offsets for `count` dots spread evenly round 0, `step` apart, closer when that would run past `span`.
+  function spreadOffsets(count, step, span) {
+    const gap = count > 1 ? Math.min(step, span / (count - 1)) : 0;
+    return (rank) => (rank - (count - 1) / 2) * gap;
+  }
+
+  /* Each dot's place on an ellipse round the centre: parents over the top, children along the bottom (in the same
+     left-to-right order), and dots linked both ways at the sides, alternating right and left. Around, the children
+     are spaced evenly all the way round instead, clockwise from the top. */
+  function aimMini(g) {
+    const rx = Math.max(40, g.width / 2 - 44);
+    const ry = Math.max(40, g.height / 2 - 42);
+    const sides = [...g.nodes.values()].filter((node) => node.role === "peer").length;
+    for (const node of g.nodes.values()) {
+      let angle;
+      if (node.role === "center") {
+        node.tx = 0;
+        node.ty = 0;
+        continue;
+      }
+      if (node.role === "parent") angle = -Math.PI / 2 + spreadOffsets(node.count, MINI.arcStep, MINI.arcSpan)(node.rank);
+      else if (node.role === "child" && g.around) angle = -Math.PI / 2 + (2 * Math.PI * node.rank) / node.count;
+      else if (node.role === "child") angle = Math.PI / 2 - spreadOffsets(node.count, MINI.arcStep, MINI.arcSpan)(node.rank);
+      else {
+        const left = node.rank % 2 === 1;
+        const onSide = left ? Math.floor(sides / 2) : Math.ceil(sides / 2);
+        angle = (left ? Math.PI : 0) + spreadOffsets(onSide, MINI.sideStep, MINI.sideSpan)(Math.floor(node.rank / 2));
+      }
+      node.tx = rx * Math.cos(angle);
+      node.ty = ry * Math.sin(angle);
+    }
+  }
+
+  // The open dot's core is drawn as a selected dot's is on the canvas: larger, in a dark halo.
+  const miniCore = (node) => (node.role === "center" ? node.r * 1.25 : node.r);
+  const miniHalo = (node) => (node.role === "center" ? 6 : 4) * MINI.scale;
+
+  function buildMini(g, shown) {
+    const lines = g.links.map(({ source, target, mutual }) => {
+      const line = document.createElementNS(SVG_NS, "line");
+      line.setAttribute("class", "orbit-mini-link");
+      if (mutual) line.setAttribute("marker-start", `url(#${g.arrow}-reverse)`);
+      line.setAttribute("marker-end", `url(#${g.arrow})`);
+      line.dataset.source = source;
+      line.dataset.target = target;
+      return line;
+    });
+    const roles = { center: "this dot", parent: "parent", child: "child", peer: "linked both ways" };
+    // The open dot is drawn last, over the rest.
+    const order = [...g.nodes.values()].sort((a, b) => (a.role === "center") - (b.role === "center"));
+    const groups = order.map((node) => {
+      const dot = shown.get(node.id);
+      const color = dotColor(dot);
+      const group = document.createElementNS(SVG_NS, "g");
+      group.setAttribute("class", `orbit-mini-node is-${node.role}`);
+      group.dataset.dotId = node.id;
+      const tip = document.createElementNS(SVG_NS, "title");
+      tip.textContent = `${dot.title} \u00b7 ${DOT_TYPES[dot.type].label}, ${roles[node.role]}`;
+      const halo = document.createElementNS(SVG_NS, "circle");
+      halo.setAttribute("r", String(miniCore(node) + miniHalo(node)));
+      halo.setAttribute("fill", node.role === "center" ? "rgba(15, 23, 42, 0.12)" : color);
+      if (node.role !== "center") halo.setAttribute("fill-opacity", "0.16");
+      const core = document.createElementNS(SVG_NS, "circle");
+      core.setAttribute("class", "orbit-mini-core");
+      core.setAttribute("r", String(miniCore(node)));
+      core.setAttribute("fill", color);
+      const label = document.createElementNS(SVG_NS, "text");
+      label.setAttribute("class", "orbit-mini-label");
+      label.setAttribute("y", String(miniCore(node) + MINI.labelGap));
+      label.textContent = dot.title.length > MINI.labelMax ? `${dot.title.slice(0, MINI.labelMax - 1).trimEnd()}\u2026` : dot.title;
+      group.append(tip, halo, core, label);
+      return group;
+    });
+    g.linkLayer.replaceChildren(...lines);
+    g.nodeLayer.replaceChildren(...groups);
+    for (const group of groups) {
+      const width = group.querySelector("text").getComputedTextLength?.() || 0;
+      g.nodes.get(group.dataset.dotId).labelHalf = width ? width / 2 : MINI.labelHalf;
+    }
+    drawMini(g);
+  }
+
+  // Far enough in from the sides for the dot's whole name to show.
+  function miniBounds(g, node) {
+    const x = Math.max(0, g.width / 2 - Math.max((node.labelHalf || MINI.labelHalf) + 4, miniCore(node) + 8));
+    return {
+      minX: -x,
+      maxX: x,
+      minY: -g.height / 2 + miniCore(node) + MINI.topRoom,
+      maxY: g.height / 2 - miniCore(node) - MINI.labelRoom,
+    };
+  }
+
+  /* The canvas's forces, gentler and fewer: every dot pushes the others off (charge, and collision so none
+     overlap) and is drawn to its place round the centre; the open dot is eased onto the centre and then held
+     there, moved by nothing. */
+  function tickMini(g) {
+    g.alpha += (g.alphaTarget - g.alpha) * SIM.alphaDecay;
+    const alpha = g.alpha;
+    const nodes = [...g.nodes.values()];
+    const radii = nodes.map((node) => miniCore(node) + MINI.collidePadding);
+    const free = nodes.map((node) => node.role !== "center");
+    for (let i = 0; i < nodes.length; i += 1) {
+      for (let j = i + 1; j < nodes.length; j += 1) {
+        const a = nodes[i];
+        const b = nodes[j];
+        let x = b.x - a.x || jiggle();
+        let y = b.y - a.y || jiggle();
+        const w = (MINI.charge * alpha) / Math.max(x * x + y * y, 1);
+        if (free[i]) { a.vx += x * w; a.vy += y * w; }
+        if (free[j]) { b.vx -= x * w; b.vy -= y * w; }
+        x = b.x + b.vx - a.x - a.vx || jiggle();
+        y = b.y + b.vy - a.y - a.vy || jiggle();
+        const touch = radii[i] + radii[j];
+        const p2 = x * x + y * y;
+        if (p2 >= touch * touch) continue;
+        const d = Math.sqrt(p2);
+        const push = ((touch - d) / d) * SIM.collideStrength;
+        const share = !free[i] ? 0 : !free[j] ? 1 : (radii[j] * radii[j]) / (radii[i] * radii[i] + radii[j] * radii[j]);
+        a.vx -= x * push * share;
+        a.vy -= y * push * share;
+        b.vx += x * push * (1 - share);
+        b.vy += y * push * (1 - share);
+      }
+    }
+    for (const node of nodes) {
+      if (node.role === "center") {
+        node.x = Math.abs(node.x) < 0.05 ? 0 : node.x * 0.75;
+        node.y = Math.abs(node.y) < 0.05 ? 0 : node.y * 0.75;
+        node.vx = 0;
+        node.vy = 0;
+        continue;
+      }
+      if (node.fx !== null) {
+        node.x = node.fx;
+        node.y = node.fy;
+        node.vx = 0;
+        node.vy = 0;
+        continue;
+      }
+      node.vx = (node.vx + (node.tx - node.x) * MINI.pull * alpha) * (1 - SIM.velocityDecay);
+      node.vy = (node.vy + (node.ty - node.y) * MINI.pull * alpha) * (1 - SIM.velocityDecay);
+      node.x += node.vx;
+      node.y += node.vy;
+      const bounds = miniBounds(g, node);
+      if (node.x < bounds.minX || node.x > bounds.maxX) {
+        node.x = Math.min(Math.max(node.x, bounds.minX), bounds.maxX);
+        node.vx = 0;
+      }
+      if (node.y < bounds.minY || node.y > bounds.maxY) {
+        node.y = Math.min(Math.max(node.y, bounds.minY), bounds.maxY);
+        node.vy = 0;
+      }
+    }
+  }
+
+  function drawMini(g) {
+    const coord = (value) => String(Math.round(value * 10) / 10);
+    for (const group of g.nodeLayer.children) {
+      const node = g.nodes.get(group.dataset.dotId);
+      if (node) group.setAttribute("transform", `translate(${coord(node.x)} ${coord(node.y)})`);
+    }
+    // Each arrow stops short of both dots' halos, as on the canvas.
+    for (const line of g.linkLayer.children) {
+      const from = g.nodes.get(line.dataset.source);
+      const to = g.nodes.get(line.dataset.target);
+      if (!from || !to) continue;
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const length = Math.hypot(dx, dy);
+      const fromInset = miniCore(from) + miniHalo(from);
+      const toInset = miniCore(to) + miniHalo(to);
+      const apart = length > fromInset + toInset + 6;
+      const start = apart ? fromInset / length : 0;
+      const end = apart ? toInset / length : 0;
+      line.setAttribute("x1", coord(from.x + dx * start));
+      line.setAttribute("y1", coord(from.y + dy * start));
+      line.setAttribute("x2", coord(to.x - dx * end));
+      line.setAttribute("y2", coord(to.y - dy * end));
+      line.setAttribute("visibility", apart ? "visible" : "hidden");
+    }
+  }
+
+  // Runs only while the graph is live (the sidebar's, while it's out); otherwise it keeps its heat and picks up where
+  // it was when live again.
+  function stepMini(g) {
+    g.frame = 0;
+    if (!g.live()) return;
+    tickMini(g);
+    drawMini(g);
+    if (g.alpha < SIM.alphaMin && !g.alphaTarget) {
+      g.alpha = 0;
+      return;
+    }
+    g.frame = requestAnimationFrame(() => stepMini(g));
+  }
+
+  function reheatMini(g, alpha, live = false) {
+    g.alpha = Math.max(g.alpha, alpha);
+    if (!g.live()) return;
+    if (reducedMotion() && !live) {
+      stopMini(g);
+      for (let i = 0; i < 300 && g.alpha >= SIM.alphaMin; i += 1) tickMini(g);
+      g.alpha = 0;
+      drawMini(g);
+      return;
+    }
+    if (!g.frame) g.frame = requestAnimationFrame(() => stepMini(g));
+  }
+
+  function startMini(g) {
+    if (!g.live()) return;
+    if (measureMini(g)) aimMini(g);
+    if (g.alpha >= SIM.alphaMin) reheatMini(g, 0);
+    else drawMini(g);
+  }
+
+  function stopMini(g) {
+    cancelAnimationFrame(g.frame);
+    g.frame = 0;
+  }
+
+  /* A dot in the mini graph is dragged as on the canvas (pinned under the pointer, the rest making way, then let go
+     to drift back to its place); a press that doesn't travel opens it. The open dot stays put. */
+  function onMiniPointerDown(event) {
+    const group = event.target.closest?.(".orbit-mini-node");
+    const node = group && mini.nodes.get(group.dataset.dotId);
+    if (!node || event.button > 0) return;
+    event.preventDefault();
+    mini.drag = { id: node.id, group, startX: event.clientX, startY: event.clientY, originX: node.x, originY: node.y, moved: false };
+    try { el.miniSvg.setPointerCapture(event.pointerId); } catch (_) {}
+  }
+
+  function onMiniPointerMove(event) {
+    const drag = mini.drag;
+    const node = drag && mini.nodes.get(drag.id);
+    if (!node || node.role === "center") return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (!drag.moved) {
+      if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
+      drag.moved = true;
+      drag.group.classList.add("is-dragging");
+      mini.alphaTarget = SIM.dragAlpha;
+    }
+    const bounds = miniBounds(mini, node);
+    node.fx = Math.min(Math.max(drag.originX + dx, bounds.minX), bounds.maxX);
+    node.fy = Math.min(Math.max(drag.originY + dy, bounds.minY), bounds.maxY);
+    reheatMini(mini, SIM.dragAlpha, true);
+  }
+
+  function onMiniPointerUp(event) {
+    const drag = mini.drag;
+    if (!drag) return;
+    mini.drag = null;
+    drag.group.classList.remove("is-dragging");
+    const node = mini.nodes.get(drag.id);
+    if (drag.moved) {
+      if (node) {
+        node.fx = null;
+        node.fy = null;
+      }
+      mini.alphaTarget = 0;
+      reheatMini(mini, SIM.dragAlpha, true);
+    } else if (event.type === "pointerup" && node && node.role !== "center") {
+      openDot(node.id);
+    }
+  }
+
+  /* ---------- Reading views (a dot's page outside Space) ---------- */
+
+  /* renderDotContent(dotData, container, options): a dot's page drawn into `container` for reading elsewhere (the
+     Collection's notebook cards and Tags preview), in the markup and classes its page has here, so it keeps its
+     own size and the container can wrap it.
+       text   its saved text, locked, as wide as its longest line up to a reading width;
+       block  its grid (.block-dot) with every block where it sits, the grid as large as its blocks reach;
+       board  its viewport and sheet (.space-board), the sheet and anything past it shown 400px tall (never
+              enlarged), the viewport as wide as that makes it;
+       hub    a still Local Orbit of it at the centre and its children round it, over its list of children.
+     Read-only is the only mode (isReadOnly: false isn't offered; pages are edited in Space): nothing here edits,
+     moves or saves, and the block engine's settings, delete and replace can't be reached. A link to another dot (an
+     inline child dot, a child dot block, a dot in the orbit) calls options.onOpenDot(id), when given. Returns
+     { destroy() }, which stops what the page runs (its boards, the orbit's physics); call it before dropping it. */
+  function renderDotContent(dotData, container, options = { isReadOnly: true }) {
+    const dot = findDot(dotData?.id) || dotData;
+    const onOpenDot = typeof options?.onOpenDot === "function" ? options.onOpenDot : null;
+    const cleanups = [];
+    const page = document.createElement("div");
+    page.className = `dot-read-content is-${dot?.type || "missing"}`;
+    container.append(page);
+    try {
+      if (dot?.type === "text") readTextPage(dot, page, onOpenDot);
+      else if (dot?.type === "block") readBlockPage(dot, page, onOpenDot, cleanups);
+      else if (dot?.type === "board") readBoardPage(dot, page, cleanups);
+      else if (dot?.type === "hub") readHubPage(dot, page, onOpenDot, cleanups);
+      else page.append(readNote("This dot couldn\u2019t be found."));
+    } catch (err) {
+      console.error("Space: a dot's page couldn't be drawn for reading", err);
+      page.replaceChildren(readNote("This page couldn\u2019t be drawn. Reload the page to try again."));
+    }
+    if (onOpenDot) {
+      page.addEventListener("click", (event) => {
+        const link = event.target.closest?.("[data-read-dot]");
+        if (!link || !page.contains(link)) return;
+        event.preventDefault();
+        onOpenDot(link.dataset.readDot);
+      });
+      page.addEventListener("keydown", (event) => {
+        if ((event.key !== "Enter" && event.key !== " ") || !event.target.matches?.("[data-read-dot]")) return;
+        event.preventDefault();
+        onOpenDot(event.target.dataset.readDot);
+      });
+    }
+    // Checkboxes in text (and any a block's display leaves enabled) don't tick.
+    page.addEventListener("click", (event) => {
+      if (event.target.matches?.('input[type="checkbox"]')) event.preventDefault();
+    });
+    let destroyed = false;
+    return {
+      destroy() {
+        if (destroyed) return;
+        destroyed = true;
+        for (const cleanup of cleanups) {
+          try {
+            cleanup();
+          } catch (err) {
+            console.error("Space: a read-only page couldn't be closed", err);
+          }
+        }
+      },
+    };
+  }
+
+  function readNote(text) {
+    const note = document.createElement("p");
+    note.className = "dot-read-empty";
+    note.textContent = text;
+    return note;
+  }
+
+  // A link to dot `id` for onOpenDot (focusable, opened with Enter or Space); without onOpenDot, nothing.
+  function markReadLink(node, id, onOpenDot, role = "link") {
+    if (!onOpenDot || !id) return;
+    node.dataset.readDot = id;
+    if (node instanceof HTMLElement) {
+      node.tabIndex = 0;
+      node.setAttribute("role", role);
+    }
+  }
+
+  function readTextPage(dot, page, onOpenDot) {
+    const body = document.createElement("div");
+    body.className = "space-doc-body dot-read-doc";
+    const text = document.createElement("div");
+    text.className = "canvas-note-body";
+    text.dataset.noteEditor = "space-preview";
+    text.contentEditable = "false";
+    const normalize = window.UniversalCanvasEditor?.normalizeHtml;
+    text.innerHTML = normalize ? normalize(dot.content || "") : dot.content || "";
+    text.querySelectorAll('[contenteditable="true"]').forEach((node) => { node.contentEditable = "false"; });
+    // Child dots in the text show their current titles.
+    text.querySelectorAll(INLINE_DOT).forEach((tag) => {
+      const child = findDot(tag.dataset.dotId);
+      const label = tag.querySelector(`.${INLINE_DOT_LABEL}`) || tag;
+      if (child) label.textContent = child.title;
+      markReadLink(tag, child?.id, onOpenDot, "button");
+    });
+    text.querySelectorAll("a[href]").forEach((link) => {
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+    });
+    if (!text.textContent.trim() && !text.querySelector("img, table, hr, .inline-child-dot")) {
+      text.replaceChildren(readNote("Nothing written yet."));
+    }
+    body.append(text);
+    page.append(body);
+  }
+
+  /* The engine draws read-only blocks under a source of their own that's never registered, so whatever its document
+     handlers find in them resolves to no block; on top of that, its settings, delete and replace hooks are taken
+     out (buttons removed, marks dropped from anything else), and fields and contenteditables are locked. */
+  const READ_SOURCE = "space-block-read";
+  const READ_BLOCK_HOOKS = ["data-ublock-open", "data-ublock-done", "data-ublock-delete", "data-ublock-replace",
+    "data-ublock-media-replace", "data-ublock-check-add", "data-ublock-check-remove", "data-sbx-add",
+    "data-ublock-album-add", "data-ublock-album-remove", "data-ublock-album-move", "data-ublock-album-layout",
+    "data-ublock-sb-add", "data-ublock-sb-remove", "data-ublock-sb-move", "data-ublock-sb-layout", "data-ublock-link-mode"];
+
+  function lockReadBlock(body) {
+    for (const hook of READ_BLOCK_HOOKS) {
+      body.querySelectorAll(`[${hook}]`).forEach((node) => {
+        if (node.matches("button")) node.remove();
+        else node.removeAttribute(hook);
+      });
+    }
+    body.querySelectorAll("input, textarea, select").forEach((field) => { field.disabled = true; });
+    body.querySelectorAll("[contenteditable]").forEach((node) => { node.contentEditable = "false"; });
+    body.querySelectorAll("[data-ublock-source]").forEach((node) => { node.dataset.ublockSource = READ_SOURCE; });
+  }
+
+  /* The block dot's grid as it reads in Space (.block-dot.is-reading): every block placed where it sits (a frame's
+     blocks in the frame, in their saved order) and the grid as large as they reach. A populated frame's size
+     comes from its blocks, so the grid is re-measured once it's laid out (and whenever a frame changes size). */
+  function readBlockPage(dot, page, onOpenDot, cleanups) {
+    const engine = window.UniversalBlockEngine;
+    if (typeof engine?.render !== "function") {
+      page.append(readNote("Blocks couldn\u2019t load. Reload the page to try again."));
+      return;
+    }
+    const saved = readBlockState(dot.id);
+    const { blocks, rects, parents } = readBlockItems(saved, BLOCK_GRID_FALLBACK);
+    if (!blocks.length) {
+      page.append(readNote("No blocks yet."));
+      return;
+    }
+    const host = document.createElement("div");
+    host.className = "block-dot is-reading dot-read-blocks";
+    const grid = document.createElement("div");
+    grid.className = "block-dot-container";
+    grid.classList.toggle("is-grid-hidden", saved?.grid === false);
+    grid.classList.toggle("is-expand-right", saved?.expand === "right");
+    grid.classList.toggle("is-expand-down", saved?.expand !== "right");
+    const canvas = document.createElement("div");
+    canvas.className = "block-dot-canvas";
+    grid.append(canvas);
+    host.append(grid);
+    page.append(host);
+    const frames = new Set(blocks.filter(isFrameBlock).map((block) => block.id));
+    const parentOf = (block) => (frames.has(parents.get(block.id)) ? parents.get(block.id) : null);
+    const widgets = new Map(blocks.map((block, index) => [block.id, readBlockWidget(dot, engine, block, index, onOpenDot, cleanups)]));
+    for (const block of blocks) {
+      const frame = parentOf(block);
+      if (frame) widgets.get(frame).querySelector(".frame-content").append(widgets.get(block.id));
+      else canvas.append(widgets.get(block.id));
+    }
+    let width = 0;
+    let height = 0;
+    let marginX = Infinity;
+    let marginY = Infinity;
+    for (const block of blocks) {
+      const widget = widgets.get(block.id);
+      const rect = rects.get(block.id);
+      const framed = Boolean(parentOf(block));
+      if (!framed) {
+        widget.style.left = `${rect.left}px`;
+        widget.style.top = `${rect.top}px`;
+        width = Math.max(width, rect.left + rect.width);
+        height = Math.max(height, rect.top + rect.height);
+        marginX = Math.min(marginX, rect.left);
+        marginY = Math.min(marginY, rect.top);
+      }
+      widget.style.setProperty("--widget-h", `${rect.height}px`);
+      if (syncFrameState(widget)) continue;
+      widget.style.width = `${rect.width}px`;
+      widget.style.height = `${rect.height}px`;
+    }
+    // As much grid shows past the blocks' far edges as before their near ones.
+    const size = (w, h) => {
+      host.style.width = `${w + marginX}px`;
+      host.style.height = `${h + marginY}px`;
+    };
+    size(width, height);
+    const fit = () => {
+      if (!host.isConnected) return;
+      let right = 0;
+      let bottom = 0;
+      for (const widget of canvas.children) {
+        right = Math.max(right, widget.offsetLeft + widget.offsetWidth);
+        bottom = Math.max(bottom, widget.offsetTop + widget.offsetHeight);
+      }
+      if (right && bottom) size(right, bottom);
+    };
+    if (typeof ResizeObserver !== "function" || !canvas.querySelector(".is-populated")) return;
+    const observer = new ResizeObserver(fit);
+    canvas.querySelectorAll(":scope > .is-populated").forEach((widget) => observer.observe(widget));
+    cleanups.push(() => observer.disconnect());
+  }
+
+  // A block as its widget reads in Space, without the grip, Edit, Delete or resize handles.
+  function readBlockWidget(dot, engine, block, index, onOpenDot, cleanups) {
+    const widget = document.createElement("div");
+    widget.className = "grid-widget-block";
+    widget.dataset.widgetId = block.id;
+    widget.dataset.widgetType = block.type;
+    widget.classList.toggle("child-dot-block", isChildBlock(block));
+    const card = document.createElement("div");
+    card.className = "grid-widget-card";
+    const body = document.createElement("div");
+    body.className = "grid-widget-body";
+    if (isFrameBlock(block)) {
+      body.append(frameNode(block));
+    } else if (isChildBlock(block)) {
+      const child = findDot(block.dotId);
+      const portal = childPortalNode(block, child);
+      markReadLink(portal, child?.id, onOpenDot);
+      if (!portal.dataset.readDot) portal.removeAttribute("aria-label");
+      body.append(portal);
+    } else {
+      body.innerHTML = engine.render(block, { source: READ_SOURCE, ownerId: dot.id, index, hideTypeBadge: true });
+      if (block.type === "link") dressLinkCard(body, block);
+      else if (block.type === "file") dressFileCard(body, block);
+      else if (block.type === "album") dressAlbumCard(body, block);
+      else if (block.type === "audio") dressAudioCard(body, block);
+      else if (block.type === "video") dressVideoCard(body, block);
+      else if (block.type === "scrapboard") readScrapboardBlock(body, block, cleanups);
+      lockReadBlock(body);
+    }
+    card.append(body);
+    widget.append(card);
+    return widget;
+  }
+
+  // A scrapboard block's own board, filling the block as it does in Space, for looking at only.
+  function readScrapboardBlock(body, block, cleanups) {
+    const root = body.querySelector("[data-ublock]");
+    if (!root) return;
+    root.className = "block-board-card";
+    if (typeof window.ScrapboardCanvas !== "function") {
+      root.classList.add("is-missing");
+      root.textContent = "The scrapboard couldn\u2019t load. Reload the page to try again.";
+      return;
+    }
+    const host = document.createElement("div");
+    host.className = "block-board";
+    host.style.position = "absolute";
+    const saved = readBlockBoard(block);
+    const b = new window.ScrapboardCanvas(host, {
+      stage: "display", readOnly: true, state: { objects: readBoardObjects(saved), background: saved?.background },
+    });
+    adaptBoardPainting(b);
+    cleanups.push(() => b.destroy());
+    root.replaceChildren(host);
+  }
+
+  /* A board dot read: its page's viewport and sheet (.space-board.is-reading > .board-viewport > .board-surface).
+     The engine draws the board, read-only, on a sheet as large as the board's set size or as far as its furthest
+     object reaches (whichever is more), zoomed (--current-zoom, as in Space) to READ_BOARD_HEIGHT tall, never
+     enlarged, its pixel density following that zoom; the viewport is the zoomed sheet's size. Presses don't reach it. */
+  const READ_BOARD_HEIGHT = 400;
+
+  function readBoardPage(dot, page, cleanups) {
+    const frame = document.createElement("div");
+    frame.className = "space-board is-reading dot-read-board";
+    page.append(frame);
+    if (typeof window.ScrapboardCanvas !== "function") {
+      frame.classList.add("is-missing");
+      frame.textContent = "The board couldn\u2019t load. Reload the page to try again.";
+      return;
+    }
+    const viewport = document.createElement("div");
+    viewport.className = "board-viewport";
+    const sheet = document.createElement("div");
+    sheet.className = "board-surface";
+    sheet.style.position = "absolute";
+    viewport.append(sheet);
+    frame.append(viewport);
+    const saved = readBoardState(dot.id);
+    const sized = Number.isFinite(saved?.size?.width) && Number.isFinite(saved?.size?.height);
+    let width = sized ? clampBoardSide(saved.size.width) : 0;
+    let height = sized ? clampBoardSide(saved.size.height) : 0;
+    let zoom = 1;
+    const b = new window.ScrapboardCanvas(sheet, {
+      stage: "display", readOnly: true,
+      state: { objects: refreshBoardCards(readBoardObjects(saved), width), background: saved?.background },
+    });
+    adaptBoardPainting(b);
+    b._resize = function () { sizeBoardCanvas(this, zoom); };
+    for (const o of b.objects) {
+      if (isHiddenObject(o)) continue;
+      const box = b._bounds(o);
+      width = Math.max(width, Math.ceil(box.x + box.w + BOARD_GAP));
+      height = Math.max(height, Math.ceil(box.y + box.h + BOARD_GAP));
+    }
+    width = Math.min(BOARD_SIDE_MAX, Math.max(BOARD_SIDE_MIN, width));
+    height = Math.min(BOARD_SIDE_MAX, Math.max(BOARD_SIDE_MIN, height));
+    zoom = Math.min(1, READ_BOARD_HEIGHT / height);
+    Object.assign(sheet.style, {
+      width: `${width}px`, height: `${height}px`, marginLeft: `${-width / 2}px`, marginTop: `${-height / 2}px`,
+    });
+    sheet.style.setProperty("--current-zoom", String(zoom));
+    frame.style.width = `${Math.round(width * zoom)}px`;
+    frame.style.height = `${Math.round(height * zoom)}px`;
+    b.refresh();
+    cleanups.push(() => b.destroy());
+  }
+
+  /* A hub read: the Local Orbit's graph and physics, its own copy, with the hub held at the centre and its children
+     round it. It settles once and stays still: nothing drags or zooms it. It's drawn once it has a size (its names
+     are measured then), and re-aimed if its width changes. Under it is the hub's page itself, its children's cards
+     (.space-hub.is-reading), links to them without a grip or ✕. */
+  let readOrbitCount = 0;
+
+  function readHubPage(dot, page, onOpenDot, cleanups) {
+    const box = document.createElement("div");
+    box.className = "connection-orbit dot-read-orbit";
+    const caption = document.createElement("span");
+    caption.className = "connection-orbit-caption";
+    caption.setAttribute("aria-hidden", "true");
+    caption.textContent = "Local orbit";
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("class", "orbit-mini");
+    svg.setAttribute("aria-hidden", "true");
+    const arrow = `read-orbit-${++readOrbitCount}`;
+    svg.innerHTML = `<defs>`
+      + `<marker id="${arrow}" viewBox="0 0 10 7" markerWidth="8" markerHeight="5.6" refX="9.5" refY="3.5" orient="auto" markerUnits="userSpaceOnUse"><polygon points="0 0, 10 3.5, 0 7" /></marker>`
+      + `<marker id="${arrow}-reverse" viewBox="0 0 10 7" markerWidth="8" markerHeight="5.6" refX="0.5" refY="3.5" orient="auto" markerUnits="userSpaceOnUse"><polygon points="10 0, 0 3.5, 10 7" /></marker>`
+      + `</defs><g></g><g></g>`;
+    const [linkLayer, nodeLayer] = svg.querySelectorAll(":scope > g");
+    box.append(caption, svg);
+    page.append(box);
+    const g = newMiniGraph({ box, svg, linkLayer, nodeLayer, arrow, around: true, live: () => box.isConnected });
+    let drawn = false;
+    const draw = () => {
+      if (!box.isConnected || !box.clientWidth) return;
+      if (drawn) {
+        if (measureMini(g)) {
+          aimMini(g);
+          reheatMini(g, 0.3);
+        }
+        return;
+      }
+      drawn = true;
+      renderMini(g, dot, [], dot.children.map(findDot).filter(Boolean));
+      for (const group of nodeLayer.children) {
+        if (!group.classList.contains("is-center")) markReadLink(group, group.dataset.dotId, onOpenDot);
+      }
+    };
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(draw) : null;
+    if (observer) observer.observe(box);
+    else requestAnimationFrame(draw);
+    cleanups.push(() => {
+      observer?.disconnect();
+      stopMini(g);
+    });
+
+    const hub = document.createElement("div");
+    hub.className = "space-hub is-reading dot-read-hub";
+    const list = document.createElement("div");
+    list.className = "hub-dot-list";
+    list.setAttribute("role", "group");
+    list.setAttribute("aria-label", "Child dots");
+    list.append(...dot.children.map(findDot).filter(Boolean).map((child) => {
+      const card = hubCardNode(child);
+      markReadLink(card, child.id, onOpenDot);
+      if (!card.dataset.readDot) card.removeAttribute("aria-label");
+      return card;
+    }));
+    const empty = document.createElement("p");
+    empty.className = "hub-dot-empty";
+    empty.textContent = "No child dots yet.";
+    empty.hidden = list.childElementCount > 0;
+    hub.append(list, empty);
+    page.append(hub);
+  }
+
+  /* ---------- Dot tags ---------- */
+
+  /* Faceted tags (Type: Name) in the open dot's header, after its badges. Tags are about the dot rather than its
+     page, so they stay editable whether the page is being read or edited: each tag shows an ✕ on hover (or focus),
+     and + Add Tag after them opens a sharp popover whose Type and Name fields suggest the tags already used across
+     Space. The Manage Tags modal (the tag button on the canvas) renames and deletes them everywhere at once. */
+
+  // Redrawn whenever the tab opens a dot or a tag is added, removed, renamed or deleted.
+  function renderDotTags() {
+    const box = el.detailTags;
+    const dot = openDotId ? findDot(openDotId) : null;
+    if (!dot) {
+      box.replaceChildren();
+      box.hidden = true;
+      return;
+    }
+    // One group per Type, its label once, then a badge per Name tinted with that tag's colour and carrying its ✕.
+    box.replaceChildren(...Object.entries(dot.tags || {}).map(([type, names]) => {
+      const group = document.createElement("div");
+      group.className = "tag-type-group";
+      group.setAttribute("role", "group");
+      group.setAttribute("aria-label", type);
+      const label = document.createElement("span");
+      label.className = "tag-type-label";
+      label.textContent = `${type}:`;
+      group.append(label, ...names.map((name) => {
+        const badge = document.createElement("div");
+        badge.className = "tag-name-badge";
+        const color = tagColor(type, name);
+        badge.style.setProperty("--tag-color", color);
+        badge.style.setProperty("--tag-tint", tintOf(color, 0.1));
+        const text = document.createElement("span");
+        text.textContent = name;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.className = "space-dot-tag-remove";
+        remove.textContent = "\u2715";
+        remove.title = "Remove tag";
+        remove.setAttribute("aria-label", `Remove tag ${type}: ${name}`);
+        remove.addEventListener("click", () => {
+          const index = [...box.querySelectorAll(".space-dot-tag-remove")].indexOf(remove);
+          if (!removeDotTag(dot.id, type, name)) return;
+          renderDotTags();
+          (box.querySelectorAll(".space-dot-tag-remove")[index] || box.querySelector(".space-dot-tag-add"))?.focus();
+        });
+        badge.append(text, remove);
+        return badge;
+      }));
+      return group;
+    }));
+    const add = document.createElement("button");
+    add.type = "button";
+    add.className = "space-dot-tag space-dot-tag-add";
+    add.textContent = "+ Add Tag";
+    add.setAttribute("aria-haspopup", "dialog");
+    add.setAttribute("aria-expanded", "false");
+    add.addEventListener("click", () => toggleTagPopover(dot.id));
+    box.append(add);
+    box.hidden = false;
+  }
+
+  // Files `name` under `type` (an existing Type of the dot's, matched ignoring case, takes it). False if it's already there.
+  function addDotTag(id, rawType, rawName) {
+    const dot = findDot(id);
+    const type = cleanTagText(rawType);
+    const name = cleanTagText(rawName);
+    if (!dot || !type || !name) return false;
+    const tags = dot.tags || {};
+    const key = Object.keys(tags).find((known) => sameTag(known, type)) ?? type;
+    const names = has(tags, key) ? tags[key] : [];
+    if (names.some((known) => sameTag(known, name))) return false;
+    dot.tags = { ...tags, [key]: [...names, name] };
+    dot.updatedAt = new Date().toISOString();
+    saveDots();
+    return true;
+  }
+
+  // Takes `name` out of `type`; a Type left with no Names goes too.
+  function removeDotTag(id, type, name) {
+    const dot = findDot(id);
+    if (!dot?.tags || !has(dot.tags, type) || !dot.tags[type].includes(name)) return false;
+    dot.tags = Object.fromEntries(Object.entries(dot.tags).flatMap(([known, names]) => {
+      if (known !== type) return [[known, names]];
+      const rest = names.filter((other) => other !== name);
+      return rest.length ? [[known, rest]] : [];
+    }));
+    dot.updatedAt = new Date().toISOString();
+    saveDots();
+    return true;
+  }
+
+  /* The master tag list: Types and Names made in Manage Tags, kept whether or not any dot carries them yet, as
+     { Type: [Name, ...] } in the user's tag library (FicusStore), read once per user. A Type here may have no Names. */
+  const masterTagsCache = { key: null, types: {} };
+
+  function readMasterTags() {
+    const key = store()?.uid || null;
+    if (masterTagsCache.key !== key) {
+      masterTagsCache.key = key;
+      masterTagsCache.types = cleanTags(key ? store().getTags().types : {}, { keepEmpty: true });
+    }
+    return masterTagsCache.types;
+  }
+
+  function writeMasterTags(types) {
+    masterTagsCache.types = types;
+    if (masterTagsCache.key && masterTagsCache.key === store()?.uid) store().saveTagTypes(types);
+  }
+
+  /* Files a Type, and given one a Name under it, in the master list, spelled the way Space already spells them if
+     they're known. Returns the spellings used. */
+  function addMasterTag(rawType, rawName) {
+    const all = getAllTags();
+    const typeText = cleanTagText(rawType);
+    const type = Object.keys(all).find((known) => sameTag(known, typeText)) ?? typeText;
+    const nameText = cleanTagText(rawName);
+    const known = has(all, type) ? all[type] : [];
+    const name = nameText ? known.find((other) => sameTag(other, nameText)) ?? nameText : null;
+    const master = readMasterTags();
+    const key = Object.keys(master).find((other) => sameTag(other, type));
+    const names = key ? master[key] : [];
+    const next = name && !names.some((other) => sameTag(other, name)) ? [...names, name] : names;
+    const entries = key ? Object.entries(master).map(([other, list]) => [other, other === key ? next : list])
+      : [...Object.entries(master), [type, next]];
+    writeMasterTags(cleanTags(Object.fromEntries(entries), { keepEmpty: true }));
+    return { type, name };
+  }
+
+  /* The master dictionary of every Type in Space, each with every Name filed under it: those on any dot merged with
+     the master list, { Type: [Name, ...] }, both sorted. Types and Names that differ only in case are one, spelled as
+     first met (dots first). */
+  function getAllTags() {
+    const entries = [];
+    const take = (tags) => {
+      for (const [type, names] of Object.entries(tags || {})) {
+        let entry = entries.find(([known]) => sameTag(known, type));
+        if (!entry) entries.push(entry = [type, []]);
+        for (const name of names) if (!entry[1].some((known) => sameTag(known, name))) entry[1].push(name);
+      }
+    };
+    for (const dot of spaceDots) take(dot.tags);
+    take(readMasterTags());
+    const byText = (a, b) => a.localeCompare(b, undefined, { sensitivity: "base" });
+    return Object.fromEntries(entries.sort(([a], [b]) => byText(a, b)).map(([type, names]) => [type, names.sort(byText)]));
+  }
+
+  /* Tag metadata: how each Type:Name looks, shared by every dot carrying it, e.g. { "Subject:Pharmacology": { color:
+     "#3B82F6" } }. Kept in the user's tag library beside the master list (FicusStore) and read once per user; keys
+     match ignoring case like the tags themselves. A Name without a colour shows the default dot gray. */
+  const tagMetaCache = { key: null, data: {} };
+  const tagMetaId = (type, name) => `${type}:${name}`;
+
+  function readTagMetadata() {
+    const key = store()?.uid || null;
+    if (tagMetaCache.key !== key) {
+      const parsed = key ? store().getTags().colors : null;
+      const entries = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? Object.entries(parsed) : [];
+      tagMetaCache.key = key;
+      tagMetaCache.data = Object.fromEntries(entries.flatMap(([id, meta]) => {
+        const color = normalizeHex(meta?.color);
+        return color ? [[id, { ...meta, color }]] : [];
+      }));
+    }
+    return tagMetaCache.data;
+  }
+
+  function writeTagMetadata(data) {
+    tagMetaCache.data = data;
+    if (tagMetaCache.key && tagMetaCache.key === store()?.uid) store().saveTagColors(data);
+  }
+
+  function findTagMetaKey(data, type, name) {
+    const id = tagMetaId(type, name);
+    return has(data, id) ? id : Object.keys(data).find((known) => sameTag(known, id)) ?? null;
+  }
+
+  /** @returns {{ color: string } | null} */
+  function getTagMetadata(type, name) {
+    const data = readTagMetadata();
+    const key = findTagMetaKey(data, type, name);
+    return key ? { ...data[key] } : null;
+  }
+
+  // Merges `data` into Type:Name's entry, filed under this spelling. Without a colour (or with the default gray) it goes.
+  function saveTagMetadata(type, name, data) {
+    const all = readTagMetadata();
+    const key = findTagMetaKey(all, type, name);
+    const next = { ...(key ? all[key] : {}), ...data };
+    const color = normalizeHex(next.color);
+    const rest = Object.entries(all).filter(([known]) => known !== key);
+    if (color && color !== DOT_DEFAULT_COLOR) rest.push([tagMetaId(type, name), { ...next, color }]);
+    writeTagMetadata(Object.fromEntries(rest));
+  }
+
+  // A global rename carries a look to the new Type:Name; one already there keeps its own.
+  function moveTagMetadata(fromType, fromName, toType, toName) {
+    const all = readTagMetadata();
+    const from = findTagMetaKey(all, fromType, fromName);
+    if (!from) return;
+    const to = findTagMetaKey(all, toType, toName);
+    const rest = Object.entries(all).filter(([known]) => known !== from && known !== to);
+    rest.push([tagMetaId(toType, toName), all[to ?? from]]);
+    writeTagMetadata(Object.fromEntries(rest));
+  }
+
+  function dropTagMetadata(type, name) {
+    const all = readTagMetadata();
+    const key = findTagMetaKey(all, type, name);
+    if (key) writeTagMetadata(Object.fromEntries(Object.entries(all).filter(([known]) => known !== key)));
+  }
+
+  const tagColor = (type, name) => getTagMetadata(type, name)?.color || DOT_DEFAULT_COLOR;
+  const tintOf = (hex, alpha) => `rgba(${[1, 3, 5].map((at) => parseInt(hex.slice(at, at + 2), 16)).join(", ")}, ${alpha})`;
+
+  // How many dots carry `type` (or, given `name`, that Name under it).
+  function countTagged(type, name) {
+    return spaceDots.filter((dot) => Object.entries(dot.tags || {}).some(([known, names]) =>
+      sameTag(known, type) && (name == null || names.some((other) => sameTag(other, name))))).length;
+  }
+
+  /* Rewrites every dot's tags, and the master list, through `edit` (given and returning [Type, [Names]] entries),
+     then cleans them so whatever now collides merges (a master Type left with no Names stays). Saves once, stamping
+     only the dots that changed; returns how many did. */
+  function rewriteAllTags(edit) {
+    const now = new Date().toISOString();
+    let changed = 0;
+    for (const dot of spaceDots) {
+      const before = dot.tags || {};
+      const after = cleanTags(Object.fromEntries(edit(Object.entries(before))));
+      if (JSON.stringify(after) === JSON.stringify(before)) continue;
+      dot.tags = after;
+      dot.updatedAt = now;
+      changed += 1;
+    }
+    if (changed) saveDots();
+    const master = readMasterTags();
+    const nextMaster = cleanTags(Object.fromEntries(edit(Object.entries(master))), { keepEmpty: true });
+    if (JSON.stringify(nextMaster) !== JSON.stringify(master)) writeMasterTags(nextMaster);
+    return changed;
+  }
+
+  /* Global renames. Whatever matches the old spelling, or already the new one, takes the new spelling exactly, so
+     renaming into an existing Type or Name merges into it and a change of case alone sticks. */
+  function renameTagTypeEverywhere(oldType, rawType) {
+    const type = cleanTagText(rawType);
+    if (!type) return 0;
+    for (const name of tagNamesOf(oldType)) moveTagMetadata(oldType, name, type, name);
+    return rewriteAllTags((entries) => {
+      const renamed = entries.map(([known, names]) => [sameTag(known, oldType) || sameTag(known, type) ? type : known, names]);
+      return mergeTagEntries(renamed);
+    });
+  }
+
+  function renameTagNameEverywhere(type, oldName, rawName) {
+    const name = cleanTagText(rawName);
+    if (!name) return 0;
+    moveTagMetadata(type, oldName, type, name);
+    return rewriteAllTags((entries) => entries.map(([known, names]) => [known, !sameTag(known, type) ? names
+      : names.map((other) => (sameTag(other, oldName) || sameTag(other, name) ? name : other))]));
+  }
+
+  function deleteTagTypeEverywhere(type) {
+    for (const name of tagNamesOf(type)) dropTagMetadata(type, name);
+    return rewriteAllTags((entries) => entries.filter(([known]) => !sameTag(known, type)));
+  }
+
+  function deleteTagNameEverywhere(type, name) {
+    dropTagMetadata(type, name);
+    return rewriteAllTags((entries) => entries.map(([known, names]) =>
+      [known, sameTag(known, type) ? names.filter((other) => !sameTag(other, name)) : names]));
+  }
+
+  // Every Name filed under `type` on any dot.
+  function tagNamesOf(type) {
+    return Object.entries(getAllTags()).find(([known]) => sameTag(known, type))?.[1] ?? [];
+  }
+
+  // Entries whose Types now coincide exactly, folded into the first of them (an object can hold each key only once).
+  function mergeTagEntries(entries) {
+    const merged = [];
+    for (const [type, names] of entries) {
+      const entry = merged.find(([known]) => known === type);
+      if (entry) entry[1] = [...entry[1], ...names];
+      else merged.push([type, names]);
+    }
+    return merged;
+  }
+
+  function toggleTagPopover(id) {
+    const wasOpen = document.getElementById("space-tag-pop");
+    closeSpacePopovers();
+    const anchor = el.detailTags.querySelector(".space-dot-tag-add");
+    if (wasOpen || !anchor || id !== openDotId) return;
+    const catalog = Object.entries(getAllTags()).map(([type, names]) => ({ type, names }));
+    const pop = document.createElement("div");
+    pop.id = "space-tag-pop";
+    pop.className = "space-pop space-tag-pop";
+    pop.setAttribute("role", "dialog");
+    pop.setAttribute("aria-label", "Add tag");
+    const field = (key, label, placeholder) => `
+      <label class="space-field-label" for="space-tag-${key}">${label}</label>
+      <div class="space-tag-combo">
+        <input id="space-tag-${key}" class="space-tag-input" type="text" autocomplete="off" spellcheck="false"
+          maxlength="${TAG_TEXT_MAX}" placeholder="${placeholder}" role="combobox" aria-autocomplete="list"
+          aria-expanded="false" aria-controls="space-tag-${key}-list" />
+        <div id="space-tag-${key}-list" class="space-tag-suggest" role="listbox" aria-label="${label}s used in Space" hidden></div>
+      </div>`;
+    pop.innerHTML = `<form class="space-tag-form" novalidate>
+      ${field("type", "Type", "e.g. Category, Status")}
+      ${field("name", "Name", "e.g. Review Needed, Phase 1")}
+      <div class="space-pop-actions"><button type="submit" class="space-tag-save">Save</button></div>
+    </form>`;
+    const form = pop.querySelector("form");
+    const typeInput = pop.querySelector("#space-tag-type");
+    const nameInput = pop.querySelector("#space-tag-name");
+
+    /* Type suggests every Type in Space; Name, the Names filed under the Type typed (or, for a Type not used yet,
+       every Name), less those this dot already has under it. Both narrow to what's typed. */
+    const suggestionsFor = (input) => {
+      const query = input.value.trim().toLowerCase();
+      let options;
+      if (input === typeInput) {
+        options = catalog.map((entry) => entry.type);
+      } else {
+        const type = cleanTagText(typeInput.value);
+        const entry = type ? catalog.find((known) => sameTag(known.type, type)) : null;
+        const pool = entry ? entry.names : [...new Set(catalog.flatMap((known) => known.names))];
+        const tags = findDot(id)?.tags || {};
+        const ownKey = type ? Object.keys(tags).find((known) => sameTag(known, type)) : undefined;
+        const own = ownKey === undefined ? [] : tags[ownKey];
+        options = pool.filter((name) => !own.some((known) => sameTag(known, name)));
+      }
+      options = options.filter((option) => option.toLowerCase().includes(query));
+      // Nothing to offer once the field already holds the one match exactly.
+      if (options.length === 1 && options[0] === input.value.trim()) return [];
+      return options.sort((a, b) => a.localeCompare(b));
+    };
+    const listOf = (input) => pop.querySelector(`#${input.getAttribute("aria-controls")}`);
+    const hideList = (input) => {
+      const list = listOf(input);
+      list.hidden = true;
+      list.replaceChildren();
+      input.setAttribute("aria-expanded", "false");
+    };
+    const showList = (input) => {
+      const list = listOf(input);
+      const options = suggestionsFor(input);
+      list.replaceChildren(...options.map((option) => {
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "space-tag-option";
+        item.setAttribute("role", "option");
+        item.textContent = option;
+        item.title = option;
+        return item;
+      }));
+      list.hidden = !options.length;
+      input.setAttribute("aria-expanded", String(options.length > 0));
+      // On a short screen the list scrolls within the room left below its field.
+      const room = window.innerHeight - input.getBoundingClientRect().bottom - 8;
+      list.style.maxHeight = `${Math.round(Math.max(72, Math.min(160, room)))}px`;
+    };
+    const choose = (input, value) => {
+      input.value = value;
+      input.classList.remove("is-invalid");
+      hideList(input);
+      if (input === typeInput) {
+        nameInput.focus();
+        showList(nameInput);
+      } else {
+        input.focus();
+      }
+    };
+
+    for (const input of [typeInput, nameInput]) {
+      const combo = input.closest(".space-tag-combo");
+      const list = listOf(input);
+      input.addEventListener("focus", () => showList(input));
+      // A click on the field already focused (its list closed by Escape or a choice) opens the list again.
+      input.addEventListener("click", () => {
+        if (list.hidden) showList(input);
+      });
+      input.addEventListener("input", () => {
+        input.classList.remove("is-invalid");
+        showList(input);
+      });
+      combo.addEventListener("focusout", (event) => {
+        if (!combo.contains(event.relatedTarget)) hideList(input);
+      });
+      // A press on a suggestion keeps the caret in the field; its click fills the field.
+      list.addEventListener("pointerdown", (event) => event.preventDefault());
+      list.addEventListener("click", (event) => {
+        const item = event.target.closest(".space-tag-option");
+        if (item) choose(input, item.textContent);
+      });
+      combo.addEventListener("keydown", (event) => {
+        const items = [...list.querySelectorAll(".space-tag-option")];
+        const at = items.indexOf(document.activeElement);
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          if (list.hidden) {
+            if (event.key === "ArrowDown") showList(input);
+            if (list.hidden) return;
+          }
+          event.preventDefault();
+          const next = event.key === "ArrowDown" ? at + 1 : at - 1;
+          if (next < 0) input.focus();
+          else (items[Math.min(next, items.length - 1)] || items[0])?.focus();
+        } else if (event.key === "Escape" && !list.hidden) {
+          event.preventDefault();
+          event.stopPropagation();
+          hideList(input);
+          input.focus();
+        }
+      });
+    }
+    // Enter in a field saves, except in Type while Name is still empty, where it moves on to Name.
+    form.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.isComposing || !event.target.matches?.(".space-tag-input")) return;
+      event.preventDefault();
+      if (event.target !== typeInput || nameInput.value.trim()) {
+        form.requestSubmit();
+        return;
+      }
+      if (!cleanTagText(typeInput.value)) {
+        typeInput.classList.add("is-invalid");
+        return;
+      }
+      hideList(typeInput);
+      nameInput.focus();
+      showList(nameInput);
+    });
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const type = cleanTagText(typeInput.value);
+      const name = cleanTagText(nameInput.value);
+      typeInput.classList.toggle("is-invalid", !type);
+      nameInput.classList.toggle("is-invalid", !name);
+      if (!type || !name) {
+        (type ? nameInput : typeInput).focus();
+        return;
+      }
+      // A Type or Name already used in Space keeps its spelling there ("status" files under "Status").
+      const entry = catalog.find((known) => sameTag(known.type, type));
+      const spelled = (entry?.names || catalog.flatMap((known) => known.names)).find((known) => sameTag(known, name));
+      addDotTag(id, entry?.type ?? type, spelled ?? name);
+      closeSpacePopovers();
+      renderDotTags();
+      el.detailTags.querySelector(".space-dot-tag-add")?.focus({ preventScroll: true });
+    });
+    pop.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeSpacePopovers();
+      el.detailTags.querySelector(".space-dot-tag-add")?.focus({ preventScroll: true });
+    });
+
+    holdBlockOpen(pop);
+    document.body.append(pop);
+    placeTagPopover();
+    anchor.setAttribute("aria-expanded", "true");
+    typeInput.focus({ preventScroll: true });
+    showList(typeInput);
+  }
+
+  // Right below + Add Tag (above it when there's no room below), kept beside it as the page scrolls.
+  function placeTagPopover() {
+    const pop = document.getElementById("space-tag-pop");
+    const anchor = el.detailTags?.querySelector(".space-dot-tag-add");
+    if (!pop || !anchor) return;
+    const rect = anchor.getBoundingClientRect();
+    const width = pop.offsetWidth;
+    const height = pop.offsetHeight;
+    const left = Math.min(window.innerWidth - width - 8, Math.max(8, rect.left));
+    let top = rect.bottom + 6;
+    if (top + height > window.innerHeight - 8 && rect.top - height - 6 >= 8) top = rect.top - height - 6;
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top)}px`;
+  }
+
+  /* Manage Tags (the tag button under the canvas switches): every Type in Space on the left, the selected Type's
+     Names on the right, each with how many dots carry it; a search box over each column narrows it as you type. A
+     row's ✏️ renames it in place and its 🗑️ deletes it (once confirmed in the row), on every dot at once. Each Name's
+     swatch opens a colour popover that recolours that tag everywhere. The + beside a search box makes a new Type (or
+     a Name under the selected Type) in the master list: from what's typed in the box, else from a field atop the
+     column. `edit` / `confirm` name the row doing either; `draft` is that field; `color` is the open colour popover. */
+  const tagManager = { type: null, edit: null, confirm: null, draft: null, color: null };
+
+  function openTagManager() {
+    closeMenus();
+    closeSpacePopovers();
+    Object.assign(tagManager, { type: null, edit: null, confirm: null, draft: null });
+    el.tagTypeSearch.value = "";
+    el.tagNameSearch.value = "";
+    el.tagManager.classList.remove("hidden");
+    el.tagsBtn.setAttribute("aria-expanded", "true");
+    renderTagManager({ kind: "type", index: 0, part: "main" });
+  }
+
+  function closeTagManager(refocus = true) {
+    if (el.tagManager.classList.contains("hidden")) return;
+    closeTagColorPop(false);
+    tagManager.edit = tagManager.confirm = tagManager.draft = null;
+    el.tagManager.classList.add("hidden");
+    el.tagsBtn.setAttribute("aria-expanded", "false");
+    if (refocus) el.tagsBtn.focus({ preventScroll: true });
+  }
+
+  const matchesTagQuery = (text, query) => !query || text.toLocaleLowerCase().includes(query.toLocaleLowerCase());
+
+  /* Redraws both columns, each narrowed to what its search box holds (and topped by the new-tag field if it's open).
+     `focus` then picks a control: in the `kind` column, the row spelled `text` (else the one at `index`, else the
+     last), and its `part` (main, swatch, rename, delete, input, draft or cancel); that column's search box if it
+     shows no rows. */
+  function renderTagManager(focus) {
+    closeTagColorPop(false);
+    const all = getAllTags();
+    const types = Object.keys(all);
+    const wanted = tagManager.type;
+    tagManager.type = (wanted != null && types.find((type) => sameTag(type, wanted))) || types[0] || null;
+    const type = tagManager.type;
+    if (tagManager.draft?.kind === "name" && !type) tagManager.draft = null;
+    const typeQuery = el.tagTypeSearch.value.trim();
+    const nameQuery = el.tagNameSearch.value.trim();
+    const shownTypes = types.filter((known) => matchesTagQuery(known, typeQuery));
+    const shownNames = type ? all[type].filter((name) => matchesTagQuery(name, nameQuery)) : [];
+    const draftRow = (kind) => (tagManager.draft?.kind === kind ? [tagManagerDraftRow(kind)] : []);
+    const typeEmpty = types.length ? `No Types match \u201c${typeQuery}\u201d.` : "No tags yet. Make one with +, or add one from a dot\u2019s header.";
+    const nameEmpty = !type ? "Names show up here." : nameQuery ? `No Names match \u201c${nameQuery}\u201d.` : `No Names in ${type} yet. Make one with +.`;
+    el.tagTypes.replaceChildren(...draftRow("type"), ...(shownTypes.length ? shownTypes.map((known) => tagManagerRow("type", known, known))
+      : tagManager.draft?.kind === "type" ? [] : [tagManagerEmpty(typeEmpty)]));
+    el.tagNames.replaceChildren(...draftRow("name"), ...(shownNames.length ? shownNames.map((name) => tagManagerRow("name", name, type))
+      : tagManager.draft?.kind === "name" ? [] : [tagManagerEmpty(nameEmpty)]));
+    el.tagNamesHead.textContent = type ? `Names in ${type}` : "Names";
+    el.tagNameAdd.disabled = !type;
+    el.tagNameAdd.setAttribute("aria-label", type ? `Add a Name to ${type}` : "Add a Name (pick a Type first)");
+    if (!focus) return;
+    const rows = [...(focus.kind === "type" ? el.tagTypes : el.tagNames).querySelectorAll(".space-tag-row")];
+    const row = (focus.text != null && rows.find((known) => sameTag(known.dataset.text, focus.text)))
+      || rows[Math.min(focus.index ?? 0, rows.length - 1)];
+    const target = row?.querySelector(`:is(button, input)[data-part="${focus.part}"]`) || row?.querySelector("button, input")
+      || (focus.kind === "type" ? el.tagTypeSearch : el.tagNameSearch);
+    target.focus();
+    if (target.tagName === "INPUT" && target.dataset.part) target.select();
+  }
+
+  function tagManagerEmpty(text) {
+    const item = document.createElement("li");
+    item.className = "space-tag-empty";
+    item.textContent = text;
+    return item;
+  }
+
+  // The field atop a column for naming a new Type, or a new Name under the selected Type.
+  function tagManagerDraftRow(kind) {
+    const row = document.createElement("li");
+    row.className = "space-tag-row is-drafting";
+    row.dataset.text = "";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "space-tag-row-input";
+    input.dataset.part = "draft";
+    input.placeholder = kind === "type" ? "New Type" : `New Name in ${tagManager.type}`;
+    input.setAttribute("aria-label", kind === "type" ? "New Type" : `New Name in ${tagManager.type}`);
+    input.maxLength = TAG_TEXT_MAX;
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" || event.isComposing) return;
+      event.preventDefault();
+      commitTagDraft(input.value);
+    });
+    input.addEventListener("blur", () => {
+      if (tagManager.draft?.input === input) commitTagDraft(input.value);
+    });
+    tagManager.draft.input = input;
+    row.append(input);
+    return row;
+  }
+
+  // + beside a search box: makes what's typed in it, or opens the field for typing a name.
+  function addFromTagManager(kind) {
+    if (kind === "name" && !tagManager.type) return;
+    const text = cleanTagText((kind === "type" ? el.tagTypeSearch : el.tagNameSearch).value);
+    if (text) {
+      createFromTagManager(kind, text);
+      return;
+    }
+    Object.assign(tagManager, { edit: null, confirm: null, draft: { kind } });
+    renderTagManager({ kind, index: 0, part: "draft" });
+  }
+
+  // Ends the new-tag field: a name makes the tag; blank just closes it.
+  function commitTagDraft(raw) {
+    const draft = tagManager.draft;
+    if (!draft) return;
+    tagManager.draft = null;
+    const text = cleanTagText(raw);
+    if (text) {
+      createFromTagManager(draft.kind, text);
+      return;
+    }
+    renderTagManager();
+    (draft.kind === "type" ? el.tagTypeAdd : el.tagNameAdd).focus();
+  }
+
+  /* Files the new Type (then selects it) or Name (under the selected Type, focused on its swatch) in the master
+     list, clearing the search it may have come from so it shows. One that already exists is simply shown. */
+  function createFromTagManager(kind, text) {
+    if (kind === "type") {
+      const { type } = addMasterTag(text);
+      el.tagTypeSearch.value = "";
+      if (!sameTag(type, tagManager.type ?? "")) el.tagNameSearch.value = "";
+      tagManager.type = type;
+      renderTagManager({ kind, text: type, part: "main" });
+      return;
+    }
+    if (!tagManager.type) return;
+    const { name } = addMasterTag(tagManager.type, text);
+    el.tagNameSearch.value = "";
+    renderTagManager({ kind, text: name, part: "swatch" });
+  }
+
+  // One Type (`text` is `type`) or one Name under `type`: plain, being renamed, or asking to be deleted.
+  function tagManagerRow(kind, text, type) {
+    const isThis = (state) => state?.kind === kind && state.text === text && state.type === type;
+    const what = kind === "type" ? `Type ${text}` : `${type}: ${text}`;
+    const count = kind === "type" ? countTagged(type) : countTagged(type, text);
+    const row = document.createElement("li");
+    row.className = "space-tag-row";
+    row.dataset.text = text;
+    const control = (tag, className, part, label) => {
+      const node = document.createElement(tag);
+      if (tag === "button") node.type = "button";
+      node.className = className;
+      node.dataset.part = part;
+      if (label) node.setAttribute("aria-label", label);
+      return node;
+    };
+
+    if (isThis(tagManager.confirm)) {
+      row.classList.add("is-confirming");
+      const note = document.createElement("span");
+      note.className = "space-tag-row-confirm";
+      note.textContent = count ? `Delete \u201c${text}\u201d from ${countOf(count, "dot")}?` : `Delete \u201c${text}\u201d?`;
+      note.title = note.textContent;
+      const yes = control("button", "space-tag-row-btn is-danger", "confirm", `Delete ${what} from ${countOf(count, "dot")}`);
+      yes.textContent = "Delete";
+      yes.addEventListener("click", () => deleteFromTagManager(kind, text, type));
+      const no = control("button", "space-tag-row-btn", "cancel");
+      no.textContent = "Cancel";
+      no.addEventListener("click", () => {
+        tagManager.confirm = null;
+        renderTagManager({ kind, text, part: "delete" });
+      });
+      row.append(note, yes, no);
+      return row;
+    }
+
+    if (isThis(tagManager.edit)) {
+      const input = control("input", "space-tag-row-input", "input", `Rename ${what}`);
+      input.type = "text";
+      input.value = text;
+      input.maxLength = TAG_TEXT_MAX;
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" || event.isComposing) return;
+        event.preventDefault();
+        commitTagRename(input.value);
+      });
+      input.addEventListener("blur", () => {
+        if (tagManager.edit?.input === input) commitTagRename(input.value);
+      });
+      tagManager.edit.input = input;
+      row.append(input);
+      return row;
+    }
+
+    const selected = kind === "type" && text === tagManager.type;
+    row.classList.toggle("is-selected", selected);
+    const main = kind === "type" ? control("button", "space-tag-row-main", "main") : control("span", "space-tag-row-main", "main");
+    const label = document.createElement("span");
+    label.className = "space-tag-row-text";
+    label.textContent = text;
+    const tally = document.createElement("span");
+    tally.className = "space-tag-row-count";
+    tally.textContent = String(count);
+    tally.title = countOf(count, "dot");
+    main.append(label, tally);
+    if (kind === "type") {
+      main.setAttribute("aria-pressed", String(selected));
+      main.setAttribute("aria-label", `${text}, ${countOf(count, "dot")}`);
+      main.addEventListener("click", () => {
+        if (text !== tagManager.type) el.tagNameSearch.value = "";
+        Object.assign(tagManager, { type: text, edit: null, confirm: null, draft: null });
+        renderTagManager({ kind, text, part: "main" });
+      });
+    }
+    const rename = control("button", "space-tag-row-action", "rename", `Rename ${what}`);
+    rename.title = "Rename";
+    rename.textContent = "\u270F\uFE0F";
+    rename.addEventListener("click", () => {
+      Object.assign(tagManager, { edit: { kind, text, type }, confirm: null, draft: null });
+      renderTagManager({ kind, text, part: "input" });
+    });
+    const remove = control("button", "space-tag-row-action", "delete", `Delete ${what}`);
+    remove.title = "Delete";
+    remove.textContent = "\uD83D\uDDD1\uFE0F";
+    remove.addEventListener("click", () => {
+      Object.assign(tagManager, { edit: null, confirm: { kind, text, type }, draft: null });
+      renderTagManager({ kind, text, part: "cancel" });
+    });
+    if (kind === "name") {
+      const swatch = control("button", "space-tag-swatch-btn", "swatch", `Colour of ${what}`);
+      swatch.title = "Colour";
+      swatch.setAttribute("aria-haspopup", "dialog");
+      swatch.setAttribute("aria-expanded", "false");
+      const chip = document.createElement("span");
+      chip.className = "space-tag-swatch";
+      chip.style.background = tagColor(type, text);
+      swatch.append(chip);
+      swatch.addEventListener("click", () => toggleTagColorPop(swatch, type, text));
+      row.classList.add("has-swatch");
+      row.append(swatch);
+    }
+    row.append(main, rename, remove);
+    return row;
+  }
+
+  /* The colour popover under a Name's swatch, inside the sheet: the dot palette, then any colour from the system
+     picker. A pick is saved at once (the default gray clears it) and repaints the swatch and the tags shown. */
+  function toggleTagColorPop(anchor, type, name) {
+    const wasOpen = tagManager.color?.anchor === anchor;
+    closeTagColorPop(false);
+    if (wasOpen) return;
+    const pop = document.createElement("div");
+    pop.id = "space-tag-color-pop";
+    pop.className = "space-tag-color-pop";
+    pop.setAttribute("role", "dialog");
+    pop.setAttribute("aria-label", `Colour of ${type}: ${name}`);
+    pop.innerHTML = `
+      <p class="space-pop-label">Colour</p>
+      <div class="space-swatches" role="group" aria-label="Preset colours">
+        ${DOT_SWATCHES.map(([label, hex]) => `<button type="button" class="space-swatch" data-tag-swatch="${hex}" style="--swatch:${hex}" title="${escapeAttr(label)} ${hex}" aria-label="${escapeAttr(label)}"></button>`).join("")}
+      </div>
+      <p class="space-pop-label">Custom</p>
+      <div class="space-custom">
+        <label class="space-custom-well" title="Open colour picker"><input type="color" data-tag-color aria-label="Custom colour" /></label>
+        <span class="space-tag-color-hex" data-tag-hex></span>
+      </div>`;
+    pop.addEventListener("click", (event) => {
+      const swatch = event.target.closest("[data-tag-swatch]");
+      if (swatch) setTagColor(swatch.dataset.tagSwatch);
+    });
+    pop.addEventListener("input", (event) => {
+      const hex = event.target.matches("[data-tag-color]") && normalizeHex(event.target.value);
+      if (hex) setTagColor(hex);
+    });
+    tagManager.color = { anchor, type, name, pop };
+    anchor.setAttribute("aria-expanded", "true");
+    anchor.closest(".space-tag-sheet").append(pop);
+    syncTagColorPop();
+    placeTagColorPop();
+    (pop.querySelector(".space-swatch.is-active") || pop.querySelector(".space-swatch")).focus();
+  }
+
+  function closeTagColorPop(refocus = true) {
+    const open = tagManager.color;
+    if (!open) return;
+    tagManager.color = null;
+    open.pop.remove();
+    open.anchor.setAttribute("aria-expanded", "false");
+    if (refocus && open.anchor.isConnected) open.anchor.focus();
+  }
+
+  // Marks the tag's colour among the presets and shows it in the custom well.
+  function syncTagColorPop() {
+    const { type, name, pop } = tagManager.color;
+    const color = tagColor(type, name);
+    pop.querySelectorAll("[data-tag-swatch]").forEach((swatch) => {
+      const on = swatch.dataset.tagSwatch === color;
+      swatch.classList.toggle("is-active", on);
+      swatch.setAttribute("aria-pressed", String(on));
+    });
+    pop.querySelector(".space-custom-well").style.setProperty("--swatch", color);
+    pop.querySelector("[data-tag-color]").value = color.toLowerCase();
+    pop.querySelector("[data-tag-hex]").textContent = color;
+  }
+
+  /* Below the swatch, else above it, else as near as the room allows (the window less the notebook dock), within the
+     sheet's width. */
+  function placeTagColorPop() {
+    const { anchor, pop } = tagManager.color;
+    const host = pop.offsetParent.getBoundingClientRect();
+    const rect = anchor.getBoundingClientRect();
+    const room = openArea();
+    const height = pop.offsetHeight;
+    const left = Math.min(Math.max(8, rect.left - host.left), host.width - pop.offsetWidth - 8);
+    let top = rect.bottom + 6;
+    if (top + height > room.bottom) top = rect.top - height - 6 >= room.top ? rect.top - height - 6 : Math.max(room.top, room.bottom - height);
+    pop.style.left = `${Math.round(left)}px`;
+    pop.style.top = `${Math.round(top - host.top)}px`;
+  }
+
+  function setTagColor(hex) {
+    const open = tagManager.color;
+    if (!open) return;
+    saveTagMetadata(open.type, open.name, { color: hex });
+    open.anchor.querySelector(".space-tag-swatch").style.background = tagColor(open.type, open.name);
+    syncTagColorPop();
+    refreshTagColors();
+  }
+
+  // Repaints whatever shows tag colours, once a frame however fast the system picker reports.
+  let tagColorFrame = 0;
+  function refreshTagColors() {
+    if (tagColorFrame) return;
+    tagColorFrame = requestAnimationFrame(() => {
+      tagColorFrame = 0;
+      if (openDotId) renderDotTags();
+      else if (active) render();
+    });
+  }
+
+  // Ends the rename in progress: a new spelling goes onto every dot; blank or unchanged just stops.
+  function commitTagRename(raw) {
+    const edit = tagManager.edit;
+    if (!edit) return;
+    tagManager.edit = null;
+    const text = cleanTagText(raw);
+    const renamed = Boolean(text) && text !== edit.text;
+    if (renamed && edit.kind === "type") {
+      renameTagTypeEverywhere(edit.text, text);
+      if (edit.text === tagManager.type) tagManager.type = text;
+    } else if (renamed) {
+      renameTagNameEverywhere(edit.type, edit.text, text);
+    }
+    if (renamed && openDotId) renderDotTags();
+    renderTagManager({ kind: edit.kind, text: renamed ? text : edit.text, part: "rename" });
+  }
+
+  // Focus then moves to the row that took the deleted one's place (a Type's, when its last Name went with it).
+  function deleteFromTagManager(kind, text, type) {
+    const typeIndex = Object.keys(getAllTags()).findIndex((known) => sameTag(known, type));
+    const index = [...(kind === "type" ? el.tagTypes : el.tagNames).children].findIndex((row) => row.dataset.text === text);
+    tagManager.confirm = null;
+    if (kind === "type") deleteTagTypeEverywhere(type);
+    else deleteTagNameEverywhere(type, text);
+    if (openDotId) renderDotTags();
+    const typeGone = !Object.keys(getAllTags()).some((known) => sameTag(known, type));
+    renderTagManager(kind === "name" && !typeGone ? { kind, index, part: "main" } : { kind: "type", index: typeIndex, part: "main" });
+  }
+
+  /* While it's up, keys stay in it. Escape backs out one step at a time (the colour popover, the new-tag field, a
+     rename or a delete, the search being typed) before it closes; Tab cycles inside. */
+  function onTagManagerKey(event) {
+    event.stopPropagation();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (tagManager.color) {
+        closeTagColorPop();
+        return;
+      }
+      if (tagManager.draft) {
+        const { kind } = tagManager.draft;
+        tagManager.draft = null;
+        renderTagManager();
+        (kind === "type" ? el.tagTypeAdd : el.tagNameAdd).focus();
+        return;
+      }
+      const pending = tagManager.edit || tagManager.confirm;
+      const search = [el.tagTypeSearch, el.tagNameSearch].find((field) => field === event.target && field.value);
+      if (!pending && search) {
+        search.value = "";
+        renderTagManager();
+        return;
+      }
+      if (!pending) {
+        closeTagManager();
+        return;
+      }
+      const part = tagManager.edit ? "rename" : "delete";
+      tagManager.edit = tagManager.confirm = null;
+      renderTagManager({ kind: pending.kind, text: pending.text, part });
+      return;
+    }
+    if (event.key !== "Tab") return;
+    event.preventDefault();
+    if (tagManager.edit && event.target === tagManager.edit.input) {
+      commitTagRename(event.target.value);
+      return;
+    }
+    if (tagManager.draft && event.target === tagManager.draft.input) {
+      commitTagDraft(event.target.value);
+      return;
+    }
+    const controls = [...el.tagManager.querySelectorAll("button:not(:disabled), input")];
+    const at = controls.indexOf(document.activeElement);
+    controls[(at + (event.shiftKey ? -1 : 1) + controls.length) % controls.length].focus();
+  }
+
   function openDetail(id) {
     const dot = findDot(id);
     if (!dot) return;
     if (closeTimer) finishClose();
     closeMenus();
     closeDeletePrompt(false);
+    closeTagManager(false);
     openDotId = id;
     el.detailKicker.textContent = DOT_TYPES[dot.type].label;
     el.detailTypeDot.dataset.type = dot.type;
@@ -11570,9 +13339,12 @@
     else if (dot.type === "board") mountBoard(dot);
     else if (dot.type === "hub") renderHubDot(dot);
     else mountBlockDot(dot);
+    renderDotTags();
     setDocOrigin(id);
     el.view.classList.add("space-doc-open");
     el.detailModal.classList.remove("hidden", "is-closing");
+    renderConnections();
+    startMini(mini);
     if (editor && !readingText()) editor.focus();
     else el.detailClose.focus();
     el.docScroll.scrollTop = 0;
@@ -11709,17 +13481,16 @@
   // A dot's own saved data beyond the dots list: a board dot's board, a block dot's blocks and its scrapboard
   // blocks' mini boards (a text dot's text is in the list itself).
   function dropDotData(dot) {
-    try {
-      if (dot.type === "board") localStorage.removeItem(boardKey(dot.id));
-      if (dot.type === "block") {
-        const saved = readBlockState(dot.id);
-        for (const item of Array.isArray(saved?.blocks) ? saved.blocks : []) {
-          const block = item?.block;
-          if (block?.type === "scrapboard" && (block.id || item.id)) localStorage.removeItem(blockBoardKey(String(block.id || item.id)));
-        }
-        localStorage.removeItem(blockKey(dot.id));
+    if (!store()) return;
+    if (dot.type === "board") store().removePage("board", dot.id);
+    if (dot.type === "block") {
+      const saved = readBlockState(dot.id);
+      for (const item of Array.isArray(saved?.blocks) ? saved.blocks : []) {
+        const block = item?.block;
+        if (block?.type === "scrapboard" && (block.id || item.id)) store().removePage("block_board", String(block.id || item.id));
       }
-    } catch (_) {}
+      store().removePage("block", dot.id);
+    }
   }
 
   /* Takes dots out of Space with every arrow to or from them: they leave other dots' children, and a dot whose
@@ -11777,6 +13548,7 @@
     dot.title = title;
     dot.updatedAt = new Date().toISOString();
     scheduleSave();
+    renderConnections();
   }
 
   // An emptied title snaps back to the last saved one rather than leaving a nameless dot.
@@ -11852,11 +13624,18 @@
       titleInput: "space-title-input", titleCancel: "space-title-cancel",
       detailModal: "space-detail-modal", detailKicker: "space-detail-kicker", detailTitle: "space-detail-title",
       detailProperty: "space-detail-property", detailClose: "space-detail-close", detailBody: "space-detail-body",
-      detailTypeDot: "space-detail-type-dot", detailParents: "space-detail-parents", docHome: "space-doc-home", docTabTitle: "space-doc-tab-title",
+      detailTypeDot: "space-detail-type-dot", detailParents: "space-detail-parents", detailTags: "space-detail-tags", docHome: "space-doc-home", docTabTitle: "space-doc-tab-title",
       docTabDot: "space-doc-tab-dot", docScroll: "space-doc-scroll",
       detailDelete: "space-detail-delete", deleteModal: "space-delete-modal", deleteHeading: "space-delete-heading",
       deleteNote: "space-delete-note", deleteSingle: "space-delete-single", deleteSingleNote: "space-delete-single-note",
       deleteCascade: "space-delete-cascade", deleteCascadeNote: "space-delete-cascade-note", deleteCancel: "space-delete-cancel",
+      tagsBtn: "space-tags-btn", tagManager: "space-tag-manager", tagManagerClose: "space-tag-manager-close",
+      tagTypes: "space-tag-types", tagNames: "space-tag-names", tagNamesHead: "space-tag-names-head",
+      tagTypeSearch: "space-tag-type-search", tagNameSearch: "space-tag-name-search",
+      tagTypeAdd: "space-tag-type-add", tagNameAdd: "space-tag-name-add",
+      connectionToggle: "space-connection-toggle", connectionSidebar: "connection-sidebar", connectionHide: "space-connection-hide",
+      connectionFamily: "space-connection-family", connectionOrbit: "space-connection-orbit", miniSvg: "space-orbit-mini",
+      miniLinks: "space-orbit-mini-links", miniNodes: "space-orbit-mini-nodes",
     };
     for (const [key, id] of Object.entries(ids)) {
       el[key] = document.getElementById(id);
@@ -11865,6 +13644,7 @@
         return false;
       }
     }
+    Object.assign(mini, { box: el.connectionOrbit, svg: el.miniSvg, linkLayer: el.miniLinks, nodeLayer: el.miniNodes });
 
     el.canvas.addEventListener("pointerdown", onPointerDown);
     el.canvas.addEventListener("pointermove", onPointerMove);
@@ -11896,6 +13676,44 @@
     try { savedView = localStorage.getItem(VIEW_MODE_KEY); } catch (_) {}
     setViewMode(savedView, false);
     el.viewBtn.addEventListener("click", () => setViewMode(currentViewMode === "orbit" ? "graph" : "orbit"));
+    el.tagsBtn.addEventListener("click", openTagManager);
+    el.tagManagerClose.addEventListener("click", () => closeTagManager());
+    el.tagManager.addEventListener("keydown", onTagManagerKey);
+    el.tagManager.addEventListener("click", (event) => {
+      if (event.target === el.tagManager) closeTagManager();
+    });
+    el.tagManager.addEventListener("pointerdown", (event) => {
+      const open = tagManager.color;
+      if (open && !open.pop.contains(event.target) && !open.anchor.contains(event.target)) closeTagColorPop(false);
+    });
+    el.tagTypeSearch.addEventListener("input", () => renderTagManager());
+    el.tagNameSearch.addEventListener("input", () => renderTagManager());
+    el.tagTypeAdd.addEventListener("click", () => addFromTagManager("type"));
+    el.tagNameAdd.addEventListener("click", () => addFromTagManager("name"));
+    el.tagTypes.addEventListener("scroll", () => closeTagColorPop(false));
+    el.tagNames.addEventListener("scroll", () => closeTagColorPop(false));
+
+    let savedConnections = null;
+    try { savedConnections = localStorage.getItem(CONNECTIONS_KEY); } catch (_) {}
+    setConnectionsOpen(savedConnections === "open", false);
+    el.connectionToggle.addEventListener("click", () => setConnectionsOpen(!mini.open));
+    el.connectionHide.addEventListener("click", () => setConnectionsOpen(false));
+    el.connectionFamily.addEventListener("click", (event) => {
+      const item = event.target.closest(".connection-item");
+      if (item) openConnection(item.dataset.dotId);
+    });
+    el.miniSvg.addEventListener("pointerdown", onMiniPointerDown);
+    el.miniSvg.addEventListener("pointermove", onMiniPointerMove);
+    el.miniSvg.addEventListener("pointerup", onMiniPointerUp);
+    el.miniSvg.addEventListener("pointercancel", onMiniPointerUp);
+    // The orbit is measured once the page is showing (and again if a narrow screen's sidebar width changes).
+    if (typeof ResizeObserver === "function") {
+      new ResizeObserver(() => {
+        if (!openDotId || !measureMini(mini)) return;
+        aimMini(mini);
+        reheatMini(mini, 0.3);
+      }).observe(el.connectionOrbit);
+    }
 
     el.canvas.addEventListener("contextmenu", onCanvasContextMenu);
     el.canvas.addEventListener("keydown", onCanvasKeyDown);
@@ -11987,7 +13805,7 @@
         setBlockControls(blockView, null);
       }
       if (!document.querySelector(SPACE_POPOVERS)) return;
-      if (event.target.closest?.(`${SPACE_POPOVERS}, .space-color-btn, .space-list-btn, .space-attach-btn, .space-link-btn, .space-child-btn, .space-photo-btn, .space-table-btn, .space-settings-btn, .space-table-bar, [data-space-fs-menu], .block-frame-color`)) return;
+      if (event.target.closest?.(`${SPACE_POPOVERS}, .space-color-btn, .space-list-btn, .space-attach-btn, .space-link-btn, .space-child-btn, .space-photo-btn, .space-table-btn, .space-settings-btn, .space-table-bar, [data-space-fs-menu], .block-frame-color, .space-dot-tag-add`)) return;
       closeSpacePopovers();
     }, true);
     el.docScroll.addEventListener("scroll", onPageScroll, { passive: true });
@@ -12030,6 +13848,7 @@
       active = false;
       closeDetail(true);
       closeTitlePrompt();
+      closeTagManager(false);
       closeMenus();
       stopSimulation();
       hoverId = null;
@@ -12042,14 +13861,34 @@
     if (shown && !openDotId) scatterDots();
   }
 
+  window.renderDotContent = renderDotContent;
   window.FicusSpace = {
     setActive,
     openDot,
+    renderDotContent,
     get dots() {
-      return spaceDots.map((dot) => ({ ...dot, children: [...dot.children], appearance: { ...dot.appearance } }));
+      return spaceDots.map((dot) => ({
+        ...dot,
+        children: [...dot.children],
+        appearance: { ...dot.appearance },
+        tags: Object.fromEntries(Object.entries(dot.tags || {}).map(([type, names]) => [type, [...names]])),
+      }));
     },
     get links() {
       return spaceLinks();
+    },
+    /* What the Collection view (collection.js) reads to show Space's dots without opening Space. load() brings in
+       the signed-in user's dots if Space hasn't yet; dots then come from `dots` above (copies). */
+    collection: {
+      load: loadDots,
+      getAllTags,
+      sameTag,
+      tagColor,
+      tintOf,
+      dotColor,
+      dotRadius,
+      typeLabel: (type) => DOT_TYPES[type]?.label || "Dot",
+      propertyLabel: (property) => PROPERTY_LABELS[property] || PROPERTY_LABELS[DEFAULT_PROPERTY],
     },
   };
 })();

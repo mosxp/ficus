@@ -1,35 +1,20 @@
-/* FICUS cloud layer.
+/* FICUS request layer.
  *
- * When no local FastAPI backend is reachable (the static site on GitHub Pages),
- * this answers the app's `/api/...` requests from Supabase instead. Ported
- * routes mirror main.py / database.py so the rest of index.html is unchanged.
- * With the local server running, every request passes straight through.
- *
- * Answered here: checklist templates, the scrapbook libraries (sticky
- * pads, stickers, palettes and GIPHY/Tenor GIF search) and /api/upload, which
- * stores files in the Supabase Storage bucket `uploads`. /api/link-preview
- * (titles and thumbnails for shared links) is answered here in both modes.
+ * The app asks for its libraries and uploads at `/api/...`. This answers those from the signed-in user's own
+ * Google Drive, however the app is served:
+ *   checklist templates, sticky pads, stickers, palettes and the GIF search key   the `library` in
+ *     ficus_master_backup.json (FicusStore, ficus_store.js)
+ *   /api/upload, and the images of new stickers and sticky pads                    files in Ficus/uploads
+ *     (FicusDrive, ficus_drive.js), linked as /drive-file/<id> and served by ficus_sw.js
+ * /api/link-preview (titles and thumbnails for shared links) is answered here too. Anything else goes to the
+ * local server (main.py) when it's running; on the static site it gets an empty list or a 503.
  */
 (function () {
   "use strict";
 
-  const config = window.FICUS_SUPABASE_CONFIG || {};
   const nativeFetch = window.fetch.bind(window);
-  const client = window.supabase?.createClient && config.url && config.publishableKey
-    ? window.supabase.createClient(config.url, config.publishableKey, {
-        auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true },
-        global: { fetch: nativeFetch },
-      })
-    : null;
-  window.ficusSupabase = client;
-
-  let session = null;
-  const sessionReady = client
-    ? client.auth.getSession()
-      .then(({ data }) => { session = data?.session || null; })
-      .catch(() => { session = null; })
-    : Promise.resolve();
-  client?.auth.onAuthStateChange((_event, next) => { session = next || null; });
+  const store = () => window.FicusStore;
+  const drive = () => window.FicusDrive;
 
   let backendProbe = null;
   function hasLocalBackend() {
@@ -66,40 +51,18 @@
     return Boolean(value) && typeof value === "object" && !Array.isArray(value);
   }
 
-  function given(value) {
-    return value !== undefined && value !== null;
-  }
-
-  async function run(query) {
-    const { data, error } = await query;
-    if (error) throw new ApiError(500, error.message || "Cloud request failed");
-    return data;
-  }
-
-  // Supabase returns at most 1000 rows per select, so long lists are read in pages.
-  // `build` must apply a stable order (e.g. by id) so pages don't overlap.
-  const PAGE_SIZE = 1000;
-  async function selectAll(build) {
-    const rows = [];
-    for (let from = 0; ; from += PAGE_SIZE) {
-      const page = await run(build().range(from, from + PAGE_SIZE - 1));
-      rows.push(...page);
-      if (page.length < PAGE_SIZE) return rows;
-    }
-  }
-
-  /* ---------- Normalizers (ported from database.py) ---------- */
-
   function intOr(value, fallback) {
     const number = Number.parseInt(value, 10);
     return Number.isFinite(number) ? number : fallback;
   }
 
+  const now = () => new Date().toISOString();
+  const nextId = (rows) => rows.reduce((max, row) => Math.max(max, Number(row.id) || 0), 0) + 1;
+
   /* ---------- Link previews (for links shared or pasted into a note) ---------- */
 
-  // Answered here even when the local server is running. YouTube, TikTok and Vimeo serve oEmbed
-  // with CORS; anything else goes through Microlink's free tier (about 25 lookups a day per
-  // visitor). Instagram and Facebook block every free lookup, so those keep their shared title.
+  // YouTube, TikTok and Vimeo serve oEmbed with CORS; anything else goes through Microlink's free tier (about 25
+  // lookups a day per visitor). Instagram and Facebook block every free lookup, so those keep their shared title.
   const LINK_PREVIEW_SKIP = /(^|\.)(instagram\.com|facebook\.com|fb\.com|fb\.watch|threads\.net)$/;
   const LINK_PREVIEW_OEMBED = [
     [/(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$/, "https://www.youtube.com/oembed?format=json&url="],
@@ -182,7 +145,7 @@
     return a < b ? -1 : a > b ? 1 : 0;
   }
 
-  // Request bodies are validated like the FastAPI models.
+  // Request bodies are validated like main.py's FastAPI models.
   const FLAG_WORDS = { 1: true, true: true, t: true, yes: true, y: true, on: true, 0: false, false: false, f: false, no: false, n: false, off: false };
 
   function fieldError(key) {
@@ -208,11 +171,39 @@
     if (kind === "text" && typeof value === "string") return value;
     if (kind === "flag") return flagField(key, value);
     if (kind === "int") return intField(key, value);
-    if (kind === "list" && Array.isArray(value)) return value;
-    if (kind === "int_list" && Array.isArray(value)) return value.map((item) => intField(key, item));
     if (kind === "text_list" && Array.isArray(value) && value.every((item) => typeof item === "string")) return value;
-    if (kind === "object" && isPlainObject(value)) return value;
     throw fieldError(key);
+  }
+
+  // Fields present in the body, validated like the FastAPI models (exclude_unset).
+  function modelFields(body, kinds) {
+    const fields = {};
+    for (const [key, kind] of Object.entries(kinds)) {
+      if (has(body, key)) fields[key] = coerceField(key, kind, body[key]);
+    }
+    return fields;
+  }
+
+  // Python `a or b or ...`: the first truthy value, else the last one.
+  function pyOr(...values) {
+    const falsy = (value) => (Array.isArray(value) ? !value.length
+      : isPlainObject(value) ? !Object.keys(value).length
+        : value === undefined || value === null || value === false || value === 0 || value === "");
+    for (const value of values) {
+      if (!falsy(value)) return value;
+    }
+    return values[values.length - 1];
+  }
+
+  /* ---------- The library (FicusStore) ---------- */
+
+  const library = () => store().getLibrary();
+  const editLibrary = (edit) => store().editLibrary(edit);
+
+  function findRow(rows, id, detail) {
+    const row = rows.find((item) => Number(item.id) === id);
+    if (!row) throw new ApiError(404, detail);
+    return row;
   }
 
   /* ---------- Checklist templates ---------- */
@@ -228,18 +219,15 @@
     };
   }
 
-  async function checklistTemplateRows() {
-    const rows = await run(client.from("checklist_templates").select("*").order("id"));
-    return rows.sort((a, b) => compareText(String(a.name).toLowerCase(), String(b.name).toLowerCase()) || a.id - b.id);
+  function listChecklistTemplates() {
+    return [...library().checklistTemplates]
+      .sort((a, b) => compareText(String(a.name).toLowerCase(), String(b.name).toLowerCase()) || a.id - b.id)
+      .map(serializeChecklistTemplate);
   }
 
-  async function listChecklistTemplates() {
-    return (await checklistTemplateRows()).map(serializeChecklistTemplate);
-  }
-
-  async function saveChecklistTemplate(body, templateId = null) {
-    if (given(body.name) && typeof body.name !== "string") throw fieldError("name");
-    if (given(body.items) && !Array.isArray(body.items)) throw fieldError("items");
+  function saveChecklistTemplate(body, templateId = null) {
+    if (body.name !== undefined && body.name !== null && typeof body.name !== "string") throw fieldError("name");
+    if (body.items !== undefined && body.items !== null && !Array.isArray(body.items)) throw fieldError("items");
     const name = clip(text(body.name), 120);
     if (!name) throw new ApiError(400, "Template name is required");
     const items = [];
@@ -248,30 +236,29 @@
       if (itemText) items.push(clip(itemText, 500));
     }
     if (!items.length) throw new ApiError(400, "Add at least one checklist item before saving a template");
-    const rows = await checklistTemplateRows();
-    let id = templateId;
-    if (id === null) id = rows.find((row) => String(row.name).toLowerCase() === name.toLowerCase())?.id ?? null;
-    let saved;
-    if (id === null) {
-      saved = await run(client.from("checklist_templates").insert({ name, items: items.slice(0, 200) }).select("*").single());
-    } else {
-      if (!rows.some((row) => row.id === id)) throw new ApiError(404, "Template not found");
-      saved = await run(client.from("checklist_templates").update({ name, items: items.slice(0, 200) })
-        .eq("id", id).select("*").single());
-    }
-    return serializeChecklistTemplate(saved);
+    return editLibrary(({ checklistTemplates: rows }) => {
+      let row = templateId === null
+        ? rows.find((item) => String(item.name).toLowerCase() === name.toLowerCase())
+        : findRow(rows, templateId, "Template not found");
+      if (!row) {
+        row = { id: nextId(rows), created_at: now() };
+        rows.push(row);
+      }
+      Object.assign(row, { name, items: items.slice(0, 200), updated_at: now() });
+      return serializeChecklistTemplate(row);
+    });
   }
 
-  async function deleteChecklistTemplate(id) {
-    const row = await run(client.from("checklist_templates").select("id").eq("id", id).maybeSingle());
-    if (!row) throw new ApiError(404, "Template not found");
-    await run(client.from("checklist_templates").delete().eq("id", id));
-    return { ok: true, id };
+  function deleteChecklistTemplate(id) {
+    return editLibrary((lib) => {
+      findRow(lib.checklistTemplates, id, "Template not found");
+      lib.checklistTemplates = lib.checklistTemplates.filter((row) => Number(row.id) !== id);
+      return { ok: true, id };
+    });
   }
 
-  /* ---------- Uploads (Supabase Storage) ---------- */
+  /* ---------- Uploads (Google Drive) ---------- */
 
-  const UPLOAD_BUCKET = "uploads";
   const IMAGE_UPLOADS = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".heic", ".heif"];
   const DOCUMENT_UPLOADS = [
     ".pdf", ".txt", ".md", ".rtf", ".csv", ".json",
@@ -282,8 +269,6 @@
   const VIDEO_UPLOADS = [".mp4", ".mov", ".m4v", ".webm"];
   const ALLOWED_UPLOADS = [...IMAGE_UPLOADS, ...DOCUMENT_UPLOADS, ...AUDIO_UPLOADS, ...VIDEO_UPLOADS];
   const MB = 1024 * 1024;
-  // The Supabase Free plan stores files up to 50MB, below main.py's audio and video limits.
-  const CLOUD_UPLOAD_CAP = 50 * MB;
   // Browsers leave File.type blank for some formats (HEIC photos, iPhone voice memos).
   const UPLOAD_CONTENT_TYPES = {
     ".m4a": "audio/mp4", ".mp3": "audio/mpeg", ".wav": "audio/wav", ".aac": "audio/aac", ".ogg": "audio/ogg",
@@ -291,18 +276,27 @@
     ".mp4": "video/mp4", ".mov": "video/quicktime", ".m4v": "video/x-m4v", ".webm": "video/webm",
     ".heic": "image/heic", ".heif": "image/heif", ".pdf": "application/pdf",
   };
+  const IMAGE_SUFFIXES = { "image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg" };
 
+  // The same limits as main.py.
   function uploadLimit(suffix) {
-    let limit = 25 * MB;
-    if (AUDIO_UPLOADS.includes(suffix)) limit = 100 * MB;
-    if (VIDEO_UPLOADS.includes(suffix)) limit = 500 * MB;
-    return Math.min(limit, CLOUD_UPLOAD_CAP);
+    if (AUDIO_UPLOADS.includes(suffix)) return 100 * MB;
+    if (VIDEO_UPLOADS.includes(suffix)) return 500 * MB;
+    return 25 * MB;
   }
 
   function randomHex() {
-    const bytes = new Uint8Array(16);
+    const bytes = new Uint8Array(8);
     crypto.getRandomValues(bytes);
     return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function toDrive(blob, name, type) {
+    try {
+      return await drive().uploadFile(blob, name, type);
+    } catch (err) {
+      throw new ApiError(err.status === 401 ? 401 : 502, err.message || "The upload to Google Drive failed");
+    }
   }
 
   async function uploadFile(form) {
@@ -315,59 +309,23 @@
     const limit = uploadLimit(suffix);
     if (file.size > limit) throw new ApiError(400, `File is larger than ${limit / MB}MB`);
     if (!file.size) throw new ApiError(400, "Empty file");
-    const path = `${session.user.id}/${randomHex()}${suffix}`;
-    const bucket = client.storage.from(UPLOAD_BUCKET);
-    const { error } = await bucket.upload(path, file, {
-      contentType: file.type || UPLOAD_CONTENT_TYPES[suffix] || "application/octet-stream",
-      cacheControl: "31536000",
-      upsert: false,
-    });
-    if (error) {
-      if (/bucket not found/i.test(error.message || "")) {
-        throw new ApiError(503, "File uploads aren't set up yet. Run supabase/04_storage.sql in Supabase.");
-      }
-      throw new ApiError(Number(error.status || error.statusCode) || 500, error.message || "Upload failed");
+    const saved = await toDrive(file, name, file.type || UPLOAD_CONTENT_TYPES[suffix] || "application/octet-stream");
+    return { url: saved.url, bytes: file.size, filename: name };
+  }
+
+  // A sticker's or sticky pad's data: URL, put in Drive. Returns its /drive-file/ url and Drive id.
+  async function imageToDrive(src, label) {
+    const blob = await (await nativeFetch(src)).blob();
+    const suffix = IMAGE_SUFFIXES[blob.type] || ".png";
+    const saved = await toDrive(blob, `${label}-${randomHex()}${suffix}`, blob.type || "image/png");
+    return { src: saved.url, fileId: saved.id };
+  }
+
+  // Moves library images' Drive files to the bin, in the background (a leftover file only takes space).
+  function trashImages(rows) {
+    for (const row of rows) {
+      if (row.fileId) drive().trashFile(row.fileId).catch((err) => console.warn("FICUS: couldn't bin a library image in Drive", err));
     }
-    return { url: bucket.getPublicUrl(path).data.publicUrl, bytes: file.size, filename: name };
-  }
-
-  /* ---------- Model helpers ---------- */
-
-  // Python truthiness and str(), for fields copied the way database.py copies them.
-  function pyFalsy(value) {
-    if (Array.isArray(value)) return !value.length;
-    if (isPlainObject(value)) return !Object.keys(value).length;
-    return value === undefined || value === null || value === false || value === 0 || value === "";
-  }
-
-  // Fields present in the body, validated like the FastAPI models (exclude_unset).
-  function modelFields(body, kinds) {
-    const fields = {};
-    for (const [key, kind] of Object.entries(kinds)) {
-      if (!has(body, key)) continue;
-      const value = body[key];
-      if (kind === "blocks") {
-        if (value !== null && !Array.isArray(value) && !isPlainObject(value)) throw fieldError(key);
-        fields[key] = value;
-      } else {
-        fields[key] = coerceField(key, kind, value);
-      }
-    }
-    return fields;
-  }
-
-  async function requireRow(table, id, detail, columns = "*") {
-    const row = await run(client.from(table).select(columns).eq("id", id).maybeSingle());
-    if (!row) throw new ApiError(404, detail);
-    return row;
-  }
-
-  // Python `a or b or ...`: the first truthy value, else the last one.
-  function pyOr(...values) {
-    for (const value of values) {
-      if (!pyFalsy(value)) return value;
-    }
-    return values[values.length - 1];
   }
 
   /* ---------- Scrapbook libraries (sticky pads, stickers, palettes) ---------- */
@@ -379,6 +337,8 @@
   const SCRAPBOOK_STICKER_DEFAULT_COLLECTION = "My stickers";
   const SCRAPBOOK_PALETTE_MAX_COLORS = 16;
   const SCRAPBOOK_PALETTE_DEFAULT_NAME = "My palette";
+  // Library images going up to Drive at once.
+  const UPLOAD_PARALLEL = 4;
 
   function squish(value, length) {
     return clip(String(value || "").replace(/\s+/g, " ").trim(), length);
@@ -430,9 +390,22 @@
     });
   }
 
+  // Puts each image in Drive (a few at a time) and returns the items with their Drive src and fileId.
+  async function imagesToDrive(items, label) {
+    const out = new Array(items.length);
+    let next = 0;
+    async function worker() {
+      while (next < items.length) {
+        const index = next++;
+        out[index] = { ...items[index], ...(await imageToDrive(items[index].src, label)) };
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(UPLOAD_PARALLEL, items.length) }, worker));
+    return out;
+  }
+
   function listScrapbookPads() {
-    return selectAll(() => client.from("scrapbook_pads").select("*").order("id", { ascending: false }))
-      .then((rows) => rows.map(serializeScrapbookImage));
+    return [...library().pads].sort((a, b) => b.id - a.id).map(serializeScrapbookImage);
   }
 
   async function createScrapbookPads(items) {
@@ -440,20 +413,21 @@
     if (items.length > SCRAPBOOK_PAD_MAX_BATCH) {
       throw new ApiError(400, `Too many sticky pads in one upload (max ${SCRAPBOOK_PAD_MAX_BATCH})`);
     }
-    const rows = await run(client.from("scrapbook_pads")
-      .insert(cleanScrapbookImages(items, "Sticky pad", SCRAPBOOK_PAD_MAX_BYTES)).select("*"));
-    return rows.sort((a, b) => b.id - a.id).map(serializeScrapbookImage);
+    const saved = await imagesToDrive(cleanScrapbookImages(items, "Sticky pad", SCRAPBOOK_PAD_MAX_BYTES), "pad");
+    return editLibrary(({ pads }) => {
+      const rows = saved.map((item, index) => ({ id: nextId(pads) + index, ...item, created_at: now() }));
+      pads.push(...rows);
+      return rows.sort((a, b) => b.id - a.id).map(serializeScrapbookImage);
+    });
   }
 
   function normalizeStickerCollection(name) {
     return squish(name, 40) || SCRAPBOOK_STICKER_DEFAULT_COLLECTION;
   }
 
-  async function listScrapbookStickers(query) {
+  function listScrapbookStickers(query) {
     const metaOnly = query.has("meta") ? flagField("meta", query.get("meta")) : false;
-    const columns = metaOnly ? "id, collection, name, width, height, created_at" : "*";
-    const rows = await selectAll(() => client.from("scrapbook_stickers").select(columns).order("id"));
-    return rows.map((row) => {
+    return [...library().stickers].sort((a, b) => a.id - b.id).map((row) => {
       const sticker = serializeScrapbookImage(row);
       if (metaOnly) delete sticker.src;
       return sticker;
@@ -466,36 +440,48 @@
       throw new ApiError(400, `Too many stickers in one upload (max ${SCRAPBOOK_STICKER_MAX_BATCH})`);
     }
     const group = normalizeStickerCollection(collection);
-    const rows = await run(client.from("scrapbook_stickers")
-      .insert(cleanScrapbookImages(items, "Sticker", SCRAPBOOK_STICKER_MAX_BYTES).map((item) => ({ ...item, collection: group })))
-      .select("*"));
-    return rows.sort((a, b) => a.id - b.id).map(serializeScrapbookImage);
+    const saved = await imagesToDrive(cleanScrapbookImages(items, "Sticker", SCRAPBOOK_STICKER_MAX_BYTES), "sticker");
+    return editLibrary(({ stickers }) => {
+      const rows = saved.map((item, index) => ({ id: nextId(stickers) + index, ...item, collection: group, created_at: now() }));
+      stickers.push(...rows);
+      return rows.map(serializeScrapbookImage);
+    });
   }
 
-  async function deleteScrapbookRow(table, id, detail) {
-    await requireRow(table, id, detail, "id");
-    await run(client.from(table).delete().eq("id", id));
-    return { ok: true, id };
+  function deleteScrapbookImage(key, id, detail) {
+    return editLibrary((lib) => {
+      const row = findRow(lib[key], id, detail);
+      lib[key] = lib[key].filter((item) => item !== row);
+      trashImages([row]);
+      return { ok: true, id };
+    });
   }
 
-  async function renameStickerCollection(body) {
+  function renameStickerCollection(body) {
     const f = modelFields(body, { name: "text", new_name: "text" });
     if (typeof f.name !== "string") throw fieldError("name");
     if (typeof f.new_name !== "string" || !f.new_name) throw fieldError("new_name");
     const source = normalizeStickerCollection(f.name);
     const target = normalizeStickerCollection(f.new_name);
-    const rows = await run(client.from("scrapbook_stickers").update({ collection: target }).eq("collection", source).select("id"));
+    const rows = library().stickers.filter((row) => normalizeStickerCollection(row.collection) === source);
     if (!rows.length) throw new ApiError(404, "Sticker collection not found");
-    return { ok: true, collection: target, updated: rows.length };
+    return editLibrary(() => {
+      rows.forEach((row) => { row.collection = target; });
+      return { ok: true, collection: target, updated: rows.length };
+    });
   }
 
-  async function deleteStickerCollection(body) {
+  function deleteStickerCollection(body) {
     const f = modelFields(body, { name: "text" });
     if (typeof f.name !== "string") throw fieldError("name");
     const group = normalizeStickerCollection(f.name);
-    const rows = await run(client.from("scrapbook_stickers").delete().eq("collection", group).select("id"));
+    const rows = library().stickers.filter((row) => normalizeStickerCollection(row.collection) === group);
     if (!rows.length) throw new ApiError(404, "Sticker collection not found");
-    return { ok: true, collection: group, deleted: rows.length };
+    return editLibrary((lib) => {
+      lib.stickers = lib.stickers.filter((row) => !rows.includes(row));
+      trashImages(rows);
+      return { ok: true, collection: group, deleted: rows.length };
+    });
   }
 
   function paletteBody(body) {
@@ -522,25 +508,39 @@
   }
 
   function listScrapbookPalettes() {
-    return selectAll(() => client.from("scrapbook_palettes").select("*").order("id", { ascending: false }))
-      .then((rows) => rows.map(serializeScrapbookPalette));
+    return [...library().palettes].sort((a, b) => b.id - a.id).map(serializeScrapbookPalette);
   }
 
-  async function createScrapbookPalette(f) {
+  function createScrapbookPalette(f) {
     const palette = { ...cleanPalette(f), source: f.source === "photo" ? "photo" : "custom" };
-    return serializeScrapbookPalette(await run(client.from("scrapbook_palettes").insert(palette).select("*").single()));
+    return editLibrary(({ palettes }) => {
+      const row = { id: nextId(palettes), ...palette, created_at: now(), updated_at: now() };
+      palettes.push(row);
+      return serializeScrapbookPalette(row);
+    });
   }
 
-  async function updateScrapbookPalette(id, f) {
+  function updateScrapbookPalette(id, f) {
     const palette = cleanPalette(f);
-    await requireRow("scrapbook_palettes", id, "Palette not found", "id");
-    return serializeScrapbookPalette(await run(client.from("scrapbook_palettes").update(palette).eq("id", id).select("*").single()));
+    return editLibrary(({ palettes }) => {
+      const row = findRow(palettes, id, "Palette not found");
+      Object.assign(row, palette, { updated_at: now() });
+      return serializeScrapbookPalette(row);
+    });
+  }
+
+  function deleteScrapbookPalette(id) {
+    return editLibrary((lib) => {
+      findRow(lib.palettes, id, "Palette not found");
+      lib.palettes = lib.palettes.filter((row) => Number(row.id) !== id);
+      return { ok: true, id };
+    });
   }
 
   /* ---------- Scrapbook GIF search (GIPHY or Tenor, called straight from the browser) ---------- */
 
-  // Each user brings their own free API key, kept in scrapbook_settings. The GIF library
-  // (uploaded .gif files) still needs the local server.
+  // Each user brings their own free API key, kept in their library. The GIF library (uploaded .gif files) still
+  // needs the local server.
   const GIF_PROVIDERS = { giphy: "GIPHY", tenor: "Tenor" };
   const GIF_MEDIA_HOSTS = /^(media\d*\.giphy\.com|i\.giphy\.com|media\d*\.tenor\.com|c\.tenor\.com)$/;
   const GIF_SEARCH_OFF = { configured: false, provider: null, source: null };
@@ -617,17 +617,13 @@
     return { results, next: data.next || null };
   }
 
-  async function gifSettings() {
-    const { data, error } = await client.from("scrapbook_settings").select("gif_provider, gif_api_key").maybeSingle();
-    if (error) {
-      const missing = ["PGRST205", "42P01"].includes(error.code);
-      throw new ApiError(500, missing ? "GIF search needs supabase/07_gif_search.sql to be run first." : error.message);
-    }
-    return data && data.gif_provider && data.gif_api_key ? { provider: data.gif_provider, key: data.gif_api_key } : null;
+  function gifSettings() {
+    const gif = library().gif;
+    return gif && has(GIF_PROVIDERS, gif.provider) && typeof gif.key === "string" && gif.key ? gif : null;
   }
 
-  async function gifConfig() {
-    const settings = await gifSettings();
+  function gifConfig() {
+    const settings = gifSettings();
     return settings ? { configured: true, provider: settings.provider, source: "app" } : GIF_SEARCH_OFF;
   }
 
@@ -644,18 +640,17 @@
       if ([400, 401, 403].includes(err.status)) throw new ApiError(400, `${GIF_PROVIDERS[f.provider]} rejected that key`);
       throw new ApiError(502, "GIF service unavailable");
     }
-    await run(client.from("scrapbook_settings")
-      .upsert({ user_id: session.user.id, gif_provider: f.provider, gif_api_key: key }, { onConflict: "user_id" }));
+    editLibrary((lib) => { lib.gif = { provider: f.provider, key }; });
     return { configured: true, provider: f.provider, source: "app" };
   }
 
-  async function clearGifConfig() {
-    await run(client.from("scrapbook_settings").delete().eq("user_id", session.user.id));
+  function clearGifConfig() {
+    editLibrary((lib) => { lib.gif = null; });
     return GIF_SEARCH_OFF;
   }
 
   async function searchGifs(query) {
-    const settings = await gifSettings();
+    const settings = gifSettings();
     if (!settings) throw new ApiError(503, "not_configured");
     let limit = 24;
     if (query.has("limit")) {
@@ -704,7 +699,7 @@
     {
       methods: ["DELETE"],
       pattern: /^\/api\/scrapbook\/pads\/(\d+)$/,
-      handle: (m) => deleteScrapbookRow("scrapbook_pads", Number(m[1]), "Sticky pad not found"),
+      handle: (m) => deleteScrapbookImage("pads", Number(m[1]), "Sticky pad not found"),
     },
     { methods: ["GET"], pattern: /^\/api\/scrapbook\/stickers$/, handle: (m, body, query) => listScrapbookStickers(query) },
     {
@@ -718,7 +713,7 @@
     {
       methods: ["DELETE"],
       pattern: /^\/api\/scrapbook\/stickers\/(\d+)$/,
-      handle: (m) => deleteScrapbookRow("scrapbook_stickers", Number(m[1]), "Sticker not found"),
+      handle: (m) => deleteScrapbookImage("stickers", Number(m[1]), "Sticker not found"),
     },
     { methods: ["POST"], pattern: /^\/api\/scrapbook\/stickers\/collections\/rename$/, handle: (m, body) => renameStickerCollection(body) },
     { methods: ["POST"], pattern: /^\/api\/scrapbook\/stickers\/collections\/delete$/, handle: (m, body) => deleteStickerCollection(body) },
@@ -729,20 +724,16 @@
       pattern: /^\/api\/scrapbook\/palettes\/(\d+)$/,
       handle: (m, body) => updateScrapbookPalette(Number(m[1]), paletteBody(body)),
     },
-    {
-      methods: ["DELETE"],
-      pattern: /^\/api\/scrapbook\/palettes\/(\d+)$/,
-      handle: (m) => deleteScrapbookRow("scrapbook_palettes", Number(m[1]), "Palette not found"),
-    },
+    { methods: ["DELETE"], pattern: /^\/api\/scrapbook\/palettes\/(\d+)$/, handle: (m) => deleteScrapbookPalette(Number(m[1])) },
     { methods: ["GET"], pattern: /^\/api\/scrapbook\/gifs\/config$/, signedOut: GIF_SEARCH_OFF, handle: () => gifConfig() },
     { methods: ["PUT"], pattern: /^\/api\/scrapbook\/gifs\/config$/, handle: (m, body) => saveGifConfig(body) },
     { methods: ["DELETE"], pattern: /^\/api\/scrapbook\/gifs\/config$/, handle: () => clearGifConfig() },
     { methods: ["GET"], pattern: /^\/api\/scrapbook\/gifs\/search$/, handle: (m, body, query) => searchGifs(query) },
   ];
 
-  const OFFLINE_DETAIL = "This part of FICUS isn't available online yet.";
+  const OFFLINE_DETAIL = "This part of FICUS needs the local server.";
 
-  // Lists the app loads for features not yet in the cloud (saved GIFs, contacts); empty keeps the page rendering.
+  // Lists the app loads for features only the local server has (saved GIFs, contacts); empty keeps the page rendering.
   const PENDING_MODULE_LISTS = [/^\/api\/scrapbook\/gif-library$/, /^\/api\/contacts$/];
 
   function signedOutNoun(path) {
@@ -776,16 +767,12 @@
     const request = describeRequest(input, init);
     if (!request) return nativeFetch(input, init);
     if (request.method === "GET" && request.path === "/api/link-preview") return linkPreview(request.query.get("url"));
-    if (await hasLocalBackend()) return nativeFetch(input, init);
-    if (request.method === "GET" && request.path === "/api/scrapbook/gifs/proxy") return gifMedia(request.query.get("url"));
 
     for (const route of ROUTES) {
       if (!route.methods.includes(request.method)) continue;
       const match = request.path.match(route.pattern);
       if (!match) continue;
-      if (!client) return jsonResponse(503, { detail: "Cloud sync is unavailable right now." });
-      await sessionReady;
-      if (!session) {
+      if (!store()?.uid || !drive()) {
         return request.method === "GET"
           ? jsonResponse(200, "signedOut" in route ? route.signedOut : [])
           : jsonResponse(401, { detail: `Sign in with Google to save ${signedOutNoun(request.path)}.` });
@@ -794,10 +781,12 @@
         return jsonResponse(200, await route.handle(match, request.body, request.query));
       } catch (err) {
         const status = err instanceof ApiError ? err.status : 500;
-        return jsonResponse(status, { detail: err?.message || "Cloud request failed" });
+        return jsonResponse(status, { detail: err?.message || "Request failed" });
       }
     }
 
+    if (await hasLocalBackend()) return nativeFetch(input, init);
+    if (request.method === "GET" && request.path === "/api/scrapbook/gifs/proxy") return gifMedia(request.query.get("url"));
     if (request.method === "GET" && PENDING_MODULE_LISTS.some((pattern) => pattern.test(request.path))) {
       return jsonResponse(200, []);
     }

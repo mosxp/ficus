@@ -48,7 +48,10 @@ from database import (
 
 FRONTEND_DIR = Path(__file__).resolve().parent
 # Only these root files are web-served; the root also holds sparks.db and server code.
-FRONTEND_SCRIPTS = {"quick_line.js", "scrapboard.js", "canvas-editor.js", "ficus_cloud.js", "space.js"}
+FRONTEND_SCRIPTS = {
+    "quick_line.js", "scrapboard.js", "canvas-editor.js", "ficus_drive.js", "ficus_sw.js", "ficus_cloud.js",
+    "ficus_store.js", "space.js", "collection.js",
+}
 UPLOAD_DIR = Path(__file__).resolve().parent / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
 # Image + document uploads for note photos (@photo), attachments and Space blocks.

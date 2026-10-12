@@ -7,9 +7,9 @@
 -- references and their tags) are kept as an archive even though v1.0 no longer
 -- reads them; part 3 at the bottom drops them and is commented out.
 --
--- Part 1 is groundwork for syncing Space to the cloud. Space still saves its
--- dots in the browser (localStorage key ficus_space_dots_v1:<user id>) and does
--- not read or write these tables yet. Columns mirror the dot objects in space.js.
+-- Part 1 was groundwork for syncing Space to Supabase. Ficus now saves to each
+-- user's own Google Drive instead (ficus_store.js), so nothing reads or writes
+-- these tables. Columns mirror the dot objects in space.js.
 
 begin;
 
@@ -31,6 +31,8 @@ create table if not exists public.space_dots (
   -- The parent shown in the breadcrumb; every link (including this one) is a row in space_dot_links.
   parent_id   text,
   appearance  jsonb not null default '{"color": "#8c8c8c", "size": 1.0}'::jsonb,
+  -- Faceted tags, Type -> its Names: {"Subject": ["Pharmacology"], "Class": ["Antihistamines", "Stimulants"]}.
+  tags        jsonb not null default '{}'::jsonb check (jsonb_typeof(tags) = 'object'),
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now(),
   primary key (user_id, id),
@@ -47,6 +49,10 @@ create table if not exists public.space_dots (
     end
   )
 );
+
+-- Re-runs on a table created before tags existed.
+alter table public.space_dots add column if not exists tags jsonb not null default '{}'::jsonb
+  check (jsonb_typeof(tags) = 'object');
 
 -- Re-runs on a table created before 'hub' existed: widen the type check.
 alter table public.space_dots drop constraint if exists space_dots_type_check;

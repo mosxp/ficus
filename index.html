@@ -17,8 +17,8 @@
     <script src="canvas-editor.js"></script>
     <script src="scrapboard.js?v=25"></script>
     <script src="quick_line.js"></script>
-    <script src="space.js?v=64" defer></script>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="space.js?v=80" defer></script>
+    <script src="collection.js?v=18" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
       const APP_STORAGE_EPOCH = "2026-10-03-clean";
@@ -28,13 +28,17 @@
           localStorage.setItem("ficus_storage_epoch", APP_STORAGE_EPOCH);
         }
       } catch (_) {}
-      window.FICUS_SUPABASE_CONFIG = {
-        url: "https://waxbsyvqvyjjppbswqoc.supabase.co",
-        publishableKey: "sb_publishable_1YRF0shFj3rLXNKyWAOpGA_UzHKgpFi",
+      // The Google Cloud OAuth client (type "Web application") that signs users in and reaches their Drive. Its
+      // Authorized JavaScript origins must list every address Ficus is served from, and the project needs the
+      // Google Drive API enabled.
+      window.FICUS_GOOGLE_CONFIG = {
+        clientId: "245135305204-l479tldfvcu4vvg09m31vbtph2m81fve.apps.googleusercontent.com",
       };
     </script>
-    <!-- Bump ?v= whenever ficus_cloud.js changes so browsers never pair it with a different index.html. -->
-    <script src="ficus_cloud.js?v=14"></script>
+    <!-- Bump ?v= whenever these change so browsers never pair them with a different index.html. -->
+    <script src="ficus_drive.js?v=1"></script>
+    <script src="ficus_cloud.js?v=15"></script>
+    <script src="ficus_store.js?v=2"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -541,9 +545,6 @@
         border: none;
         box-shadow: none;
       }
-      #global-top-utility-bar {
-        z-index: 30;
-      }
       @media (max-width: 767px) {
         #notebook-tabs {
           top: auto;
@@ -586,6 +587,540 @@
         #view-cover {
           padding-right: 0.75rem;
         }
+      }
+
+      /* Collection: a dashboard of dots running to the right edge of the screen, under the floating section tabs
+         (above the tab bar on phones): a narrow tool rail on the left, then the open sub-page. */
+      #collection-view {
+        position: fixed; inset: 0; z-index: 20; box-sizing: border-box;
+        display: flex; width: 100vw; max-width: 100%; height: 100vh; height: 100dvh; padding-right: 0;
+        background: #fafafa; color: #1c1917;
+      }
+      #collection-view, #collection-view * { border-radius: 0; }
+      #collection-sidebar {
+        display: flex; width: 64px; flex-shrink: 0; flex-direction: column; align-items: center; gap: 16px;
+        padding-top: 24px; padding-bottom: 16px; overflow-y: auto; scrollbar-width: none;
+        border-right: 1px solid #e5e5e5; background: #ffffff;
+      }
+      #collection-sidebar::-webkit-scrollbar { display: none; }
+      .collection-tool {
+        display: flex; width: 40px; height: 40px; flex-shrink: 0; align-items: center; justify-content: center;
+        border: none; background: transparent; color: #78716c; cursor: pointer; transition: background 0.2s, color 0.2s;
+      }
+      .collection-tool svg { width: 18px; height: 18px; }
+      .collection-tool:hover { background: rgba(0, 0, 0, 0.05); color: #1c1917; }
+      /* The open sub-page's tool: a solid gray square edged in ink on the left. */
+      .collection-tool.is-active { background: rgba(0, 0, 0, 0.08); color: #1c1917; box-shadow: inset 2px 0 0 #1c1917; }
+      .collection-tool:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      .collection-tool-divider { width: 32px; height: 0; margin: 8px 0; border-bottom: 1px dashed #ccc; }
+      #collection-content { flex-grow: 1; min-width: 0; padding: 40px; overflow-y: auto; overscroll-behavior: contain; }
+      #collection-content.is-tags { display: flex; padding: 0; overflow: hidden; }
+      .collection-title {
+        margin: 0; padding-bottom: 12px; border-bottom: 1px solid #e5e5e5;
+        font-size: 1.75rem; font-weight: 700; line-height: 1.2; letter-spacing: -0.02em; color: #1c1917;
+      }
+      /* Tags: the tag explorer, the viewport of dots carrying the picked tag, and the dot preview, which slides in
+         from the right edge when a dot is clicked (collection.js toggles .has-preview). */
+      .ctags { position: relative; display: flex; height: 100%; width: 100%; min-height: 0; }
+      .ctags-explorer { display: flex; width: 300px; flex-shrink: 0; flex-direction: column; min-height: 0; border-right: 1px solid #e5e5e5; background: #fff; }
+      .ctags-explorer-head { flex-shrink: 0; padding: 16px; border-bottom: 1px solid #e5e5e5; }
+      .ctags-search {
+        width: 100%; padding: 6px 10px; border: 1px solid #e5e5e5; border-radius: 0; background: #fafafa; outline: none;
+        font-size: 0.82rem; color: #1c1917; transition: border-color 120ms ease, background 120ms ease;
+      }
+      .ctags-search:focus { border-color: #1c1917; background: #fff; }
+      .ctags-tree { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px 8px 24px; }
+      .ctags-type + .ctags-type { margin-top: 12px; }
+      .ctags-type-head, .ctags-name small { font-variant-numeric: tabular-nums; }
+      .ctags-type-head {
+        display: flex; align-items: baseline; justify-content: space-between; margin: 8px 8px 4px;
+        font-size: 0.66rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #78716c;
+      }
+      .ctags-type-head small { font-size: 0.66rem; font-weight: 500; letter-spacing: 0; color: #a8a29e; }
+      .ctags-names { margin: 0; padding: 0; list-style: none; }
+      .ctags-name {
+        display: flex; width: 100%; align-items: center; gap: 8px; padding: 6px 8px; border: 0; border-radius: 0;
+        background: transparent; cursor: pointer; text-align: left; font-size: 0.82rem; color: #292524; transition: background 0.2s;
+      }
+      .ctags-name:hover { background: rgba(0, 0, 0, 0.05); }
+      .ctags-name[aria-pressed="true"] { background: rgba(0, 0, 0, 0.08); box-shadow: inset 2px 0 0 #1c1917; font-weight: 600; color: #1c1917; }
+      .ctags-name:focus-visible { outline: 2px solid #1c1917; outline-offset: -2px; }
+      .ctags-swatch { width: 10px; height: 10px; flex-shrink: 0; background: var(--tag-color); }
+      .ctags-name-text { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .ctags-name small { font-size: 0.7rem; font-weight: 500; color: #a8a29e; }
+      .ctags-empty { margin: 16px 8px; font-size: 0.8rem; line-height: 1.5; color: #a8a29e; }
+      .ctags-empty.is-inline { margin: 2px 8px 0; }
+      .ctags-viewport { position: relative; display: flex; min-width: 0; flex-grow: 1; flex-direction: column; background: #fcfcfc; }
+      .ctags-toolbar { display: flex; flex-shrink: 0; align-items: center; gap: 12px; min-height: 57px; padding: 12px 16px; border-bottom: 1px solid #e5e5e5; }
+      .ctags-modes { display: inline-flex; flex-shrink: 0; border: 1px solid #e5e5e5; background: #fff; }
+      .ctags-mode {
+        display: flex; width: 32px; height: 28px; align-items: center; justify-content: center; border: 0; border-radius: 0;
+        background: transparent; cursor: pointer; color: #78716c; transition: background 0.2s, color 0.2s;
+      }
+      .ctags-mode + .ctags-mode { border-left: 1px solid #e5e5e5; }
+      .ctags-mode svg { width: 16px; height: 16px; }
+      .ctags-mode:hover { background: rgba(0, 0, 0, 0.05); color: #1c1917; }
+      .ctags-mode[aria-pressed="true"] { background: #1c1917; color: #fff; }
+      .ctags-mode:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; position: relative; }
+      .ctags-heading { display: flex; min-width: 0; align-items: center; gap: 8px; }
+      .ctags-heading .tag-type-group { margin-right: 0; }
+      .ctags-heading-count { flex-shrink: 0; font-size: 0.75rem; color: #a8a29e; }
+      .ctags-stage { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+      .ctags-stage.is-graph { overflow: hidden; }
+      .ctags-hint { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; margin: 0; padding: 24px; text-align: center; font-size: 0.85rem; color: #a8a29e; }
+      .ctags-cards { display: flex; max-width: 48rem; flex-direction: column; gap: 8px; margin: 0; padding: 16px; list-style: none; }
+      /* A card opens its dot; the chevron on its right shows the dot's children in a list beneath it. */
+      .ctags-card { display: flex; align-items: stretch; border: 1px solid #e5e5e5; background: #fff; transition: border-color 0.2s; }
+      .ctags-card:hover { border-color: #d6d3d1; }
+      .ctags-card:has(> .ctags-card-open[aria-current="true"]) { border-color: #1c1917; box-shadow: inset 2px 0 0 #1c1917; }
+      .ctags-card-open {
+        display: flex; min-width: 0; flex: 1; align-items: flex-start; gap: 12px; padding: 12px 14px; border: 0; border-radius: 0;
+        background: transparent; cursor: pointer; text-align: left; transition: background 0.2s;
+      }
+      .ctags-card-open:hover { background: #f7f7f7; }
+      .ctags-card-open:focus-visible, .ctags-card-toggle:focus-visible, .ctags-child:focus-visible { outline: 2px solid #1c1917; outline-offset: -2px; }
+      .ctags-card-open .space-type-dot { width: 10px; height: 10px; margin-top: 5px; }
+      .ctags-card-toggle {
+        display: flex; width: 36px; flex-shrink: 0; align-items: center; justify-content: center; border: 0; border-left: 1px solid #e5e5e5;
+        border-radius: 0; background: transparent; cursor: pointer; color: #78716c; transition: background 0.2s, color 0.2s;
+      }
+      .ctags-card-toggle svg { width: 14px; height: 14px; transition: transform 0.2s ease; }
+      .ctags-card-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+      .ctags-card-toggle:hover:not(:disabled) { background: rgba(0, 0, 0, 0.05); color: #1c1917; }
+      .ctags-card-toggle:disabled { cursor: default; color: #d6d3d1; }
+      .ctags-children { display: grid; grid-template-rows: 0fr; visibility: hidden; transition: grid-template-rows 0.2s ease, visibility 0s linear 0.2s; }
+      .ctags-children.is-open { grid-template-rows: 1fr; visibility: visible; transition: grid-template-rows 0.2s ease; }
+      .ctags-children-inner { min-height: 0; overflow: hidden; }
+      .ctags-child-list { margin: 6px 0 2px 16px; padding: 0 0 0 8px; border-left: 2px solid #e5e5e5; list-style: none; }
+      .ctags-child {
+        display: flex; width: 100%; align-items: center; gap: 8px; padding: 6px 8px; border: 0; border-radius: 0; background: transparent;
+        cursor: pointer; text-align: left; font-size: 0.82rem; color: #292524; transition: background 0.2s;
+      }
+      .ctags-child:hover { background: rgba(0, 0, 0, 0.05); }
+      .ctags-child[aria-current="true"] { background: rgba(0, 0, 0, 0.08); box-shadow: inset 2px 0 0 #1c1917; font-weight: 600; color: #1c1917; }
+      .ctags-child .space-type-dot { width: 8px; height: 8px; flex-shrink: 0; }
+      .ctags-child-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .ctags-child-type { flex-shrink: 0; font-size: 0.7rem; font-weight: 400; color: #a8a29e; }
+      .ctags-card-main { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; }
+      .ctags-card-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.9rem; font-weight: 600; color: #1c1917; }
+      .ctags-card-meta { font-size: 0.7rem; color: #a8a29e; }
+      .ctags-card-snippet { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 2; -webkit-box-orient: vertical; margin-top: 2px; font-size: 0.78rem; line-height: 1.45; color: #57534e; }
+      /* Graph and Orbit: a contained Space canvas (collection.js runs its forces), dots drawn as on the canvas. */
+      .cgraph { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; user-select: none; -webkit-user-select: none; }
+      .cgraph marker polygon { fill: rgba(0, 0, 0, 0.3); }
+      .cgraph-link { stroke: rgba(0, 0, 0, 0.3); stroke-width: 1px; stroke-linecap: round; }
+      .cgraph-ring { fill: none; stroke: var(--ring-color, #8c8c8c); stroke-width: 0.75px; stroke-opacity: 0.3; pointer-events: none; }
+      .cgraph-node { cursor: pointer; outline: none; transition: opacity 0.2s; }
+      .cgraph-node.is-dragging { cursor: grabbing; }
+      /* Children of the tagged dots that don't carry the tag: fainter (and drawn smaller), until pointed at. */
+      .cgraph-node.is-secondary { opacity: 0.5; }
+      .cgraph-node.is-secondary:hover, .cgraph-node.is-secondary.is-selected, .cgraph-node.is-secondary.is-dragging,
+      .cgraph-node.is-secondary:focus-visible { opacity: 0.85; }
+      .cgraph-core { transform-box: fill-box; transform-origin: center; transition: transform 140ms ease; }
+      .cgraph-node:hover .cgraph-core, .cgraph-node.is-selected .cgraph-core { transform: scale(1.25); }
+      .cgraph-node.is-dragging .cgraph-core { transform: scale(1.3); }
+      .cgraph-node.is-selected .cgraph-halo { fill: #0f172a; fill-opacity: 0.12; }
+      .cgraph-node:focus-visible .cgraph-core { stroke: #1c1917; stroke-width: 2px; }
+      .cgraph-label {
+        font-size: 11px; font-weight: 500; fill: #44403c; text-anchor: middle; dominant-baseline: hanging;
+        paint-order: stroke; stroke: #fcfcfc; stroke-width: 3px; stroke-linejoin: round; pointer-events: none;
+      }
+      .cgraph-node.is-selected .cgraph-label { font-weight: 700; fill: #1c1917; }
+      /* The preview's width (--ctags-preview-width) is set by collection.js as its left edge is dragged. Its page sits
+         at that width inside a clip as the pane slides open, so the text doesn't reflow on the way. */
+      .ctags { --ctags-preview-width: 400px; }
+      .ctags-preview {
+        position: relative; display: flex; width: 0; flex-shrink: 0; visibility: hidden; background: #fff;
+        transition: width 0.3s ease, visibility 0s linear 0.3s;
+      }
+      .ctags.has-preview .ctags-preview { width: var(--ctags-preview-width); border-left: 1px solid #e5e5e5; visibility: visible; transition: width 0.3s ease; }
+      .ctags.is-resizing .ctags-preview { transition: none; }
+      .ctags-preview-clip { display: flex; width: 100%; height: 100%; overflow: hidden; }
+      .ctags-preview-inner { width: calc(var(--ctags-preview-width) - 1px); flex-shrink: 0; height: 100%; overflow-y: auto; overscroll-behavior: contain; }
+      .resize-handle {
+        position: absolute; left: -3px; top: 0; bottom: 0; z-index: 10; width: 6px; cursor: col-resize; background: transparent;
+        transition: background 0.2s;
+      }
+      .resize-handle:hover, .resize-handle.is-active { background: rgba(0, 0, 0, 0.1); }
+      .resize-handle:focus-visible { outline: none; background: rgba(0, 0, 0, 0.2); }
+      html.ctags-resizing, html.ctags-resizing * { cursor: col-resize !important; user-select: none !important; -webkit-user-select: none !important; }
+      .ctags-preview-head {
+        position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 8px;
+        padding: 10px 16px; border-bottom: 1px solid #e5e5e5; background: #fff;
+      }
+      .ctags-preview-btn {
+        display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border: 0; border-radius: 0; background: rgba(0, 0, 0, 0.05);
+        cursor: pointer; font-size: 0.72rem; font-weight: 600; line-height: 1.2; color: #57534e; transition: background 120ms ease, color 120ms ease;
+      }
+      .ctags-preview-btn svg { width: 0.8rem; height: 0.8rem; }
+      .ctags-preview-btn:hover { background: rgba(0, 0, 0, 0.1); color: #1c1917; }
+      .ctags-preview-btn:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      .ctags-preview-body { padding: 20px 20px 40px; }
+      /* A dot's reading view (collection.js readingView), in the Tags preview and in a notebook's cards. */
+      .dot-read-title { margin: 0; overflow-wrap: anywhere; font-size: 1.4rem; font-weight: 700; line-height: 1.25; letter-spacing: -0.02em; color: #1c1917; }
+      .dot-read-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 10px; }
+      .dot-read-meta .space-badge { margin-right: 4px; background: rgba(231, 229, 228, 0.6); }
+      button.tag-name-badge { border: 0; border-left: 2px solid var(--tag-color); font: inherit; color: inherit; cursor: pointer; }
+      button.tag-name-badge:hover { box-shadow: inset 0 0 0 999px rgba(0, 0, 0, 0.04); }
+      button.tag-name-badge:focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
+      .dot-read .space-doc-body { margin-top: 16px; padding-bottom: 0; }
+      .dot-read .space-doc-body [data-note-editor] { min-height: 0; padding: 14px 16px; font-size: 15px; line-height: 1.7; }
+      .dot-read-empty { color: #a8a29e; }
+      .dot-read-note { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-top: 16px; padding: 14px 16px; border: 1px dashed rgba(28, 25, 23, 0.12); font-size: 0.85rem; line-height: 1.5; color: #78716c; }
+      .dot-read-family { margin-top: 24px; }
+      .dot-read-family .connection-family-list + .connection-family-head, .dot-read-family .connection-family-empty + .connection-family-head { margin-top: 16px; }
+      /* The page itself, drawn read-only by space.js (renderDotContent) in its page's own markup, at its own size: what
+         holds it wraps it. Text runs as wide as its longest line, up to a reading width. */
+      .dot-read-content > .dot-read-empty { margin-top: 16px; }
+      .dot-read-content.is-text .space-doc-body { width: fit-content; max-width: 45rem; }
+      /* Blocks: the dot's grid (.block-dot), its blocks where they sit, sized (inline) to as far as they reach. */
+      .block-dot.dot-read-blocks { box-sizing: content-box; flex: none; margin-top: 16px; }
+      .dot-read-blocks .block-dot-container { overflow: hidden; }
+      .dot-read-blocks .grid-widget-block { transition: none; }
+      .dot-read-blocks .child-dot-portal:not([data-read-dot]) { cursor: default; }
+      .dot-read-blocks .child-dot-portal[data-read-dot]:focus-visible { box-shadow: inset 0 0 0 2px #1c1917; }
+      /* A board: the dot's viewport (.space-board), sized (inline) to its whole sheet at up to 400px tall; nothing on it
+         can be pressed. */
+      .space-board.dot-read-board { box-sizing: content-box; flex: none; margin-top: 16px; background: #fafafa; border: 1px solid #e5e5e5; }
+      .dot-read-board.is-missing { display: flex; align-items: center; justify-content: center; height: 120px; padding: 16px; font-size: 0.85rem; color: #78716c; }
+      .dot-read-board .board-viewport { touch-action: auto; }
+      .dot-read-board .board-surface { pointer-events: none; box-shadow: none; }
+      .dot-read-board .sb-wrap { box-shadow: none; }
+      .dot-read-board :is(.sb-dock, .sb-topbar, .sb-display-hint) { display: none; }
+      /* A hub: its Local Orbit, 300px tall, still; its dots open when pressed, but nothing drags, and a touch scrolls.
+         Under it, the hub's page: its children's cards. */
+      .connection-orbit.dot-read-orbit { width: 100%; min-width: 360px; height: 300px; margin-top: 16px; border: 1px solid #e5e5e5; }
+      .dot-read-orbit .orbit-mini { touch-action: auto; }
+      .dot-read-hub { margin-top: 8px; }
+      .dot-read-hub .hub-dot-list { margin-right: 0; padding: 0; }
+      .dot-read-hub .hub-dot-empty { margin: 0; padding: 0; }
+      .dot-read-hub .hub-child-card:not([data-read-dot]) { cursor: default; }
+      .dot-read-hub .hub-child-card:not([data-read-dot]):hover { background: rgba(0, 0, 0, 0.05); }
+      /* In the Tags preview, a page wider than the pane scrolls sideways within it. */
+      .ctags-preview-body .dot-read-content { overflow-x: auto; }
+      .ctags-preview-body .connection-orbit.dot-read-orbit { min-width: 0; }
+      .dot-read-orbit .orbit-mini-node:not([data-read-dot]) { cursor: default; }
+      .dot-read-orbit .orbit-mini-node:not([data-read-dot]):hover .orbit-mini-core { transform: none; }
+      @media (max-width: 1100px) {
+        /* Not enough room for three panes side by side: the preview slides in over the viewport. */
+        .ctags-preview { position: absolute; top: 0; right: 0; bottom: 0; z-index: 3; }
+        .ctags.has-preview .ctags-preview { width: min(var(--ctags-preview-width), 100%); box-shadow: -4px 0 12px rgba(0, 0, 0, 0.1); }
+        .ctags-preview-inner { width: min(calc(var(--ctags-preview-width) - 1px), calc(100vw - 65px)); }
+      }
+      @media (max-width: 767px) {
+        #collection-view { bottom: calc(4.35rem + env(safe-area-inset-bottom)); height: auto; }
+        #collection-sidebar { padding-top: 16px; gap: 12px; }
+        #collection-content { padding: 24px 20px; }
+        #collection-content.is-tags { padding: 0; }
+        .ctags { flex-direction: column; }
+        .ctags-explorer { width: 100%; max-height: 40%; border-right: 0; border-bottom: 1px solid #e5e5e5; }
+        .ctags-viewport { min-height: 0; }
+        .ctags-explorer-head { padding: 10px 12px; }
+        .ctags-toolbar { padding: 8px 12px; min-height: 0; }
+        .resize-handle { display: none; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .ctags-preview, .ctags.has-preview .ctags-preview, .ctags-children, .ctags-children.is-open, .ctags-card-toggle svg { transition: none; }
+      }
+
+      /* Notebooks: the Shelf (a grid of notebooks), then an open notebook's four panes (collection.js). */
+      #collection-content.is-notebooks { padding: 24px 32px 0; }
+      #collection-content.is-notebook-open { display: flex; flex-direction: column; overflow: hidden; }
+      .nb-shelf-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-bottom: 12px; border-bottom: 1px solid #e5e5e5; }
+      .nb-shelf-title { margin: 0; font-size: 1.75rem; font-weight: 700; line-height: 1.2; letter-spacing: -0.02em; color: #1c1917; }
+      .nb-new {
+        display: flex; width: 32px; height: 32px; flex-shrink: 0; align-items: center; justify-content: center; border: 1px solid #e5e5e5;
+        border-radius: 0; background: #fff; color: #1c1917; cursor: pointer; transition: background 0.2s, border-color 0.2s;
+      }
+      .nb-new svg { width: 16px; height: 16px; }
+      .nb-new:hover { background: rgba(0, 0, 0, 0.05); border-color: #d6d3d1; }
+      .nb-shelf-empty { margin: 24px 0; font-size: 0.9rem; line-height: 1.5; color: #a8a29e; }
+      .nb-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; margin: 24px 0 40px; padding: 0; list-style: none; }
+      .nb-card {
+        display: flex; width: 100%; height: 200px; flex-direction: column; gap: 8px; padding: 16px; border: 1px solid #e5e5e5; border-radius: 0;
+        background: transparent; box-shadow: inset 4px 0 0 #e7e5e4; cursor: pointer; text-align: left; transition: background 0.2s;
+      }
+      .nb-card:hover { background: rgba(0, 0, 0, 0.02); }
+      .nb-card-title {
+        display: -webkit-box; overflow: hidden; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow-wrap: anywhere;
+        font-size: 1rem; font-weight: 700; line-height: 1.3; color: #1c1917;
+      }
+      .nb-card-title.is-untitled { color: #a8a29e; }
+      .nb-card-cover { display: -webkit-box; overflow: hidden; -webkit-line-clamp: 4; -webkit-box-orient: vertical; font-size: 0.8rem; line-height: 1.5; color: #78716c; }
+      .nb-card-meta { margin-top: auto; font-size: 0.7rem; color: #a8a29e; }
+      .nb-new:focus-visible, .nb-card:focus-visible, .nb-btn:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      .nb-open { display: flex; min-height: 0; flex: 1; flex-direction: column; }
+      .nb-header { display: flex; flex-shrink: 0; align-items: center; gap: 12px; margin-bottom: 16px; padding-bottom: 12px; border-bottom: 1px solid #e5e5e5; }
+      .nb-btn {
+        display: inline-flex; height: 32px; flex-shrink: 0; align-items: center; gap: 6px; padding: 0 10px; border: 1px solid #e5e5e5; border-radius: 0;
+        background: #fff; cursor: pointer; white-space: nowrap; font-size: 0.78rem; font-weight: 600; color: #44403c; transition: background 0.2s, color 0.2s;
+      }
+      .nb-btn svg { width: 14px; height: 14px; }
+      .nb-btn:hover { background: rgba(0, 0, 0, 0.05); color: #1c1917; }
+      .nb-glyph { font-size: 1rem; line-height: 1; }
+      .nb-title-input {
+        min-width: 0; flex: 1; height: 40px; padding: 0 8px; border: 0; border-radius: 0; background: transparent; outline: none;
+        font-size: 1.5rem; font-weight: 700; letter-spacing: -0.02em; color: #1c1917; transition: box-shadow 0.2s;
+      }
+      .nb-title-input::placeholder { color: #a8a29e; }
+      .nb-title-input:focus { box-shadow: inset 0 -2px 0 #1c1917; }
+      .nb-title-input[readonly] { cursor: default; }
+      .nb-title-input[readonly]:focus { box-shadow: none; }
+      /* Reading (the eye) or editing (the pencil), for the whole notebook. */
+      .nb-mode-toggle[aria-pressed="false"] { border-color: #1c1917; color: #1c1917; }
+      /* Under the header: the tabs that bring back folded-away panes (only while one is), then the notebook. */
+      .nb-body { display: flex; height: calc(100vh - 120px); min-height: 0; gap: 8px; }
+      .nb-restore { display: flex; width: 24px; flex-shrink: 0; flex-direction: column; gap: 8px; }
+      .nb-restore[hidden], .nb-restore-tab[hidden] { display: none; }
+      .nb-restore-tab {
+        display: flex; width: 24px; flex-direction: column; align-items: center; gap: 8px; padding: 8px 0; border: 1px solid #e5e5e5; border-radius: 0;
+        background: #fff; cursor: pointer; color: #44403c; transition: background 0.2s;
+      }
+      .nb-restore-tab svg { width: 14px; height: 14px; flex-shrink: 0; }
+      .nb-restore-tab span { writing-mode: vertical-rl; font-size: 0.66rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; }
+      .nb-restore-tab:hover { background: rgba(0, 0, 0, 0.05); color: #1c1917; }
+      /* A pane's fold button, in its top right corner. */
+      .nb-collapse {
+        position: absolute; top: 8px; right: 8px; z-index: 21; display: flex; align-items: center; justify-content: center;
+        background: #fff; border: 1px solid #e5e5e5; padding: 4px; cursor: pointer; border-radius: 0; transition: background 0.2s; color: #44403c;
+      }
+      .nb-collapse svg, .nb-pencil svg { display: block; width: 14px; height: 14px; }
+      .nb-collapse:hover { background: rgba(0, 0, 0, 0.05); }
+      .is-board-editing .nb-collapse { display: none; }
+      :is(.nb-collapse, .nb-restore-tab):focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
+      /* The notebook: the spine and cover, the outline and the dots in one row, whatever the layout, so the first three
+         stay on the left. The layout only changes the dots: a row that scrolls sideways (horizontal) or a centred column
+         that scrolls down (vertical). The notebook itself never scrolls (except on a phone, below): only the dots do (and
+         a pane, inside itself, if it's too long). The dots are their cards' offsetParent and the notebook theirs, for
+         the outline's sums. */
+      .notebook-wrapper {
+        --nb-scale: 1; position: relative; display: flex; min-width: 0; height: calc(100vh - 120px); flex: 1 1 0; flex-direction: row;
+        align-items: stretch; gap: 16px; padding-bottom: 16px; overflow: hidden;
+      }
+      .dots-container { position: relative; min-width: 0; min-height: 0; flex: 1 1 0; overscroll-behavior: contain; }
+      .pane-cover-group, .pane-outline { flex-shrink: 0; }
+      .nb-outline { width: 250px; }
+      /* A row: each card as wide as its dot's page, and every card as tall as the tallest or the row's height, whichever
+         is more (one grid row at least the tallest card, growing to fill the row, its cards stretched: a flex row would
+         stop at the row's height and spill a taller card's page past its border); the pages stay at the top. The row
+         scrolls sideways between them, and down as far as the tallest. Nothing scrolls inside a card. */
+      .layout-horizontal .dots-container {
+        display: grid; grid-auto-flow: column; grid-auto-columns: max-content; grid-template-rows: minmax(max-content, 1fr);
+        align-items: stretch; gap: 24px; padding: 24px; overflow-x: auto; overflow-y: auto;
+      }
+      .layout-horizontal .nb-dot-card { height: auto; }
+      /* A column, left-aligned with the outline: each card at least the column's width, wider where its page is (a
+         block grid wider than the screen), the column then scrolling sideways as well as down. */
+      .layout-vertical .dots-container {
+        display: flex; flex-direction: column; flex-wrap: nowrap; align-items: flex-start; gap: 40px; padding: 24px; overflow-x: auto; overflow-y: auto;
+      }
+      .layout-vertical .nb-dot-card { width: max-content; min-width: 100%; height: max-content; flex-shrink: 0; }
+      /* Text has no width of its own: in the column it fills its card rather than widening it. */
+      .layout-vertical .nb-dot-card .dot-read-content.is-text .space-doc-body { width: auto; max-width: none; contain: inline-size; }
+      /* Folding away: a pane slides shut (its gap with it) and is then hidden; its contents keep their width meanwhile.
+         Clipped, except while a board is open (its selection bar may reach past the spine) or the search lists matches. */
+      .pane-cover-group, .pane-outline { overflow-x: hidden; overflow-y: auto; transition: width 0.3s ease, margin 0.3s ease, visibility 0s; }
+      .pane-cover-group:has(.is-board-editing), .pane-outline:has(.nb-search-results:not([hidden])) { overflow: visible; }
+      .pane-outline { position: relative; }
+      .pane-outline > :not(.nb-collapse) { min-width: 248px; }
+      .is-cover-hidden .pane-cover-group, .is-outline-hidden .pane-outline {
+        width: 0; visibility: hidden; transition: width 0.3s ease, margin 0.3s ease, border-width 0s 0.3s, visibility 0s 0.3s;
+      }
+      .is-cover-hidden .pane-cover-group, .is-outline-hidden .pane-outline { margin-right: -16px; }
+      .is-outline-hidden .pane-outline { border-width: 0; }
+      .dots-container.is-relayout { animation: nb-fade 0.25s ease; }
+      @keyframes nb-fade { from { opacity: 0; } to { opacity: 1; } }
+      .nb-spine { view-transition-name: nb-spine; }
+      .nb-cover { view-transition-name: nb-cover; }
+      .nb-outline { view-transition-name: nb-outline; }
+      .dots-container { view-transition-name: nb-dots; }
+      .nb-pane { display: flex; min-height: 0; flex-direction: column; border: 1px solid #e5e5e5; background: #fff; }
+      /* The spine and cover: scrapboards of a fixed size (scrapboard.js, 60 x 600 and 450 x 600), their objects placed in
+         its pixels. Each frame keeps the canvas's shape and fills the notebook's height (less, where the dots need the
+         room); the canvas is drawn at its own size in .canvas-scaler, scaled to the frame
+         (collection.js sets --nb-scale, the frame's height over 600px). The group's width follows, so it can slide shut.
+         Shown, a board is a picture that presses pass through; its pencil (while the notebook is edited) opens it, its
+         tools in the bar under the notebook, and it may spill over its neighbours meanwhile (the selection bar over a
+         60px spine). */
+      .pane-cover-group { display: flex; flex-shrink: 0; gap: 16px; width: calc(510px * var(--nb-scale) + 16px); }
+      .nb-canvas-frame { position: relative; height: min(100%, calc(600px * var(--nb-scale))); flex-shrink: 0; }
+      .nb-canvas-frame.is-board-editing { z-index: 5; }
+      .nb-spine.nb-canvas-frame { aspect-ratio: 1 / 10; }
+      .nb-cover.nb-canvas-frame { aspect-ratio: 3 / 4; }
+      .canvas-scaler { position: absolute; top: 0; left: 0; transform: scale(var(--nb-scale)); transform-origin: 0 0; }
+      .nb-spine .canvas-scaler { width: 60px; height: 600px; }
+      .nb-cover .canvas-scaler { width: 450px; height: 600px; }
+      .nb-canvas { position: relative; width: 100%; height: 100%; overflow: hidden; background: #ffffff; border: 1px solid #e5e5e5; }
+      .is-board-editing .nb-canvas { overflow: visible; border-color: #1c1917; }
+      .nb-canvas.is-missing { background: #fafafa; }
+      .nb-board { inset: 0; }
+      .nb-board .sb-wrap { border: 0; border-radius: 0; box-shadow: none !important; }
+      .is-board-editing .nb-board .sb-wrap { overflow: visible; }
+      .nb-board .sb-wrap > :is(.sb-display-hint, .sb-dock, .sb-topbar) { display: none; }
+      .nb-canvas-frame:not(.is-board-editing) .sb-canvas { pointer-events: none; }
+      .nb-board .sb-selbar, .nb-board .sb-selbar *, .nb-board .sb-text-editor { border-radius: 0 !important; }
+      .nb-canvas-ghost {
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 48px; pointer-events: none;
+        text-align: center; font-size: 0.85rem; line-height: 1.5; color: #a8a29e;
+      }
+      .nb-canvas-ghost[hidden], .is-board-editing .nb-canvas-ghost { display: none; }
+      .nb-spine .nb-canvas-ghost {
+        justify-content: safe center; overflow: hidden; padding: 16px 0; writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap;
+        font-size: 0.75rem; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase; color: #44403c;
+      }
+      .nb-spine .nb-canvas-ghost.is-untitled { color: #a8a29e; }
+      .nb-pencil {
+        position: absolute; top: 8px; right: 8px; z-index: 20; display: flex; align-items: center; justify-content: center;
+        background: #fff; border: 1px solid #e5e5e5; padding: 4px; cursor: pointer; border-radius: 0; transition: background 0.2s;
+        color: #44403c;
+      }
+      /* The same size and place on screen however big its canvas is shown (less the canvas's border, scaled with it);
+         on the cover, left of the fold button. */
+      .nb-pencil {
+        top: calc(8px / var(--nb-scale) - 1px); right: calc(8px / var(--nb-scale) - 1px);
+        transform: scale(calc(1 / var(--nb-scale))); transform-origin: 100% 0;
+      }
+      .nb-cover .nb-pencil { right: calc(40px / var(--nb-scale) - 1px); }
+      .nb-pencil:hover { background: rgba(0, 0, 0, 0.05); }
+      .nb-pencil[aria-pressed="true"] { border-color: #1c1917; background: #1c1917; color: #fff; }
+      .nb-pencil:disabled { display: none; }
+      .nb-pencil:focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
+      /* The bar under the notebook holding the edited board's tools: which canvas, its dock, then Background, Clear all
+         and Done. Its menus, text bar, handwriting pad and hints open above it. Every corner square. */
+      .nb-open { position: relative; }
+      .nb-board-tools {
+        position: absolute; left: 50%; bottom: 16px; z-index: 40; display: flex; max-width: calc(100% - 32px); align-items: center; gap: 8px;
+        transform: translateX(-50%);
+      }
+      .nb-board-tools[hidden] { display: none; }
+      .nb-board-tools *:not(.sb-dot) { border-radius: 0 !important; }
+      .nb-board-label {
+        display: flex; height: 2.875rem; flex-shrink: 0; align-items: center; padding: 0 12px; border: 1px solid #e5e5e5; background: #fff;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08); font-size: 0.66rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #78716c;
+      }
+      .nb-board-tools .sb-dock {
+        position: static; min-width: 0; max-width: none; flex: 0 1 auto; transform: none; padding-top: 0.25rem; padding-bottom: 0.25rem;
+        border-color: #e5e5e5; background: #fff; -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+      }
+      .nb-board-tools .sb-topbar { position: static; flex-shrink: 0; gap: 8px; transform: none; }
+      .nb-board-tools .sb-top-btn {
+        height: 2.875rem; padding: 0 1rem; border-color: #e5e5e5; background: #fff; -webkit-backdrop-filter: none; backdrop-filter: none;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+      }
+      .nb-board-tools .sb-top-btn:hover { background: #f5f5f4; }
+      .nb-board-tools .sb-done { border-color: #1c1917; background: #1c1917; color: #fff; }
+      .nb-board-tools .sb-done:hover { background: #44403c; }
+      .nb-board-tools.sb-narrow .sb-top-btn { width: 2.875rem; justify-content: center; padding: 0; }
+      .nb-board-tools.sb-narrow .sb-top-btn > span, .nb-board-tools.sb-narrow .nb-board-label { display: none; }
+      .nb-board-tools .sb-pop { bottom: calc(100% + 8px); max-width: calc(100vw - 32px); overflow-y: auto; }
+      .nb-board-tools .sb-pop.sb-pop-flex:not([hidden]) { max-height: min(27rem, calc(100vh - 200px)); }
+      .nb-board-tools :is(.sb-textbar, .sb-hint) {
+        top: auto; bottom: calc(100% + 8px); left: 50%; max-width: calc(100vw - 32px); transform: translateX(-50%);
+      }
+      .nb-board-tools :is(.sb-hwpad, .sb-text-status) { top: auto; bottom: calc(100% + 60px); left: 50%; transform: translateX(-50%); }
+      .nb-board-tools .sb-hwpad { width: min(34rem, calc(100vw - 2rem)); }
+      .nb-board-tools .sb-text-status { max-width: calc(100vw - 32px); white-space: nowrap; }
+      .nb-pane-head {
+        display: flex; flex-shrink: 0; align-items: baseline; justify-content: space-between; margin: 0; padding: 12px 40px 8px 16px;
+        font-size: 0.66rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #78716c;
+      }
+      .nb-pane-head small { font-size: 0.66rem; font-weight: 500; letter-spacing: 0; color: #a8a29e; }
+      .nb-search { position: relative; flex-shrink: 0; padding: 0 12px 8px; }
+      .nb-search-row { display: flex; gap: 6px; }
+      .nb-search-row .nb-btn { height: auto; padding: 0 8px; }
+      .nb-search-row .nb-layout-toggle { width: 30px; justify-content: center; padding: 0; }
+      .nb-search-input {
+        min-width: 0; flex: 1; padding: 6px 10px; border: 1px solid #e5e5e5; border-radius: 0; background: #fafafa; outline: none;
+        font-size: 0.8rem; color: #1c1917; transition: border-color 120ms ease, background 120ms ease;
+      }
+      .nb-search-input:focus { border-color: #1c1917; background: #fff; }
+      .nb-search-results {
+        position: absolute; top: calc(100% - 6px); right: 12px; left: 12px; z-index: 5; max-height: 220px; overflow-y: auto; margin: 0; padding: 4px 0;
+        border: 1px solid #e5e5e5; background: #fff; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08); list-style: none;
+      }
+      .nb-search-results[hidden] { display: none; }
+      .nb-search-option { display: flex; align-items: center; gap: 8px; padding: 6px 10px; cursor: pointer; font-size: 0.8rem; color: #292524; }
+      .nb-search-option:hover, .nb-search-option[aria-selected="true"] { background: rgba(0, 0, 0, 0.05); }
+      .nb-search-option .space-type-dot, .nb-outline-go .space-type-dot { width: 8px; height: 8px; flex-shrink: 0; }
+      .nb-search-option-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .nb-search-option small { flex-shrink: 0; font-size: 0.68rem; color: #a8a29e; }
+      .nb-search-note { margin: 4px 0 0; font-size: 0.72rem; color: #a8a29e; }
+      .nb-search-note:empty { display: none; }
+      .nb-outline-list { min-height: 0; flex: 1; overflow-y: auto; overscroll-behavior: contain; margin: 0; padding: 4px 8px 12px; list-style: none; }
+      .nb-outline-item { display: flex; align-items: center; gap: 4px; border-top: 2px solid transparent; border-bottom: 2px solid transparent; }
+      .nb-outline-item.nb-outline-topic { font-weight: 600; padding: 12px 8px 4px 8px; border-bottom: 2px solid #111; margin-top: 16px; }
+      .nb-outline-topic .nb-outline-go { padding: 2px 0; font-weight: 600; color: #111; }
+      .nb-topic-input {
+        width: 100%; height: 26px; padding: 2px 0; border: 0; border-radius: 0; background: transparent; outline: none;
+        font-size: 0.82rem; font-weight: 600; color: #111;
+      }
+      .nb-topic-input::placeholder { font-weight: 500; color: #a8a29e; }
+      .nb-outline-item.drop-before { border-top: 2px solid #3b82f6; }
+      .nb-outline-item.drop-after { border-bottom: 2px solid #3b82f6; }
+      .nb-outline-item.is-dragging { opacity: 0.4; }
+      .nb-outline-num { width: 20px; flex-shrink: 0; text-align: right; font-size: 0.7rem; font-variant-numeric: tabular-nums; color: #a8a29e; }
+      .nb-outline-go {
+        display: flex; min-width: 0; flex: 1; align-items: center; gap: 8px; padding: 6px 8px; border: 0; border-radius: 0; background: transparent;
+        cursor: pointer; text-align: left; font-size: 0.82rem; color: #292524; transition: background 0.2s;
+      }
+      .nb-outline-go:hover { background: rgba(0, 0, 0, 0.05); }
+      .nb-outline-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .nb-outline-remove {
+        display: flex; width: 24px; height: 24px; flex-shrink: 0; align-items: center; justify-content: center; border: 0; border-radius: 0;
+        background: transparent; cursor: pointer; color: #a8a29e; opacity: 0; transition: opacity 0.2s, background 0.2s, color 0.2s;
+      }
+      .nb-outline-remove svg { width: 12px; height: 12px; }
+      .nb-outline-item:hover .nb-outline-remove, .nb-outline-remove:focus-visible { opacity: 1; }
+      .nb-outline-remove:hover { background: rgba(0, 0, 0, 0.05); color: #1c1917; }
+      .nb-outline-go:focus-visible, .nb-outline-remove:focus-visible { outline: 2px solid #1c1917; outline-offset: -2px; }
+      @media (hover: none) { .nb-outline-remove { opacity: 1; } }
+      .nb-outline-empty { padding: 8px; font-size: 0.8rem; line-height: 1.5; color: #a8a29e; }
+      /* A card wraps its dot's page: as wide and tall as that is (never narrower than 280px), within what its layout
+         allows. Its title and badges wrap to the page's width rather than widening it. */
+      .nb-dot-card {
+        display: flex; flex-direction: column; box-sizing: border-box; width: max-content; height: max-content; min-width: 280px;
+        padding: 24px; border: 1px solid #e5e5e5; background: #fff; outline: none;
+      }
+      .nb-dot-head {
+        position: sticky; top: 0; z-index: 1; display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 8px;
+        margin: -24px -24px 20px; padding: 8px 12px; border-bottom: 1px solid #e5e5e5; background: #fff;
+      }
+      .nb-dot-num { font-size: 0.7rem; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: 0.06em; color: #a8a29e; }
+      .nb-dot-card :is(.dot-read-title, .dot-read-meta) { contain: inline-size; }
+      .nb-dots-empty {
+        display: flex; align-items: center; justify-content: center; padding: 24px; border: 1px dashed rgba(28, 25, 23, 0.15);
+        text-align: center; font-size: 0.85rem; line-height: 1.5; color: #a8a29e;
+      }
+      .nb-topic-heading { margin: 0; outline: none; overflow-wrap: anywhere; font-size: 1.1rem; font-weight: 700; line-height: 1.3; letter-spacing: -0.01em; color: #111; }
+      .layout-horizontal .nb-topic-heading { width: 180px; flex-shrink: 0; align-self: stretch; padding: 12px 0 0 16px; border-left: 2px solid #111; }
+      .layout-vertical .nb-topic-heading { width: 100%; flex-shrink: 0; margin-top: 16px; padding: 12px 0 6px; border-bottom: 2px solid #111; }
+      .layout-horizontal .nb-dots-empty { width: 400px; flex-shrink: 0; }
+      .layout-vertical .nb-dots-empty { width: 100%; min-height: 160px; }
+      /* Reading: nothing that edits (the search, Topic and the layout switch, the remove buttons, the canvases' pencils),
+         and rows aren't dragged; the panes scroll smoothly. Editing: rows show they can be picked up. */
+      .notebook-reading-mode :is(.nb-search, .nb-outline-remove, .nb-pencil) { display: none; }
+      .notebook-reading-mode .dots-container { scroll-behavior: smooth; }
+      .notebook-wrapper:not(.notebook-reading-mode) .nb-outline-item[draggable="true"] { cursor: grab; }
+      .is-flash { animation: nb-flash 1s ease; }
+      @keyframes nb-flash { from { box-shadow: 0 0 0 2px #1c1917; } to { box-shadow: 0 0 0 2px transparent; } }
+      @media (max-width: 767px) {
+        #collection-content.is-notebooks { padding: 16px 12px 0; }
+        .nb-body { height: auto; flex: 1 1 0; }
+        .nb-header { gap: 8px; }
+        .nb-title-input { font-size: 1.15rem; }
+        .nb-btn span:not(.nb-glyph) { display: none; }
+        .layout-horizontal .nb-dots-empty { width: min(400px, 85vw); }
+        /* The spine, cover and outline alone are wider than a phone, so the whole notebook scrolls sideways: the dots'
+           row as wide as its cards, or their column as wide as the screen. */
+        .notebook-wrapper { height: auto; overflow-x: auto; overscroll-behavior-x: contain; }
+        .layout-horizontal .dots-container { flex: none; overflow: hidden auto; }
+        .layout-vertical .dots-container { flex: none; width: 100%; }
+        .nb-board-tools { bottom: 8px; max-width: calc(100% - 16px); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .dots-container.is-relayout, .is-flash { animation: none; }
+        .notebook-reading-mode .dots-container { scroll-behavior: auto; }
+        .notebook-wrapper :is(.pane-cover-group, .pane-outline) { transition: none !important; }
       }
 
       /* Space: a full-viewport graph canvas; only the notebook dock floats above it. */
@@ -671,6 +1206,9 @@
       /* The Orbit view switch, beside the background switch. */
       .space-view-fab { left: 4.25rem; }
       .space-view-fab svg { width: 1.2rem; height: 1.2rem; }
+      /* Manage Tags, under the background switch. */
+      .space-tags-fab { top: 4.25rem; }
+      .space-tags-fab svg { width: 1.15rem; height: 1.15rem; }
       /* Orbit view's rings: one faint circle round each centre dot, in that dot's colour (space.js sets --orbit-color
          and keeps the centres on the dots), fading in and out with the view. In the view, focus fades everything
          outside the family to 0.15. */
@@ -804,7 +1342,90 @@
         border-radius: 0.4rem; font-size: 0.7rem; color: #a8a29e;
       }
       .space-doc-tab-close:hover { background: #f5f5f4; color: #1c1917; }
-      .space-doc-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+      /* Under the tabs: the Connections sidebar on the left, then the page, which gives up the sidebar's width as it
+         slides in (space.js toggles .has-connections on the page window) and takes it back as it slides out. */
+      .space-doc-main { position: relative; display: flex; flex: 1; min-height: 0; width: 100%; overflow: hidden; }
+      .space-doc-scroll { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; }
+      .connection-sidebar {
+        --connection-width: 280px;
+        display: flex; justify-content: flex-end; width: 0; flex-shrink: 0; overflow: hidden; visibility: hidden;
+        transition: width 0.3s ease, box-shadow 0.3s ease, visibility 0s linear 0.3s;
+      }
+      .space-doc.has-connections .connection-sidebar { width: var(--connection-width); visibility: visible; transition: width 0.3s ease, box-shadow 0.3s ease; }
+      .connection-sidebar-inner {
+        display: flex; flex-direction: column; flex-shrink: 0; width: var(--connection-width); height: 100%;
+        border-right: 1px solid #e5e5e5; background: #fafafa; color: #1c1917;
+      }
+      .connection-sidebar, .connection-sidebar * { border-radius: 0 !important; }
+      .connection-sidebar-head {
+        display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 8px;
+        padding: 8px 8px 8px 16px; border-bottom: 1px solid #e5e5e5;
+      }
+      .connection-sidebar-title { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #78716c; }
+      .connection-hide, .connection-toggle {
+        display: inline-flex; align-items: center; gap: 4px; padding: 4px 8px; border: none; background: rgba(0, 0, 0, 0.05);
+        cursor: pointer; font-size: 0.72rem; font-weight: 600; line-height: 1.2; color: #57534e;
+        transition: background 120ms ease, color 120ms ease;
+      }
+      .connection-hide svg { width: 0.75rem; height: 0.75rem; }
+      .connection-toggle { align-self: stretch; margin-right: 8px; border-radius: 0; }
+      .connection-toggle svg { width: 0.9rem; height: 0.9rem; }
+      .connection-hide:hover, .connection-toggle:hover { background: rgba(0, 0, 0, 0.1); color: #1c1917; }
+      .connection-toggle[aria-expanded="true"] { background: #1c1917; color: #fff; }
+      .connection-hide:focus-visible, .connection-toggle:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      /* The family tree: the dot's parents, then its children, each a flat row that opens that dot. */
+      .connection-family { flex: 1; min-height: 6rem; overflow-y: auto; overscroll-behavior: contain; padding: 16px; border-bottom: 1px solid #e5e5e5; }
+      .connection-family-head {
+        display: flex; align-items: baseline; justify-content: space-between; margin: 0 0 6px;
+        font-size: 0.66rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #78716c;
+      }
+      .connection-family-head small { font-size: 0.66rem; font-weight: 500; letter-spacing: 0; color: #a8a29e; }
+      .connection-family-list + .connection-family-head, .connection-family-empty + .connection-family-head { margin-top: 16px; }
+      .connection-family-list { margin: 0; padding: 0; list-style: none; }
+      .connection-family-empty { margin: 0 0 4px; padding: 4px 8px; font-size: 0.78rem; color: #a8a29e; }
+      .connection-item {
+        display: flex; width: 100%; align-items: center; gap: 8px; margin-bottom: 4px; padding: 4px 8px;
+        border: 0; background: transparent; cursor: pointer; text-align: left;
+        font-size: 0.8rem; font-weight: 500; color: #292524; transition: background 0.2s;
+      }
+      .connection-item:hover { background: rgba(0, 0, 0, 0.05); }
+      .connection-item:focus-visible { background: rgba(0, 0, 0, 0.05); outline: 2px solid #1c1917; outline-offset: -2px; }
+      .connection-item .space-type-dot { width: 8px; height: 8px; border-radius: 999px !important; }
+      .connection-item-title { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .connection-item-both { flex-shrink: 0; font-size: 0.75rem; color: #a8a29e; }
+      /* Local Orbit: the dot pinned at the centre, its parents above and children below (space.js runs its forces).
+         On a short screen it gives up height so the lists above keep at least half the sidebar. */
+      .connection-orbit { position: relative; height: min(250px, 50%); flex-shrink: 0; overflow: hidden; background: #f0f0f0; }
+      .connection-orbit-caption {
+        position: absolute; left: 10px; top: 8px; pointer-events: none;
+        font-size: 0.6rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #a8a29e;
+      }
+      .orbit-mini { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; touch-action: none; user-select: none; -webkit-user-select: none; }
+      .orbit-mini marker polygon { fill: rgba(0, 0, 0, 0.3); }
+      .orbit-mini-link { stroke: rgba(0, 0, 0, 0.3); stroke-width: 1px; stroke-linecap: round; }
+      .orbit-mini-node { cursor: pointer; }
+      .orbit-mini-node.is-center { cursor: default; }
+      .orbit-mini-node.is-dragging { cursor: grabbing; }
+      .orbit-mini-core { transform-box: fill-box; transform-origin: center; transition: transform 140ms ease; }
+      .orbit-mini-node:not(.is-center):hover .orbit-mini-core { transform: scale(1.25); }
+      .orbit-mini-node.is-dragging .orbit-mini-core { transform: scale(1.3); }
+      .orbit-mini-label {
+        font-size: 10px; font-weight: 500; fill: #44403c; text-anchor: middle; dominant-baseline: hanging;
+        paint-order: stroke; stroke: #f0f0f0; stroke-width: 3px; stroke-linejoin: round; pointer-events: none;
+      }
+      .orbit-mini-node.is-center .orbit-mini-label { font-weight: 700; fill: #1c1917; }
+      @media (min-width: 768px) {
+        /* The text toolbar dock stays centred on the page, not under the sidebar. */
+        .space-doc.has-connections .space-doc-dock { left: calc(50% + 140px); max-width: calc(100vw - 280px - 1.5rem); }
+      }
+      @media (max-width: 767px) {
+        /* Too narrow to share: the sidebar slides in over the page instead of pushing it. */
+        .connection-sidebar { --connection-width: min(280px, 85vw); position: absolute; left: 0; top: 0; bottom: 0; z-index: 7; }
+        .space-doc.has-connections .connection-sidebar { box-shadow: 4px 0 12px rgba(0, 0, 0, 0.1); }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .connection-sidebar, .space-doc.has-connections .connection-sidebar { transition: none; }
+      }
       /* Full-width page: the editor runs edge to edge between faint dashed guides, and the title and badges
          sit at the same inset (--space-doc-inset) as the text inside those guides. */
       .space-doc-page { --space-doc-inset: calc(1rem + 1px); width: 100%; padding: 1.1rem 2rem 0; }
@@ -852,8 +1473,168 @@
       .space-delete-btn.is-cancel:hover { background: #f5f5f4; }
       .space-delete-btn:disabled { cursor: not-allowed; opacity: 0.45; }
       .space-delete-btn:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
-      .space-doc-meta { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.4rem; padding: 0 var(--space-doc-inset); }
-      .space-doc-meta .space-badge { background: rgba(231, 229, 228, 0.6); }
+      .space-doc-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 0.4rem; padding: 0 var(--space-doc-inset); }
+      .space-doc-meta .space-badge { margin-right: 0.4rem; background: rgba(231, 229, 228, 0.6); }
+      /* A dot's faceted tags after its badges, flowing (and wrapping) with them, then + Add Tag: one square group per
+         Type, its label once, then a badge per Name. Reading or editing, each Name's ✕ shows on hover or focus
+         (always, on touch screens). */
+      .space-dot-tags { display: contents; }
+      .space-dot-tags[hidden] { display: none; }
+      .tag-type-group {
+        display: inline-flex; flex-wrap: wrap; align-items: center; row-gap: 2px; max-width: 100%; box-sizing: border-box;
+        margin-right: 6px; padding: 2px 4px 2px 8px; border: 1px solid #e5e5e5; border-radius: 0; background: rgba(0, 0, 0, 0.02);
+        font-size: 0.72rem; line-height: 1.2; color: #44403c;
+      }
+      .tag-type-label { margin-right: 6px; font-size: 0.9em; font-weight: 600; color: #1c1917; }
+      /* Tinted with the tag's colour (Manage Tags sets it; the dot gray until then), edged in it solid on the left. */
+      .tag-name-badge {
+        display: inline-flex; align-items: center; gap: 4px; margin-right: 4px; padding: 2px 6px; border-radius: 0;
+        border-left: 2px solid var(--tag-color); background: var(--tag-tint);
+      }
+      .tag-name-badge:last-child { margin-right: 0; }
+      .space-dot-tag {
+        display: inline-flex; align-items: center; gap: 4px; margin-right: 4px; padding: 4px 8px;
+        border: 0; border-radius: 0 !important; background: rgba(0, 0, 0, 0.05);
+        font: inherit; font-size: 0.72rem; line-height: 1.2; color: #44403c;
+      }
+      .space-dot-tag-remove {
+        display: inline-flex; align-items: center; margin: -2px -6px -2px 0; padding: 2px 5px;
+        border: 0; border-radius: 0 !important; background: transparent;
+        font-size: 0.68rem; line-height: 1.2; color: #78716c; cursor: pointer; opacity: 0; transition: opacity 120ms ease;
+      }
+      .tag-name-badge:hover .space-dot-tag-remove, .tag-name-badge:focus-within .space-dot-tag-remove { opacity: 1; }
+      .space-dot-tag-remove:hover, .space-dot-tag-remove:focus-visible { background: rgba(0, 0, 0, 0.08); color: #1c1917; outline: none; }
+      @media (hover: none) { .space-dot-tag-remove { opacity: 1; } }
+      .space-dot-tag-add { font-weight: 600; color: #57534e; cursor: pointer; transition: background 120ms ease, color 120ms ease; }
+      .space-dot-tag-add:hover, .space-dot-tag-add[aria-expanded="true"] { background: rgba(0, 0, 0, 0.1); color: #1c1917; }
+      .space-dot-tag-add:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      /* Add Tag: a sharp popover right below the button; each field drops down the Types / Names used across Space. */
+      .space-tag-pop, .space-tag-pop * { border-radius: 0 !important; }
+      .space-tag-pop { width: min(16rem, calc(100vw - 1rem)); padding: 0.75rem; }
+      .space-tag-combo { position: relative; }
+      .space-tag-input {
+        width: 100%; box-sizing: border-box; padding: 0.45rem 0.55rem; border: 1px solid #d6d3d1;
+        background: #fff; font: inherit; font-size: 0.82rem; color: #1c1917; outline: none;
+      }
+      .space-tag-input::placeholder { color: #a8a29e; }
+      .space-tag-input:focus { border-color: #1c1917; }
+      .space-tag-input.is-invalid { border-color: #be123c; }
+      .space-tag-suggest {
+        position: absolute; top: calc(100% - 1px); left: 0; right: 0; z-index: 1; display: flex;
+        flex-direction: column; overflow-y: auto; overscroll-behavior: contain;
+        border: 1px solid #1c1917; background: #fff; box-shadow: 0 10px 24px rgba(28, 25, 23, 0.12);
+      }
+      .space-tag-suggest[hidden] { display: none; }
+      .space-tag-option {
+        flex-shrink: 0; padding: 0.4rem 0.55rem; border: 0; background: transparent; text-align: left;
+        font-size: 0.8rem; color: #292524; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer;
+      }
+      .space-tag-option:hover, .space-tag-option:focus-visible { background: #f5f5f4; outline: none; }
+      .space-tag-save {
+        height: 2.1rem; padding: 0 1rem; border: 0; background: #333; color: #fff;
+        font-size: 0.75rem; font-weight: 600; cursor: pointer; transition: background 120ms ease;
+      }
+      .space-tag-save:hover, .space-tag-save:focus-visible { background: #1c1917; outline: none; }
+      /* Manage Tags: a sharp sheet, every Type on the left and the selected Type's Names on the right, each column
+         scrolling on its own. A row's ✏️ / 🗑️ show on hover or focus (always, on touch screens). */
+      .space-tag-sheet, .space-tag-sheet * { border-radius: 0 !important; }
+      .space-tag-sheet {
+        position: relative; display: flex; flex-direction: column; width: 100%; max-width: 40rem; height: min(28rem, 100%);
+        background: #fff; border: 1px solid #e5e5e5; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        animation: space-pop-in 180ms ease-out;
+      }
+      .space-tag-sheet-head {
+        display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+        padding: 0.75rem 0.75rem 0.75rem 1.1rem; border-bottom: 1px solid #e5e5e5;
+      }
+      .space-tag-sheet-title { margin: 0; font-size: 1rem; font-weight: 700; color: #1c1917; }
+      .space-tag-sheet-close {
+        display: inline-flex; width: 2rem; height: 2rem; flex-shrink: 0; align-items: center; justify-content: center;
+        border: 1px solid transparent; background: transparent; font-size: 0.85rem; color: #57534e; cursor: pointer;
+        transition: background 120ms ease, border-color 120ms ease;
+      }
+      .space-tag-sheet-close:hover, .space-tag-sheet-close:focus-visible { background: #f5f5f4; border-color: #e5e5e5; color: #1c1917; outline: none; }
+      .space-tag-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); flex: 1; min-height: 0; }
+      .space-tag-col { display: flex; flex-direction: column; min-height: 0; }
+      .space-tag-col + .space-tag-col { border-left: 1px solid #e5e5e5; }
+      .space-tag-col-head {
+        flex-shrink: 0; margin: 0; padding: 0.65rem 1.1rem 0.4rem; font-size: 0.66rem; font-weight: 700; letter-spacing: 0.08em;
+        text-transform: uppercase; color: #a8a29e; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      }
+      /* Each search box and its + (a new Type, or a Name under the selected Type) side by side. */
+      .space-tag-search-wrap {
+        display: flex; gap: 8px; align-items: center; width: 100%; box-sizing: border-box; flex-shrink: 0;
+        margin-bottom: 8px; padding: 0 1.1rem;
+      }
+      .space-tag-search {
+        display: block; box-sizing: border-box; flex: 1; min-width: 0; width: 100%; padding: 4px 8px;
+        border: 1px solid #e5e5e5; border-radius: 0; background: transparent; outline: none;
+        font: inherit; font-size: 0.8rem; color: #1c1917; transition: border-color 120ms ease;
+      }
+      .space-tag-search::placeholder { color: #a8a29e; }
+      .space-tag-search:focus { border-color: #1c1917; }
+      .add-tag-btn {
+        flex-shrink: 0; border-radius: 0; border: 1px solid #e5e5e5; background: transparent; padding: 4px 12px;
+        font: inherit; font-size: 0.8rem; font-weight: 600; color: #1c1917; cursor: pointer; transition: background 0.2s;
+      }
+      .add-tag-btn:hover:not(:disabled) { background: #f5f5f5; }
+      .add-tag-btn:focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
+      .add-tag-btn:disabled { color: #a8a29e; cursor: not-allowed; }
+      .space-tag-row.is-drafting { padding-right: 0.75rem; }
+      .space-tag-list { flex: 1; min-height: 0; margin: 0; padding: 0 0 0.5rem; list-style: none; overflow-y: auto; overscroll-behavior: contain; }
+      .space-tag-empty { padding: 0.35rem 1.1rem; font-size: 0.78rem; line-height: 1.4; color: #a8a29e; }
+      .space-tag-row { display: flex; align-items: center; gap: 2px; min-height: 2.25rem; padding-right: 0.5rem; }
+      .space-tag-row:hover { background: #fafaf9; }
+      .space-tag-row.is-selected { background: #f5f5f4; box-shadow: inset 2px 0 0 #1c1917; }
+      .space-tag-row-main {
+        display: flex; flex: 1; min-width: 0; align-self: stretch; align-items: center; gap: 0.5rem; padding: 0 0.5rem 0 1.1rem;
+        border: 0; background: transparent; font: inherit; font-size: 0.84rem; color: #292524; text-align: left;
+      }
+      button.space-tag-row-main { cursor: pointer; }
+      button.space-tag-row-main:focus-visible { outline: 2px solid #1c1917; outline-offset: -2px; }
+      .space-tag-row.is-selected .space-tag-row-main { font-weight: 600; color: #1c1917; }
+      .space-tag-row-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .space-tag-row-count { margin-left: auto; font-size: 0.7rem; font-weight: 400; color: #a8a29e; font-variant-numeric: tabular-nums; }
+      .space-tag-row-action {
+        display: inline-flex; width: 1.75rem; height: 1.75rem; flex-shrink: 0; align-items: center; justify-content: center;
+        border: 0; background: transparent; font-size: 0.8rem; line-height: 1; cursor: pointer;
+        opacity: 0; filter: grayscale(1); transition: opacity 120ms ease, filter 120ms ease, background 120ms ease;
+      }
+      .space-tag-row:hover .space-tag-row-action, .space-tag-row:focus-within .space-tag-row-action { opacity: 0.75; }
+      .space-tag-row .space-tag-row-action:hover, .space-tag-row .space-tag-row-action:focus-visible { opacity: 1; filter: none; background: rgba(0, 0, 0, 0.06); outline: none; }
+      .space-tag-row-input {
+        flex: 1; min-width: 0; margin-left: 0.6rem; padding: 0.3rem 0.45rem; border: 1px solid #1c1917; background: #fff;
+        font: inherit; font-size: 0.84rem; color: #1c1917; outline: none;
+      }
+      .space-tag-row.is-confirming { gap: 4px; background: rgba(185, 28, 28, 0.05); }
+      .space-tag-row-confirm { flex: 1; min-width: 0; padding-left: 1.1rem; font-size: 0.78rem; color: #b91c1c; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .space-tag-row-btn {
+        height: 1.75rem; flex-shrink: 0; padding: 0 0.6rem; border: 1px solid #e5e5e5; background: #fff;
+        font-size: 0.72rem; font-weight: 600; color: #44403c; cursor: pointer; transition: background 120ms ease;
+      }
+      .space-tag-row-btn:hover { background: #f5f5f4; }
+      .space-tag-row-btn.is-danger { border-color: #b91c1c; background: #b91c1c; color: #fff; }
+      .space-tag-row-btn.is-danger:hover { background: #991b1b; }
+      .space-tag-row-btn:focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
+      @media (hover: none) { .space-tag-row-action { opacity: 0.75; } }
+      /* A Name's colour: a 12px square opening a sharp popover of the dot palette and a custom picker. */
+      .space-tag-row.has-swatch .space-tag-row-main { padding-left: 0.4rem; }
+      .space-tag-swatch-btn {
+        display: inline-flex; width: 1.5rem; height: 1.5rem; flex-shrink: 0; align-items: center; justify-content: center;
+        margin-left: 0.7rem; padding: 0; border: 1px solid transparent; background: transparent; cursor: pointer;
+        transition: border-color 120ms ease;
+      }
+      .space-tag-swatch-btn:hover, .space-tag-swatch-btn[aria-expanded="true"] { border-color: #d6d3d1; }
+      .space-tag-swatch-btn:focus-visible { outline: 2px solid #1c1917; outline-offset: 0; }
+      .space-tag-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 0; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12); }
+      .space-tag-color-pop {
+        position: absolute; z-index: 2; width: 15rem; padding: 0.75rem; background: #fff; border: 1px solid #e5e5e5;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); animation: space-pop-in 140ms ease-out;
+      }
+      .space-tag-color-pop .space-pop-label:first-child { margin-top: 0; }
+      .space-tag-color-pop .space-swatches { gap: 0.3rem; margin-top: 0.45rem; }
+      .space-tag-color-pop .space-swatch:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      .space-tag-color-hex { font-size: 0.78rem; font-weight: 600; letter-spacing: 0.02em; color: #57534e; font-variant-numeric: tabular-nums; }
       /* The dots the open one comes from, as flat square tags in the tab bar just right of its tab (past a thin
          rule); each opens its parent. A long row scrolls sideways rather than squeezing the tabs. */
       .parent-links-container {
@@ -2288,6 +3069,7 @@
         #view-space { --space-cx: 50%; --space-cy: calc(50% - 3rem); --space-floor: calc(6.75rem + env(safe-area-inset-bottom)); }
         .space-fab { left: 0.9rem; top: 0.9rem; }
         .space-view-fab { left: 3.9rem; }
+        .space-tags-fab { top: 3.9rem; }
         #space-bg-menu { left: 0.9rem !important; top: 3.9rem !important; }
         .space-overlay { align-items: flex-end; padding: 0.5rem 0.5rem calc(6.25rem + env(safe-area-inset-bottom)); }
         .space-sheet { max-height: 100%; overflow-y: auto; }
@@ -2306,13 +3088,94 @@
       @media (prefers-reduced-motion: reduce) {
         #view-space:not(.hidden), .space-menu, .space-toast, .space-overlay, .space-sheet, .space-doc, .space-delete-overlay { animation: none; transition: none; }
       }
-      /* Until we know whether sign-in is required, keep the nav invisible without shifting layout. */
-      body.ficus-auth-pending #notebook-tabs { visibility: hidden; }
+      /* Signed out (and until the session and the user's data are in), only the Cover shows: no section tabs and no
+         Sign Out, and the sign-in button once we know no one is signed in. */
       body.ficus-locked { --notebook-tabs-rail: 0px; }
-      body.ficus-locked #notebook-tabs { display: none !important; }
+      body.ficus-locked #notebook-tabs, body.ficus-locked .ficus-account { display: none !important; }
       body.ficus-locked.notebook-page { padding-bottom: env(safe-area-inset-bottom); }
       .ficus-signin-gate { display: none; }
-      body.ficus-locked .ficus-signin-gate { display: flex; }
+      body.ficus-locked:not(.ficus-auth-pending) .ficus-signin-gate { display: inline-flex; }
+      .ficus-signin-btn {
+        align-items: center; gap: 0.6rem; height: 44px; margin-top: 0.75rem; padding: 0 1.5rem; border: 1px solid #1c1917; border-radius: 0;
+        background: #fff; font-size: 0.875rem; font-weight: 600; color: #1c1917; cursor: pointer; transition: background-color 0.15s, color 0.15s;
+      }
+      .ficus-signin-btn:hover { background: #1c1917; color: #fff; }
+      .ficus-signin-btn:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      .ficus-signin-btn:disabled { cursor: wait; opacity: 0.6; }
+      .ficus-signin-note { max-width: 22rem; margin-top: 0.75rem; font-size: 0.75rem; color: #78716c; }
+      .ficus-signin-note:empty { display: none; }
+      /* Signed in: the Google profile picture and Sign Out, small and square in the top-right corner over every view,
+         with the Drive sync state under them (and Reconnect once the Google token has run out). */
+      .ficus-account {
+        position: fixed; top: max(12px, env(safe-area-inset-top)); right: max(12px, env(safe-area-inset-right)); z-index: 60;
+        display: flex; flex-direction: column; align-items: flex-end; gap: 4px; pointer-events: none;
+      }
+      .ficus-account-bar { display: flex; align-items: center; gap: 6px; }
+      .ficus-avatar { width: 28px; height: 28px; border: 1px solid #d6d3d1; border-radius: 0; background: #f5f5f4; object-fit: cover; pointer-events: auto; }
+      .ficus-avatar[hidden] { display: none; }
+      .ficus-save-status {
+        display: inline-flex; align-items: center; gap: 4px; padding: 0 4px; background: rgba(255, 255, 255, 0.9);
+        font-size: 0.68rem; font-weight: 500; color: #8c8c8c; white-space: nowrap;
+      }
+      .ficus-save-status:empty { display: none; }
+      .ficus-save-status.is-error { color: #b91c1c; }
+      /* The sans stack puts the one-colour Noto Emoji first; the sync dots need their colours. */
+      .ficus-sync-dot { font-family: "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif; font-size: 0.6rem; }
+      .ficus-reconnect {
+        height: 24px; padding: 0 8px; border: 1px solid #b91c1c; border-radius: 0; background: #fff; pointer-events: auto;
+        font-size: 0.68rem; font-weight: 600; color: #b91c1c; cursor: pointer;
+      }
+      .ficus-reconnect[hidden] { display: none; }
+      .ficus-reconnect:hover { background: #b91c1c; color: #fff; }
+      .ficus-reconnect:focus-visible { outline: 2px solid #b91c1c; outline-offset: 2px; }
+      .ficus-reconnect:disabled { cursor: wait; opacity: 0.6; }
+      /* How far in from the right edge the account corner reaches (its widest line is "Offline (Saving locally)"):
+         the headers along the top of Collection keep their buttons clear of it (the notebook pages are padded 32px at
+         the right). On phones Collection starts below it instead. */
+      :root { --ficus-account-room: 0px; }
+      body:not(.ficus-locked) { --ficus-account-room: 168px; }
+      .nb-shelf-bar, #collection-content.is-notebook-open .nb-header { padding-right: max(0px, calc(var(--ficus-account-room) - 32px)); }
+      .ctags-preview-head { padding-right: max(16px, var(--ficus-account-room)); }
+      /* Phones: one 28px row (the sync dot, the picture and Sign Out; the sync words stay for screen readers), with
+         Reconnect wrapping under it. An open dot's tab bar stops short of it, and Collection starts below it. */
+      @media (max-width: 767px) {
+        .ficus-account { flex-direction: row; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 6px; max-width: 160px; }
+        .ficus-save-status { order: -1; padding: 0; background: none; }
+        .ficus-sync-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+        body:not(.ficus-locked) { --ficus-account-room: 140px; }
+        body:not(.ficus-locked) .space-doc-tabs { padding-right: var(--ficus-account-room); }
+        body:not(.ficus-locked) #collection-content { padding-top: 52px; }
+        .nb-shelf-bar, #collection-content.is-notebook-open .nb-header { padding-right: 0; }
+        .ctags-preview-head { padding-right: 16px; }
+      }
+      .ficus-signout {
+        height: 28px; padding: 0 10px; border: 1px solid #d6d3d1; border-radius: 0; background: #fff; pointer-events: auto;
+        font-size: 0.72rem; font-weight: 600; color: #44403c; cursor: pointer; transition: border-color 0.15s, color 0.15s;
+      }
+      .ficus-signout:hover { border-color: #1c1917; color: #1c1917; }
+      .ficus-signout:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      .ficus-signout:disabled { cursor: wait; opacity: 0.6; }
+      /* Loading the user's data, a failed load, and the offer to sync this browser's data, over everything. */
+      .ficus-gate { position: fixed; inset: 0; z-index: 90; display: flex; align-items: center; justify-content: center; padding: 24px; background: #fafaf9; }
+      .ficus-gate.hidden { display: none; }
+      .ficus-gate-box { display: flex; width: 100%; max-width: 360px; flex-direction: column; align-items: center; gap: 12px; text-align: center; }
+      .ficus-gate.is-prompt .ficus-gate-box { padding: 24px; border: 1px solid #e5e5e5; background: #fff; }
+      .ficus-spinner { width: 20px; height: 20px; border: 2px solid #e5e5e5; border-top-color: #1c1917; border-radius: 50%; animation: fpv-spin 0.8s linear infinite; }
+      .ficus-gate:not(.is-busy) .ficus-spinner { display: none; }
+      .ficus-gate-title { margin: 0; font-size: 0.9rem; font-weight: 600; color: #1c1917; }
+      .ficus-gate-detail { margin: 0; font-size: 0.78rem; line-height: 1.45; color: #78716c; }
+      .ficus-gate-detail:empty, .ficus-gate-actions:empty { display: none; }
+      .ficus-gate-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 4px; }
+      .ficus-gate-btn {
+        height: 32px; padding: 0 14px; border: 1px solid #d6d3d1; border-radius: 0; background: #fff;
+        font-size: 0.78rem; font-weight: 600; color: #44403c; cursor: pointer;
+      }
+      .ficus-gate-btn:hover { border-color: #1c1917; color: #1c1917; }
+      .ficus-gate-btn.is-primary { border-color: #1c1917; background: #1c1917; color: #fff; }
+      .ficus-gate-btn:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      @media (prefers-reduced-motion: reduce) {
+        .ficus-spinner { animation-duration: 2.4s; }
+      }
       .capsule-line {
         white-space: pre-wrap;
         word-break: break-word;
@@ -2463,7 +3326,7 @@
       .ublock-rec-dot { animation: ublock-rec-pulse 1.2s ease-in-out infinite; }
     </style>
   </head>
-  <body class="notebook-page ficus-auth-pending min-h-screen text-slate-900 antialiased">
+  <body class="notebook-page ficus-locked ficus-auth-pending min-h-screen text-slate-900 antialiased">
     <svg width="0" height="0" class="absolute" aria-hidden="true" focusable="false">
       <symbol id="ficus-mandala" viewBox="0 0 64 64" fill="none" stroke="currentColor">
         <circle cx="32" cy="32" r="30" />
@@ -2511,47 +3374,46 @@
           </svg>
         </span><span class="tab-label">Space</span>
       </button>
+      <button type="button" id="tab-collection" data-view="collection" class="nav-tab">
+        <span class="tab-ico" aria-hidden="true">
+          <svg class="space-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square" stroke-linejoin="miter">
+            <path d="M2 3.5h12v2.5H2z" />
+            <path d="M3 6v7.5h10V6" />
+            <path d="M6.5 8.75h3" />
+          </svg>
+        </span><span class="tab-label">Collection</span>
+      </button>
     </nav>
     <div id="app-toast" class="pointer-events-none fixed bottom-24 left-1/2 z-[80] hidden -translate-x-1/2 rounded-2xl border border-indigo-200 bg-white px-4 py-3 text-sm font-semibold text-indigo-900 shadow-xl md:bottom-8" role="status" aria-live="polite"></div>
 
-    <main class="notebook-main mx-auto max-w-6xl px-4 py-5 pb-8 sm:px-6 md:pr-[var(--notebook-tabs-rail)] md:pb-8">
-      <div id="global-top-utility-bar" class="mb-4 hidden w-full flex-wrap items-center justify-end gap-2" aria-hidden="true">
-        <div class="flex flex-wrap items-center justify-end gap-2">
-        <button
-          type="button"
-          id="auth-google-btn"
-          data-ficus-signin
-          class="hidden inline-flex cursor-pointer items-center gap-1.5 rounded-xl border border-neutral-300 bg-white px-3.5 py-1.5 text-xs font-semibold text-neutral-900 transition hover:border-neutral-900 hover:bg-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60"
-        >
-          <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.35 11.1h-9.17v2.92h5.27c-.23 1.4-1.66 4.1-5.27 4.1-3.17 0-5.76-2.63-5.76-5.87s2.59-5.87 5.76-5.87c1.81 0 3.02.77 3.71 1.43l2.53-2.43C16.81 3.87 14.69 3 12.18 3 7.03 3 2.87 7.16 2.87 12.25s4.16 9.25 9.31 9.25c5.37 0 8.93-3.78 8.93-9.1 0-.61-.07-1.08-.16-1.3z" /></svg>
-          <span>Sign in with Google</span>
-        </button>
-        <div id="auth-user-chip" class="hidden inline-flex items-center gap-1.5 rounded-xl border border-neutral-200 bg-white py-1 pl-1 pr-1 text-xs font-semibold text-neutral-900">
-          <span id="auth-user-avatar" class="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-neutral-900 text-[11px] font-bold text-white" aria-hidden="true"></span>
-          <span id="auth-user-name" class="max-w-[7rem] truncate sm:max-w-[10rem]"></span>
-          <button
-            type="button"
-            id="auth-signout-btn"
-            class="rounded-lg px-1.5 py-0.5 text-[11px] font-medium text-neutral-500 transition hover:bg-neutral-100 hover:text-neutral-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900"
-          >Sign out</button>
-        </div>
-        </div>
+    <div id="ficus-account" class="ficus-account">
+      <div class="ficus-account-bar">
+        <img id="ficus-avatar" class="ficus-avatar" alt="" referrerpolicy="no-referrer" hidden />
+        <button type="button" id="ficus-signout" class="ficus-signout">Sign Out</button>
       </div>
+      <span id="ficus-save-status" class="ficus-save-status" role="status" aria-live="polite"></span>
+      <button type="button" id="ficus-reconnect" class="ficus-reconnect" hidden>Reconnect Google Drive</button>
+    </div>
+    <div id="ficus-gate" class="ficus-gate hidden" role="dialog" aria-modal="true" aria-labelledby="ficus-gate-title" aria-describedby="ficus-gate-detail">
+      <div class="ficus-gate-box">
+        <div class="ficus-spinner" aria-hidden="true"></div>
+        <p id="ficus-gate-title" class="ficus-gate-title"></p>
+        <p id="ficus-gate-detail" class="ficus-gate-detail"></p>
+        <div id="ficus-gate-actions" class="ficus-gate-actions"></div>
+      </div>
+    </div>
 
+    <main class="notebook-main mx-auto max-w-6xl px-4 py-5 pb-8 sm:px-6 md:pr-[var(--notebook-tabs-rail)] md:pb-8">
       <section id="view-cover">
         <div id="cover-view" class="cover-page flex min-h-[70vh] flex-col items-center justify-center px-4 py-16 text-center">
           <svg class="fig-logo mb-5 h-28 w-28 text-stone-900 sm:h-32 sm:w-32" aria-hidden="true"><use href="#ficus-mandala" /></svg>
           <h1 class="mb-2 text-3xl font-extrabold tracking-[0.18em] text-slate-900 sm:text-4xl">FICUS</h1>
           <p class="mb-8 text-base font-medium text-stone-500 sm:text-lg">When life gives you figs, make whatever.</p>
-          <button
-            type="button"
-            data-ficus-signin
-            class="ficus-signin-gate mt-3 cursor-pointer items-center gap-2 rounded-2xl border border-neutral-300 bg-white px-6 py-3 text-sm font-semibold text-neutral-900 transition hover:border-neutral-900 hover:bg-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60"
-          >
+          <button type="button" data-ficus-signin class="ficus-signin-gate ficus-signin-btn">
             <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M21.35 11.1h-9.17v2.92h5.27c-.23 1.4-1.66 4.1-5.27 4.1-3.17 0-5.76-2.63-5.76-5.87s2.59-5.87 5.76-5.87c1.81 0 3.02.77 3.71 1.43l2.53-2.43C16.81 3.87 14.69 3 12.18 3 7.03 3 2.87 7.16 2.87 12.25s4.16 9.25 9.31 9.25c5.37 0 8.93-3.78 8.93-9.1 0-.61-.07-1.08-.16-1.3z" /></svg>
-            <span>Sign in with Google</span>
+            <span>Log in with Google</span>
           </button>
-          <p class="ficus-signin-gate mt-3 text-xs font-medium text-stone-400">Sign in to open your notebook.</p>
+          <p id="ficus-signin-note" class="ficus-signin-note" role="alert"></p>
         </div>
       </section>
 
@@ -2573,6 +3435,7 @@
 
           <button type="button" id="space-bg-btn" class="space-fab space-bg-fab" aria-label="Background" aria-haspopup="menu" aria-expanded="false" aria-controls="space-bg-menu" title="Background"><span class="space-bg-fab-swatch" aria-hidden="true"></span></button>
           <button type="button" id="space-view-btn" class="space-fab space-view-fab" aria-label="Orbit view" aria-pressed="false" title="Orbit view"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true"><circle cx="10" cy="10" r="7" opacity="0.55" /><circle cx="10" cy="10" r="2.6" fill="currentColor" stroke="none" /><circle cx="14.95" cy="5.05" r="1.7" fill="currentColor" stroke="none" /></svg></button>
+          <button type="button" id="space-tags-btn" class="space-fab space-tags-fab" aria-label="Manage tags" aria-haspopup="dialog" aria-expanded="false" aria-controls="space-tag-manager" title="Manage tags"><svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 3.5h5.4l7.6 7.6-5.4 5.4-7.6-7.6Z" /><circle cx="6.7" cy="6.7" r="1.3" fill="currentColor" stroke="none" /></svg></button>
           <div id="space-bg-menu" class="space-menu hidden" role="menu" aria-label="Background" style="left: 1.25rem; top: 4.25rem;">
             <button type="button" role="menuitemradio" aria-checked="true" data-space-bg-choice="white"><span class="space-bg-swatch" aria-hidden="true"></span>White<span class="space-bg-check" aria-hidden="true">&#10003;</span></button>
             <button type="button" role="menuitemradio" aria-checked="false" data-space-bg-choice="black"><span class="space-bg-swatch" aria-hidden="true"></span>Black<span class="space-bg-check" aria-hidden="true">&#10003;</span></button>
@@ -2617,6 +3480,27 @@
             </form>
           </div>
 
+          <div id="space-tag-manager" class="space-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="space-tag-manager-title">
+            <div class="space-tag-sheet">
+              <div class="space-tag-sheet-head">
+                <h2 id="space-tag-manager-title" class="space-tag-sheet-title">Manage Tags</h2>
+                <button type="button" id="space-tag-manager-close" class="space-tag-sheet-close" aria-label="Close" title="Close">✕</button>
+              </div>
+              <div class="space-tag-cols">
+                <section class="space-tag-col" aria-labelledby="space-tag-types-head">
+                  <h3 id="space-tag-types-head" class="space-tag-col-head">Types</h3>
+                  <div class="space-tag-search-wrap"><input type="text" id="space-tag-type-search" class="space-tag-search" placeholder="Search types..." aria-label="Search types" autocomplete="off" spellcheck="false" /><button type="button" id="space-tag-type-add" class="add-tag-btn" aria-label="Add a Type" title="Add a Type">+</button></div>
+                  <ul id="space-tag-types" class="space-tag-list"></ul>
+                </section>
+                <section class="space-tag-col" aria-labelledby="space-tag-names-head">
+                  <h3 id="space-tag-names-head" class="space-tag-col-head">Names</h3>
+                  <div class="space-tag-search-wrap"><input type="text" id="space-tag-name-search" class="space-tag-search" placeholder="Search names..." aria-label="Search names" autocomplete="off" spellcheck="false" /><button type="button" id="space-tag-name-add" class="add-tag-btn" aria-label="Add a Name" title="Add a Name">+</button></div>
+                  <ul id="space-tag-names" class="space-tag-list"></ul>
+                </section>
+              </div>
+            </div>
+          </div>
+
           <div id="space-detail-modal" class="space-doc hidden" role="dialog" aria-modal="true" aria-labelledby="space-detail-title">
             <nav class="space-doc-tabs" aria-label="Open tabs">
               <button type="button" id="space-doc-home" class="space-doc-tab" title="Back to Space">
@@ -2637,23 +3521,57 @@
               </div>
               <nav id="space-detail-parents" class="parent-links-container" aria-label="Parent dots" hidden></nav>
             </nav>
-            <div id="space-doc-scroll" class="space-doc-scroll">
-              <article class="space-doc-page">
-                <div class="space-doc-head">
-                  <h1 id="space-detail-title" class="space-doc-title" contenteditable="plaintext-only" spellcheck="false" aria-label="Dot title"></h1>
-                  <button type="button" id="space-detail-delete" class="space-doc-delete" aria-haspopup="dialog" aria-label="Delete dot" title="Delete dot">
-                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                      <path d="M3.5 5.5h13M8 5.5V3.75h4V5.5M5.25 5.5l.8 10.75h7.9l.8-10.75M8.5 8.75v4.75M11.5 8.75v4.75" />
+            <div class="space-doc-main">
+              <aside id="connection-sidebar" class="connection-sidebar" aria-label="Connections">
+                <div class="connection-sidebar-inner">
+                  <div class="connection-sidebar-head">
+                    <span class="connection-sidebar-title">Connections</span>
+                    <button type="button" id="space-connection-hide" class="connection-hide" aria-controls="connection-sidebar" title="Hide connections">
+                      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" aria-hidden="true"><path d="M10 3.5 5.5 8l4.5 4.5" /></svg>
+                      <span>Hide</span>
+                    </button>
+                  </div>
+                  <div id="space-connection-family" class="connection-family"></div>
+                  <div id="space-connection-orbit" class="connection-orbit">
+                    <span class="connection-orbit-caption" aria-hidden="true">Local orbit</span>
+                    <svg id="space-orbit-mini" class="orbit-mini" aria-hidden="true">
+                      <defs>
+                        <marker id="mini-arrowhead" viewBox="0 0 10 7" markerWidth="8" markerHeight="5.6" refX="9.5" refY="3.5" orient="auto" markerUnits="userSpaceOnUse"><polygon points="0 0, 10 3.5, 0 7" /></marker>
+                        <marker id="mini-arrowhead-reverse" viewBox="0 0 10 7" markerWidth="8" markerHeight="5.6" refX="0.5" refY="3.5" orient="auto" markerUnits="userSpaceOnUse"><polygon points="10 0, 0 3.5, 10 7" /></marker>
+                      </defs>
+                      <g id="space-orbit-mini-links"></g>
+                      <g id="space-orbit-mini-nodes"></g>
                     </svg>
-                    <span>Delete</span>
-                  </button>
+                  </div>
                 </div>
-                <div class="space-doc-meta">
-                  <span id="space-detail-property" class="space-badge">Simple dot</span>
-                  <span class="space-badge"><span id="space-detail-type-dot" class="space-type-dot" aria-hidden="true"></span><span id="space-detail-kicker">Text dot</span></span>
-                </div>
-                <div id="space-detail-body" class="space-doc-body"></div>
-              </article>
+              </aside>
+              <div id="space-doc-scroll" class="space-doc-scroll">
+                <article class="space-doc-page">
+                  <div class="space-doc-head">
+                    <h1 id="space-detail-title" class="space-doc-title" contenteditable="plaintext-only" spellcheck="false" aria-label="Dot title"></h1>
+                    <button type="button" id="space-detail-delete" class="space-doc-delete" aria-haspopup="dialog" aria-label="Delete dot" title="Delete dot">
+                      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3.5 5.5h13M8 5.5V3.75h4V5.5M5.25 5.5l.8 10.75h7.9l.8-10.75M8.5 8.75v4.75M11.5 8.75v4.75" />
+                      </svg>
+                      <span>Delete</span>
+                    </button>
+                  </div>
+                  <div class="space-doc-meta">
+                    <button type="button" id="space-connection-toggle" class="connection-toggle" aria-controls="connection-sidebar" aria-expanded="false" aria-label="Connections" title="Show connections">
+                      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
+                        <path d="M8 4.5 4 11.5M8 4.5l4 7M4 11.5h8" stroke-opacity="0.55" />
+                        <circle cx="8" cy="4" r="2" fill="currentColor" stroke="none" />
+                        <circle cx="3.75" cy="12" r="1.75" fill="currentColor" stroke="none" />
+                        <circle cx="12.25" cy="12" r="1.75" fill="currentColor" stroke="none" />
+                      </svg>
+                    </button>
+                    <span id="space-detail-property" class="space-badge">Simple dot</span>
+                    <span class="space-badge"><span id="space-detail-type-dot" class="space-type-dot" aria-hidden="true"></span><span id="space-detail-kicker">Text dot</span></span>
+                    <div id="space-detail-tags" class="space-dot-tags" role="group" aria-label="Tags" hidden></div>
+                  </div>
+                  <div id="space-detail-body" class="space-doc-body"></div>
+                </article>
+              </div>
             </div>
           </div>
 
@@ -2673,6 +3591,46 @@
                 <button type="button" id="space-delete-cancel" class="space-delete-btn is-cancel">Cancel</button>
               </div>
             </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-collection" class="hidden" aria-label="Collection">
+        <div id="collection-view">
+          <aside id="collection-sidebar" aria-label="Collection tools">
+            <button type="button" class="collection-tool" data-collection-page="main" aria-label="Main Collection" title="Main Collection">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square" aria-hidden="true">
+                <path d="M2.5 2.5h4.25v4.25H2.5zM9.25 2.5h4.25v4.25H9.25zM2.5 9.25h4.25v4.25H2.5zM9.25 9.25h4.25v4.25H9.25z" />
+              </svg>
+            </button>
+            <button type="button" class="collection-tool" data-collection-page="tags" aria-label="Tags" title="Tags">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="miter" aria-hidden="true">
+                <path d="M2.5 2.5h5.25l5.75 5.75-5.25 5.25-5.75-5.75z" />
+                <path d="M5.25 4.75h.5v.5h-.5z" fill="currentColor" />
+              </svg>
+            </button>
+            <button type="button" class="collection-tool" data-collection-page="notebooks" aria-label="Notebooks" title="Notebooks">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square" aria-hidden="true">
+                <path d="M3.5 2h9.5v12H3.5z" />
+                <path d="M5.75 2v12M8 5.25h3M8 7.5h3" />
+              </svg>
+            </button>
+            <div class="collection-tool-divider" role="separator"></div>
+            <button type="button" class="collection-tool" data-collection-page="cells" aria-label="Cells" title="Cells">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square" aria-hidden="true">
+                <path d="M2.5 2.5h11v11h-11z" />
+                <path d="M2.5 6.25h11M2.5 9.75h11M6.5 2.5v11" />
+              </svg>
+            </button>
+            <button type="button" class="collection-tool" data-collection-page="templates" aria-label="Templates" title="Templates">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square" aria-hidden="true">
+                <path d="M2.5 2.5h11v11h-11z" />
+                <path d="M2.5 5.75h11M6.25 5.75v7.75" stroke-dasharray="1.5 1.25" />
+              </svg>
+            </button>
+          </aside>
+          <div id="collection-content" role="region" aria-labelledby="collection-title">
+            <h1 id="collection-title" class="collection-title">Main Collection</h1>
           </div>
         </div>
       </section>
@@ -2792,7 +3750,7 @@
         console.error("UniversalCanvasEditor failed to load");
       }
 
-      const APP_VIEWS = ["cover", "space"];
+      const APP_VIEWS = ["cover", "space", "collection"];
 
       // Bind notebook navigation first so editor/render failures cannot strand the UI.
       (function bindTopNavigationEarly() {
@@ -3539,14 +4497,6 @@
           else button.removeAttribute("aria-current");
         });
       }
-      function syncTopBar(viewName = activeView) {
-        const bar = document.getElementById("global-top-utility-bar");
-        if (!bar) return;
-        const show = viewName === "cover";
-        bar.classList.toggle("hidden", !show);
-        bar.classList.toggle("flex", show);
-        bar.setAttribute("aria-hidden", show ? "false" : "true");
-      }
       function showView(name) {
         try {
           if (!APP_VIEWS.includes(name)) name = "cover";
@@ -3560,11 +4510,15 @@
             document.getElementById(`view-${view}`)?.classList.toggle("hidden", view !== name);
           });
           paintNav();
-          syncTopBar(name);
           try {
             window.FicusSpace?.setActive(name === "space");
           } catch (spaceErr) {
             console.error("Space view failed", spaceErr);
+          }
+          try {
+            window.FicusCollection?.setActive(name === "collection");
+          } catch (collectionErr) {
+            console.error("Collection view failed", collectionErr);
           }
         } catch (err) {
           console.error("showView failed", err);
@@ -9231,7 +10185,6 @@
         return normalized;
       }
 
-      syncTopBar(activeView);
       document.querySelectorAll("[data-close]").forEach((button) => {
         button.addEventListener("click", () => closeOverlay(button.dataset.close));
       });
@@ -9257,103 +10210,287 @@
       }
     </script>
     <script>
+      /* Sign-in guard. Only the Cover shows until someone has signed in with Google and their work has come in from
+         their Google Drive (FicusDrive in ficus_drive.js, FicusStore in ficus_store.js); then the section tabs, their
+         profile picture, Sign Out and the sync state appear and Space opens. */
       (function initFicusAuth() {
-        const topSignInBtn = document.getElementById("auth-google-btn");
-        const chip = document.getElementById("auth-user-chip");
-        const avatar = document.getElementById("auth-user-avatar");
-        const nameEl = document.getElementById("auth-user-name");
-        const signOutBtn = document.getElementById("auth-signout-btn");
-        window.ficusAuthUser = null;
-        const client = window.ficusSupabase;
-        // Only the static site needs a signed-in user; the local server keeps working without one.
-        const hasLocalBackend = fetch("/api/health", { cache: "no-store" })
-          .then((res) => res.ok)
-          .catch(() => false);
+        const drive = window.FicusDrive;
+        const store = window.FicusStore;
+        const signOutBtn = document.getElementById("ficus-signout");
+        const reconnectBtn = document.getElementById("ficus-reconnect");
+        const avatar = document.getElementById("ficus-avatar");
+        const saveStatus = document.getElementById("ficus-save-status");
+        const signInNote = document.getElementById("ficus-signin-note");
+        const signInButtons = () => document.querySelectorAll("[data-ficus-signin]");
+        const gate = {
+          root: document.getElementById("ficus-gate"),
+          title: document.getElementById("ficus-gate-title"),
+          detail: document.getElementById("ficus-gate-detail"),
+          actions: document.getElementById("ficus-gate-actions"),
+        };
+        // Ficus runs in one tab at a time (a newly opened tab takes over), and signing out in one signs out all.
+        const channel = "BroadcastChannel" in window ? new BroadcastChannel("ficus") : null;
+        const tabId = Math.random().toString(36).slice(2);
+        // The session whose work is open (or opening) here, and the last account, to sign back in as.
+        let current = null;
+        let hint = "";
+        // space.js and collection.js load deferred; the views need them before they open.
+        const scriptsReady = document.readyState === "loading"
+          ? new Promise((resolve) => document.addEventListener("DOMContentLoaded", resolve, { once: true }))
+          : Promise.resolve();
 
-        async function applyAccessLock(user) {
-          const cloud = !(await hasLocalBackend);
-          const locked = !user && cloud;
-          document.body.classList.toggle("ficus-locked", locked);
-          document.body.classList.toggle("ficus-cloud", cloud);
+        function lock() {
+          document.body.classList.add("ficus-locked");
           document.body.classList.remove("ficus-auth-pending");
-          // The cover's own sign-in gate shows while locked.
-          topSignInBtn.classList.toggle("hidden", !client || Boolean(user) || locked);
-          if (locked && typeof showView === "function") showView("cover");
+          if (typeof showView === "function") showView("cover");
         }
 
-        if (!client) {
-          console.warn("Supabase auth unavailable: SDK or config missing.");
-          void applyAccessLock(null);
+        if (!drive || !store) {
+          console.warn("FICUS: sign-in unavailable (ficus_drive.js or ficus_store.js is missing).");
+          signInNote.textContent = "Sign-in is unavailable right now. Reload the page.";
+          signInButtons().forEach((button) => { button.disabled = true; });
+          lock();
           return;
         }
 
-        function paintAuth(session) {
-          const user = session?.user || null;
-          window.ficusAuthUser = user;
-          void applyAccessLock(user);
-          chip.classList.toggle("hidden", !user);
-          avatar.replaceChildren();
-          if (!user) {
-            nameEl.textContent = "";
-            chip.title = "";
-            return;
-          }
-          const meta = user.user_metadata || {};
-          const label = meta.full_name || meta.name || user.email || "Signed in";
-          const initial = label.charAt(0).toUpperCase();
-          nameEl.textContent = label;
-          chip.title = user.email || label;
-          if (meta.avatar_url) {
-            const img = document.createElement("img");
-            img.src = meta.avatar_url;
-            img.alt = "";
-            img.referrerPolicy = "no-referrer";
-            img.className = "h-full w-full object-cover grayscale";
-            img.addEventListener("error", () => { avatar.textContent = initial; }, { once: true });
-            avatar.appendChild(img);
-          } else {
-            avatar.textContent = initial;
-          }
+        // A full-screen panel over the app: `busy` shows the spinner, and `actions` ({ label, primary, onClick })
+        // put it in a box with those buttons.
+        function showGate({ title, detail = "", busy = false, actions = [] }) {
+          gate.title.textContent = title;
+          gate.detail.textContent = detail;
+          gate.root.classList.toggle("is-busy", busy);
+          gate.root.classList.toggle("is-prompt", actions.length > 0);
+          gate.root.setAttribute("aria-busy", busy ? "true" : "false");
+          gate.actions.replaceChildren(...actions.map(({ label, primary, onClick }) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = primary ? "ficus-gate-btn is-primary" : "ficus-gate-btn";
+            button.textContent = label;
+            button.addEventListener("click", onClick, { once: true });
+            return button;
+          }));
+          gate.root.classList.remove("hidden");
+          gate.actions.querySelector(".is-primary")?.focus();
         }
 
-        async function signInWithGoogle(button) {
-          button.disabled = true;
-          const { error } = await client.auth.signInWithOAuth({
-            provider: "google",
-            options: { redirectTo: window.location.origin + window.location.pathname },
+        // Offers to bring this browser's data from before Drive sync into the user's Drive (once per browser if
+        // they skip it), and does so if they accept. Resolves when they've chosen and any sync is done.
+        function offerLocalSync(found) {
+          const { dots, notebooks, tags, pages } = found.counts;
+          const parts = [];
+          if (dots) parts.push(`${dots} dot${dots === 1 ? "" : "s"}`);
+          if (notebooks) parts.push(`${notebooks} notebook${notebooks === 1 ? "" : "s"}`);
+          if (tags) parts.push("tags");
+          if (!parts.length && pages) parts.push("dot pages");
+          const what = parts.length > 1 ? `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}` : parts[0];
+          const them = parts.length === 1 && parts[0].startsWith("1 ") ? "it" : "them";
+          return new Promise((resolve) => {
+            const ask = (problem = "") => showGate({
+              title: "Local data found. Sync to cloud?",
+              detail: problem || `This browser has ${what} saved from before Google Drive sync. Syncing adds ${them} to `
+                + `your Ficus folder in Google Drive and then clears ${them} from this browser. Skipping leaves ${them} `
+                + "here, unused, and won't ask again.",
+              actions: [
+                { label: problem ? "Try again" : "Sync to cloud", primary: true, onClick: sync },
+                { label: "Skip", onClick: () => { store.skipLocalData(); resolve(); } },
+              ],
+            });
+            async function sync() {
+              showGate({ title: "Syncing to Google Drive\u2026", busy: true });
+              try {
+                await store.importLocalData(found);
+                resolve();
+              } catch (err) {
+                console.error("FICUS: syncing this browser's data failed", err);
+                ask(`The sync didn't finish (${err.message}). Nothing has been cleared from this browser.`);
+              }
+            }
+            ask();
           });
-          if (error) {
-            button.disabled = false;
-            window.alert(`Google sign-in failed: ${error.message}`);
-          }
         }
+
+        function paintAccount(session) {
+          const who = session.name && session.email && session.name !== session.email
+            ? `${session.name} (${session.email})` : session.email || session.name || "";
+          avatar.hidden = !session.picture;
+          if (session.picture) avatar.src = session.picture;
+          avatar.alt = who ? `Signed in as ${who}` : "";
+          avatar.title = who;
+        }
+
+        // Asks Ficus in other tabs to save and step aside, and waits (a little while at most) until they have.
+        function claimTab() {
+          if (!channel) return Promise.resolve();
+          return new Promise((resolve) => {
+            let busy = 0;
+            let done = false;
+            const finish = () => {
+              if (done) return;
+              done = true;
+              channel.removeEventListener("message", onMessage);
+              resolve();
+            };
+            function onMessage(event) {
+              const message = event.data || {};
+              if (message.to !== tabId) return;
+              if (message.type === "busy") busy += 1;
+              if (message.type === "released" && --busy <= 0) finish();
+            }
+            channel.addEventListener("message", onMessage);
+            channel.postMessage({ type: "claim", from: tabId });
+            setTimeout(() => { if (busy <= 0) finish(); }, 400);
+            setTimeout(finish, 15000);
+          });
+        }
+
+        channel?.addEventListener("message", async (event) => {
+          const message = event.data || {};
+          if (message.type === "signed-out") {
+            store.clear();
+            window.location.reload();
+            return;
+          }
+          if (message.type !== "claim" || message.from === tabId || !current) return;
+          channel.postMessage({ type: "busy", to: message.from });
+          current = null;
+          // Whatever can't reach Drive now stays on this device, where the other tab picks it up.
+          try { await store.flush(); } catch (_) {}
+          store.clear();
+          channel.postMessage({ type: "released", to: message.from });
+          document.body.classList.add("ficus-locked");
+          showGate({
+            title: "Ficus is open in another tab",
+            detail: "Ficus runs in one tab at a time, so your work is saved from one place.",
+            actions: [{ label: "Use here", primary: true, onClick: () => window.location.reload() }],
+          });
+        });
+
+        async function openUser(session) {
+          current = session;
+          hint = session.email || hint;
+          showGate({ title: "Loading your notebook from Google Drive\u2026", busy: true });
+          await claimTab();
+          if (current !== session) return;
+          try {
+            await store.load(session);
+          } catch (err) {
+            if (current !== session) return;
+            console.error("FICUS: loading from Google Drive failed", err);
+            if (err instanceof drive.AuthError) {
+              current = null;
+              gate.root.classList.add("hidden");
+              signInNote.textContent = "Your Google sign-in has run out. Log in again.";
+              lock();
+              return;
+            }
+            showGate({
+              title: "Couldn't load your notebook",
+              detail: err.message,
+              actions: [
+                { label: "Try again", primary: true, onClick: () => void openUser(session) },
+                { label: "Sign Out", onClick: () => void signOut() },
+              ],
+            });
+            return;
+          }
+          if (current !== session) return;
+          const found = store.findLocalData();
+          if (found) await offerLocalSync(found);
+          await scriptsReady;
+          // Uploads show through ficus_sw.js, so it should control the page before anything draws.
+          await drive.filesReady;
+          if (current !== session) return;
+          paintAccount(session);
+          gate.root.classList.add("hidden");
+          document.body.classList.remove("ficus-locked", "ficus-auth-pending");
+          showView("space");
+        }
+
+        // Google's popup only opens straight from a click, so the libraries are loaded ahead of it.
+        if (!drive.configured) {
+          signInButtons().forEach((button) => { button.disabled = true; });
+        }
+        drive.prepare().catch((err) => {
+          console.warn("FICUS: Google sign-in didn't load", err);
+          if (!current) signInNote.textContent = err.message;
+        });
+
         document.addEventListener("click", (event) => {
           const button = event.target.closest?.("[data-ficus-signin]");
           if (!button || button.disabled) return;
           event.preventDefault();
-          void signInWithGoogle(button);
-        });
-        // Safari restores this page from the back-forward cache if the user backs out of Google.
-        window.addEventListener("pageshow", () => {
-          document.querySelectorAll("[data-ficus-signin]").forEach((button) => { button.disabled = false; });
-        });
-
-        signOutBtn.addEventListener("click", async () => {
-          signOutBtn.disabled = true;
-          const { error } = await client.auth.signOut();
-          signOutBtn.disabled = false;
-          if (error) {
-            window.alert(`Sign out failed: ${error.message}`);
+          signInNote.textContent = "";
+          if (!drive.ready) {
+            signInNote.textContent = "Still connecting to Google. Try again in a moment.";
+            drive.prepare().then(() => { signInNote.textContent = ""; }, (err) => { signInNote.textContent = err.message; });
             return;
           }
-          // Drop the signed-in user's figs from memory.
-          window.location.reload();
+          button.disabled = true;
+          drive.signIn(hint).then((session) => {
+            button.disabled = false;
+            void openUser(session);
+          }, (err) => {
+            button.disabled = false;
+            signInNote.textContent = err.message;
+          });
         });
 
-        client.auth.onAuthStateChange((_event, session) => paintAuth(session));
-        client.auth.getSession().then(({ data, error }) => {
-          if (error) console.warn("Supabase session check failed:", error.message);
-          paintAuth(data?.session || null);
+        // A new token for the same account, once the old one has run out (Google tokens last about an hour).
+        reconnectBtn.addEventListener("click", () => {
+          if (!drive.ready) {
+            drive.prepare().catch((err) => window.alert(err.message));
+            return;
+          }
+          reconnectBtn.disabled = true;
+          drive.reconnect().then(() => store.retry(), (err) => {
+            if (!err.cancelled) window.alert(err.message);
+          }).finally(() => { reconnectBtn.disabled = false; });
+        });
+
+        // Changes not yet in Drive are sent first. If they can't be, they stay on this device until the next sign-in
+        // here, so it asks.
+        async function signOut() {
+          signOutBtn.disabled = true;
+          try {
+            await store.flush();
+          } catch (_) {
+            if (!window.confirm("Some changes haven't reached Google Drive yet. They'll stay on this device and go up the next time you sign in here. Sign out anyway?")) {
+              signOutBtn.disabled = false;
+              return;
+            }
+          }
+          current = null;
+          await store.signOut();
+          await drive.signOut();
+          channel?.postMessage({ type: "signed-out" });
+          window.location.reload();
+        }
+        signOutBtn.addEventListener("click", () => void signOut());
+
+        const SYNC_LABELS = {
+          synced: ["\u{1F7E2}", "Synced"],
+          saving: ["\u{1F7E1}", "Saving to Drive..."],
+          offline: ["\u{1F534}", "Offline (Saving locally)"],
+        };
+        store.onStatus((status, { needsAuth }) => {
+          const [mark, label] = SYNC_LABELS[status];
+          const dot = document.createElement("span");
+          dot.className = "ficus-sync-dot";
+          dot.setAttribute("aria-hidden", "true");
+          dot.textContent = mark;
+          const words = document.createElement("span");
+          words.className = "ficus-sync-label";
+          words.textContent = label;
+          saveStatus.title = label;
+          saveStatus.replaceChildren(dot, words);
+          saveStatus.classList.toggle("is-error", status === "offline");
+          reconnectBtn.hidden = !needsAuth;
+        });
+
+        drive.restore().then((session) => {
+          hint = session?.email || "";
+          if (session?.live) void openUser(session);
+          else lock();
         });
       })();
     </script>
