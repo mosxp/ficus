@@ -169,9 +169,22 @@ Block dots and the note editor share one block engine (`attachUBlock`, `BLOCK_TY
 
 The block types are Rich Note, Photo, Link, Checklist, File, Photo Album, Audio / Voice, Video, Calendar Event and Scrapboard.
 
-A **Calendar Event** block (`{ type: "calendar", eventId, title, start, end, allDay, htmlLink, calendarId: "primary" }`) stands for an event in the user's primary Google Calendar. Adding one opens a sheet with two tabs: **Find Event** searches upcoming events (`events.list` with the typed text), and **New Event** makes one from a title, start and end (`events.insert`). The block shows the event's date tile, title, when (all-day events by date) and a link that opens it in Google Calendar. Open, it keeps its size and offers **Change event**. The block keeps a copy of the event as it was picked; later edits in Google Calendar don't reach it.
+A **Calendar Event** block (`{ type: "calendar", eventId, title, start, end, allDay, htmlLink, calendarId: "primary", deleted? }`) stands for an event in the user's primary Google Calendar. Adding one opens the Calendar Event sheet with two tabs:
 
-In a block dot, a press on the empty grid (or the empty part of a frame) marks out a new block, by mouse, pen or finger. A finger draws through `touchstart` / `touchmove` / `touchend` (its `pointerdown` is ignored), and its `touchmove`s are cancelled (`preventDefault`, on a non-passive listener) so iOS Safari doesn't scroll the page instead. A second finger drops the block being drawn.
+- **Find Event** searches upcoming events (`events.list` with the typed text).
+- **New Event** makes one from a title, start and end (`events.insert`). A new event starts at the next hour. Picking a start time sets the end to 30 minutes later. The end may equal the start (a 0-minute event). **All day** swaps the time pickers for date pickers; the end date is the last day the event covers (Google's exclusive end is the day after).
+
+The block's Display state shows the event's date tile, title, when (a 0-minute event shows one time, all-day events show dates), a refresh button and a link that opens it in Google Calendar. Its Settings state is the same sheet: the pencil opens it on **Edit Event**, filled in from the block, and **Save Changes** patches the event in Google Calendar (`events.patch`). **Find Event** there switches the block to another event. After Google answers, the block is updated and saved, and the master file is written to Drive at once (`FicusStore.flush`).
+
+Changes made in Google Calendar come back to the block:
+
+- **When Space opens:** every block dot's calendar blocks are checked (`events.get`, a few at a time).
+- **When a block dot opens:** that dot's calendar blocks are checked.
+- **The refresh button:** checks one block on demand. If the sign-in has run out or Calendar isn't granted, it brings up Google's popup first.
+
+An event isn't looked up again within a minute of the last check. A block whose event was deleted in Google keeps its last details and is marked `deleted` ("No longer in your Google Calendar"). Its pencil then offers Find Event and New Event. Automatic checks need a live token that carries Calendar; otherwise they quietly do nothing.
+
+In a block dot, a press on the empty grid (or the empty part of a frame) marks out a new block, by mouse, pen or finger. A finger draws through `touchstart` / `touchmove` / `touchend` (its `pointerdown` is ignored), and its `touchmove`s are cancelled (`preventDefault`, on a non-passive listener) so iOS Safari doesn't scroll the page instead. A second finger drops the block being drawn. A finger moves a block by its grip and resizes it by its handles the same way. The corner handle resizes width and height together, snapped to the grid. On touch screens (no hover, or a coarse pointer), each block's grip, type symbol, Delete and Edit controls always show while the dot is being edited, and the corner handle is larger (32px) with its mark always visible.
 
 The shared note editor (`canvas-editor.js`) adds smart chips: "@" mentions for contacts, places, links and photos.
 
@@ -196,7 +209,7 @@ The numbered SQL files in `supabase/` belong to the old Supabase backend, which 
 
 Signing in is required however the app is served, the local server included. `ficus_drive.js` (`window.FicusDrive`) loads Google Identity Services and the Google API client (`gapi`, with the Drive v3 discovery document). It gets an access token for `drive.file calendar.events openid email profile` from the OAuth client in `FICUS_GOOGLE_CONFIG.clientId` (`index.html`), and hands it to `gapi.client.setToken`. The Calendar v3 discovery document is loaded separately, so if it fails Drive still works. The user's id is their Google account's `sub`, from the userinfo endpoint. The session (`{ uid, email, name, picture, accessToken, expiresAt, calendar }`) is kept in IndexedDB, so a reload within the token's hour opens straight in.
 
-Drive is required and Calendar is optional. `calendar` records whether Google granted `calendar.events` (with granular consent the user can untick it). Every new token, from sign-in or Reconnect, asks for both scopes. If the token lacks Calendar, the Calendar Event sheet shows **Connect Google Calendar**, which asks again with Google's consent screen (`FicusDrive.connectCalendar`). If the token has run out, the sheet shows **Reconnect Google**.
+Drive is required and Calendar is optional. `calendar` records whether Google granted `calendar.events` (with granular consent the user can untick it). Every new token, from sign-in or Reconnect, asks for both scopes. If the token lacks Calendar, the Calendar Event sheet shows **Connect Google Calendar**, which asks again with Google's consent screen (`FicusDrive.connectCalendar`). If the token has run out, the sheet shows **Reconnect Google**. The calendar calls are `searchEvents`, `createEvent`, `getEvent` (null once the event is deleted) and `updateEvent`. A patch that switches between timed and all-day clears the other kind's `dateTime` / `date`.
 
 `initFicusAuth`, the last script in `index.html`, guards the app:
 - The body starts as `ficus-locked ficus-auth-pending`. While locked, the section tabs and the account corner are hidden and the app stays on Cover, which shows a square **Log in with Google** button once the session check is done. Google's popup only opens straight from a click, so its libraries load ahead. Without a client ID the button is disabled with a note saying so. If the user unticks Drive on Google's consent screen, sign-in stops and asks them to allow it.
@@ -210,6 +223,21 @@ Setting it up: create an OAuth client ID ("Web application") in Google Cloud and
 
 ---
 
+## 5. Input (mouse and touch)
+
+Everything works with a mouse, a finger or a pen; the iPad is the touch target. Most interactions use Pointer Events, which carry all three. `ficus_input.js` (`window.FicusInput`, loaded before the other scripts) fills the gaps:
+- `getCoordinates(event, touchId)` returns `{ x, y }` in viewport coordinates from a pointer, mouse or drag event, a TouchEvent (its first touch, or the finger `touchId`, including one just lifted) or a Touch. Drag, drop, resize and drawing code reads positions only through it.
+- `onDoubleActivate(el, handler)` runs `handler` on a double-click or on two quick taps (iOS Safari sends no `dblclick` for those), once either way. It resets the table border guide and the Collection preview's width, and renames a notebook topic.
+- `bindGripReorder(list, { grip, start, move, end })` reorders a list from its grips with a finger or pen, because HTML drag and drop doesn't start from a finger in every browser. A mouse still drags whole rows. The board's Objects panel, the notebook outline (its grips show only on touch screens) and the hub's child cards reorder this way.
+
+The conventions:
+- Whatever is dragged, resized or drawn on has `touch-action: none`. Where TouchEvents drive it (block gestures, Collection's preview edge, the column handle, image handles), `touchmove` is cancelled from a non-passive listener so iOS doesn't pan or zoom the page; the scrapboard canvas cancels it while a stroke, move or resize is under way.
+- The page has `touch-action: manipulation`, so a tap clicks at once instead of waiting to see whether it's a double-tap zoom.
+- Nothing is reached only by hovering. Controls revealed on hover also show under `@media (hover: none), (pointer: coarse)`, or always while editing (block controls, outline and tag remove buttons, Manage Tags actions).
+- Menus that close on an outside press listen to `pointerdown` (iOS sends no `mousedown` for most taps). `mousedown` handlers that only call `preventDefault` to keep focus in an editor stay, since iOS still sends them before a tap's click.
+
+---
+
 ## Anti-drift rules
 
 1. Keep blocks to two states: Display and Settings.
@@ -217,3 +245,4 @@ Setting it up: create an OAuth client ID ("Web application") in Google Cloud and
 3. New dot types must be added to `DOT_TYPES` in `space.js` and the `Dot` typedef.
 4. Default to gray (`#8C8C8C`) and square (90-degree) corners in new UI.
 5. The master file's shape is versioned (`VERSION` in `ficus_store.js`). A change that older copies of Ficus can't read must raise it, so they refuse the file instead of overwriting it.
+6. Every interaction handles both mouse and touch (see section 5). Never assume a mouse.

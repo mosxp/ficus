@@ -562,23 +562,25 @@
      A press that doesn't travel is a click, which opens the dot's menu. */
   function onPointerDown(event) {
     const node = event.target.closest(".space-dot");
+    const { x, y } = getCoordinates(event);
     if (!node) {
       // A press on open background that isn't just dismissing a menu or a focused dot opens the add menu on click.
       const quiet = menusOpen() || Boolean(selectedId);
-      bgPress = isBackground(event.target) && event.button <= 0 && !quiet ? { x: event.clientX, y: event.clientY } : null;
+      bgPress = isBackground(event.target) && event.button <= 0 && !quiet ? { x, y } : null;
       closeMenus();
       return;
     }
     const dot = findDot(node.dataset.dotId);
     if (!dot || event.button > 0) return;
-    drag = { dot, node, startX: event.clientX, startY: event.clientY, originX: dot.x, originY: dot.y, moved: false };
+    drag = { dot, node, startX: x, startY: y, originX: dot.x, originY: dot.y, moved: false };
     try { node.setPointerCapture(event.pointerId); } catch (_) {}
   }
 
   function onPointerMove(event) {
     if (!drag) return;
-    const dx = event.clientX - drag.startX;
-    const dy = event.clientY - drag.startY;
+    const { x, y } = getCoordinates(event);
+    const dx = x - drag.startX;
+    const dy = y - drag.startY;
     if (!drag.moved) {
       if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
       drag.moved = true;
@@ -2058,11 +2060,10 @@
   function onColumnDragMove(event) {
     const root = editorRoot();
     const { drag, geometry: geo } = columnSizing;
-    const point = event.touches ? event.touches[0] : event;
-    if (!root || !drag || !geo || !point) return;
+    if (!root || !drag || !geo) return;
     event.preventDefault();
     const { inner } = columnRoom(root);
-    const along = point.clientX - root.getBoundingClientRect().left - root.clientLeft - geo.pad + root.scrollLeft;
+    const along = getCoordinates(event).x - root.getBoundingClientRect().left - root.clientLeft - geo.pad + root.scrollLeft;
     columnSizing.width = clampColumnWidth((along - drag.index * geo.gap - geo.gap / 2) / (drag.index + 1), inner);
     fitColumns();
   }
@@ -4580,6 +4581,7 @@
     if (!handle || !img || event.button > 0) return;
     event.preventDefault();
     const rect = box.getBoundingClientRect();
+    const at = getCoordinates(event);
     const drag = {
       pointerId: event.pointerId,
       handle,
@@ -4587,8 +4589,8 @@
       state: imageState(box),
       cx: rect.left + rect.width / 2,
       cy: rect.top + rect.height / 2,
-      startX: event.clientX,
-      startY: event.clientY,
+      startX: at.x,
+      startY: at.y,
       w0: img.offsetWidth,
       ratio: img.offsetWidth / Math.max(1, img.offsetHeight),
       maxW: editorContentWidth(),
@@ -4597,7 +4599,7 @@
     };
     if (handle.hasAttribute("data-space-img-rotate")) {
       drag.kind = "rotate";
-      drag.a0 = Math.atan2(event.clientY - drag.cy, event.clientX - drag.cx);
+      drag.a0 = Math.atan2(at.y - drag.cy, at.x - drag.cx);
       drag.r0 = drag.state.rotate;
     } else {
       drag.kind = "resize";
@@ -4609,6 +4611,12 @@
     window.addEventListener("pointermove", onImageDragMove);
     window.addEventListener("pointerup", onImageDragEnd);
     window.addEventListener("pointercancel", onImageDragEnd);
+    window.addEventListener("touchmove", holdPageStill, { passive: false });
+  }
+
+  // Cancels a touchmove (on a non-passive listener) so iOS Safari doesn't pan or zoom the page under a drag.
+  function holdPageStill(event) {
+    if (event.cancelable) event.preventDefault();
   }
 
   function onImageDragMove(event) {
@@ -4616,8 +4624,9 @@
     if (!drag || event.pointerId !== drag.pointerId) return;
     event.preventDefault();
     const readout = imageEdit.frame.querySelector(".space-img-readout");
+    const at = getCoordinates(event);
     if (drag.kind === "rotate") {
-      const angle = Math.atan2(event.clientY - drag.cy, event.clientX - drag.cx);
+      const angle = Math.atan2(at.y - drag.cy, at.x - drag.cx);
       let deg = normalizeAngle(drag.r0 + ((angle - drag.a0) * 180) / Math.PI);
       if (event.shiftKey) deg = Math.round(deg / 15) * 15;
       else if (Math.abs(deg - Math.round(deg / 90) * 90) <= ROTATE_SNAP_DEG) deg = Math.round(deg / 90) * 90;
@@ -4627,8 +4636,8 @@
     } else {
       // Pointer travel measured along the photo's own (rotated) axes.
       const rad = (drag.state.rotate * Math.PI) / 180;
-      const dx = event.clientX - drag.startX;
-      const dy = event.clientY - drag.startY;
+      const dx = at.x - drag.startX;
+      const dy = at.y - drag.startY;
       const along = dx * Math.cos(rad) + dy * Math.sin(rad);
       const across = -dx * Math.sin(rad) + dy * Math.cos(rad);
       const byWidth = drag.hx * along;
@@ -4648,6 +4657,7 @@
     window.removeEventListener("pointermove", onImageDragMove);
     window.removeEventListener("pointerup", onImageDragEnd);
     window.removeEventListener("pointercancel", onImageDragEnd);
+    window.removeEventListener("touchmove", holdPageStill);
     try { drag.handle.releasePointerCapture(drag.pointerId); } catch (_) {}
     imageEdit.frame?.classList.remove("is-rotating", "is-resizing");
     return drag;
@@ -5325,13 +5335,13 @@
     bar.addEventListener("click", onTableBarClick);
     const guide = document.createElement("div");
     guide.className = "space-table-guide is-hidden";
-    guide.title = "Drag to resize (double-click to reset)";
+    guide.title = "Drag to resize (double-click or double-tap to reset)";
     guide.addEventListener("pointerdown", onTableGuideDown);
     guide.addEventListener("mousedown", (event) => event.preventDefault());
     guide.addEventListener("pointerleave", () => {
       if (!tableEdit.drag && !guide.classList.contains("is-touch")) hideGuide();
     });
-    guide.addEventListener("dblclick", resetTableBorder);
+    window.FicusInput.onDoubleActivate(guide, resetTableBorder);
     holdBlockOpen(guide, bar);
     document.body.append(guide, bar);
     Object.assign(tableEdit, { bar, guide });
@@ -5633,7 +5643,8 @@
     const hit = tableEdit.hover;
     if (!hit || event.button > 0 || !hit.table.isConnected) return;
     event.preventDefault();
-    beginBorderDrag(hit, event.clientX, event.clientY, event.pointerId);
+    const at = getCoordinates(event);
+    beginBorderDrag(hit, at.x, at.y, event.pointerId);
     try { tableEdit.guide.setPointerCapture(event.pointerId); } catch (_) {}
     window.addEventListener("pointermove", onTableGuideMove);
     window.addEventListener("pointerup", onTableGuideEnd);
@@ -5643,7 +5654,8 @@
   function onTableGuideMove(event) {
     if (!tableEdit.drag || event.pointerId !== tableEdit.drag.pointerId) return;
     event.preventDefault();
-    moveBorderDrag(event.clientX, event.clientY);
+    const at = getCoordinates(event);
+    moveBorderDrag(at.x, at.y);
   }
 
   function onTableGuideEnd(event) {
@@ -5728,7 +5740,8 @@
       syncTableChrome();
     }
     if (!cell || event.target.closest?.(IMAGE_BOX)) return;
-    startPress("mouse", cell, event.clientX, event.clientY);
+    const at = getCoordinates(event);
+    startPress("mouse", cell, at.x, at.y);
     window.addEventListener("mousemove", onTableMouseMove);
     window.addEventListener("mouseup", onTableMouseUp);
   }
@@ -5740,7 +5753,8 @@
       onTableMouseUp();
       return;
     }
-    pressMoved(press, event.clientX, event.clientY);
+    const at = getCoordinates(event);
+    pressMoved(press, at.x, at.y);
     extendPress(press, cellOf(event.target));
   }
 
@@ -5766,16 +5780,16 @@
       cancelPress();
       return;
     }
-    const touch = event.touches[0];
     const cell = cellOf(event.target);
     if (!cell || event.target.closest?.(IMAGE_BOX)) return;
     // A finger landing inside the selected block re-sizes the selection from its first cell.
     const sel = tableEdit.sel;
     const inside = sel?.table === cell.closest("table") && cell.classList.contains(CELL_SELECTED);
-    const press = startPress("touch", inside ? sel.anchor : cell, touch.clientX, touch.clientY, touch.identifier);
+    const { x, y } = getCoordinates(event);
+    const press = startPress("touch", inside ? sel.anchor : cell, x, y, event.touches[0].identifier);
     press.over = cell;
     press.selecting = inside;
-    press.border = inside ? null : tableEdgeAt(touch.clientX, touch.clientY, event.target, TOUCH_EDGE_PX);
+    press.border = inside ? null : tableEdgeAt(x, y, event.target, TOUCH_EDGE_PX);
     window.addEventListener("touchmove", onTableTouchMove, { passive: false });
     window.addEventListener("touchend", onTableTouchEnd);
     window.addEventListener("touchcancel", onTableTouchEnd);
@@ -5792,7 +5806,7 @@
     const touch = pressTouch(event);
     if (!touch) return;
     const press = tableEdit.press;
-    const { clientX: x, clientY: y } = touch;
+    const { x, y } = getCoordinates(event, press.id);
     pressMoved(press, x, y);
     if (press.border) {
       if (event.cancelable) event.preventDefault();
@@ -7509,15 +7523,12 @@
      draws as usual; a second finger turns the touch into a pinch (dropping the stroke the first finger began);
      dragging the empty space around the board, or with the middle button, pans. */
 
-  function touchPoint(event) {
-    return { x: event.clientX, y: event.clientY };
-  }
-
   function onBoardPointerDown(event) {
     const view = boardView;
     if (!view || !board) return;
+    const at = getCoordinates(event);
     if (event.pointerType === "touch") {
-      view.touches.set(event.pointerId, touchPoint(event));
+      view.touches.set(event.pointerId, at);
       if (view.touches.size >= 2 || view.pinch) {
         event.preventDefault();
         event.stopPropagation();
@@ -7531,18 +7542,18 @@
     // Reading, a press on a child dot card that comes up without dragging opens its dot; editing, the card is just
     // an object for the engine to select and move.
     const card = !view.editing && event.button === 0 && boardCardAt(event);
-    view.cardPress = card ? { pointerId: event.pointerId, dotId: card.dotId, x: event.clientX, y: event.clientY } : null;
+    view.cardPress = card ? { pointerId: event.pointerId, dotId: card.dotId, x: at.x, y: at.y } : null;
     // Editing, a press on the one selected card that comes up without dragging renames its dot instead.
     const named = view.editing && onSheet && event.button === 0 && board.tool === "lasso" && boardCardAt(event);
     view.renamePress = named && board.selection.size === 1 && board.selection.has(named.id)
-      ? { pointerId: event.pointerId, cardId: named.id, x: event.clientX, y: event.clientY }
+      ? { pointerId: event.pointerId, cardId: named.id, x: at.x, y: at.y }
       : null;
     // While reading, the sheet is for looking at: any press pans and nothing reaches the engine (which would
     // otherwise switch itself back to editing).
     if (event.button === 1 || (event.button === 0 && (!onSheet || !view.editing))) {
       event.preventDefault();
       event.stopPropagation();
-      view.pan = { id: event.pointerId, x: event.clientX, y: event.clientY, fromX: view.x, fromY: view.y };
+      view.pan = { id: event.pointerId, x: at.x, y: at.y, fromX: view.x, fromY: view.y };
       try { view.viewport.setPointerCapture(event.pointerId); } catch (_) {}
       view.viewport.classList.add("is-panning");
       return;
@@ -7587,11 +7598,12 @@
     const view = boardView;
     if (!view) return;
     const id = event.pointerId;
-    if (view.touches.has(id)) view.touches.set(id, touchPoint(event));
+    const at = getCoordinates(event);
+    if (view.touches.has(id)) view.touches.set(id, at);
     const press = view.cardPress;
-    if (press?.pointerId === id && Math.hypot(event.clientX - press.x, event.clientY - press.y) > DRAG_THRESHOLD) view.cardPress = null;
+    if (press?.pointerId === id && Math.hypot(at.x - press.x, at.y - press.y) > DRAG_THRESHOLD) view.cardPress = null;
     const named = view.renamePress;
-    if (named?.pointerId === id && Math.hypot(event.clientX - named.x, event.clientY - named.y) > DRAG_THRESHOLD) view.renamePress = null;
+    if (named?.pointerId === id && Math.hypot(at.x - named.x, at.y - named.y) > DRAG_THRESHOLD) view.renamePress = null;
     if (event.pointerType === "mouse" && !event.buttons) {
       const card = !view.editing && boardCardAt(event);
       view.viewport.classList.toggle("is-over-card", Boolean(card));
@@ -7621,7 +7633,7 @@
     if (view.pan?.id === id) {
       event.preventDefault();
       event.stopPropagation();
-      setBoardView(view.zoom, view.pan.fromX + event.clientX - view.pan.x, view.pan.fromY + event.clientY - view.pan.y);
+      setBoardView(view.zoom, view.pan.fromX + at.x - view.pan.x, view.pan.fromY + at.y - view.pan.y);
     }
   }
 
@@ -7776,8 +7788,9 @@
     const draftSize = (event) => {
       const { dir, startX, startY, width, height } = drag;
       const { rect, fw, fh, scale } = frame;
-      const dx = event.clientX - startX;
-      const dy = event.clientY - startY;
+      const at = getCoordinates(event);
+      const dx = at.x - startX;
+      const dy = at.y - startY;
       let w = width;
       let h = height;
       if (dir.includes("e")) w = snapBoardSide(Math.min(rect.w + dx, fw - rect.left) / scale);
@@ -7792,7 +7805,8 @@
       if (!handle || !frame || event.button !== 0) return;
       event.preventDefault();
       try { handle.setPointerCapture(event.pointerId); } catch (_) {}
-      drag = { id: event.pointerId, dir: handle.dataset.boardHandle, startX: event.clientX, startY: event.clientY, width: view.width, height: view.height, next: null };
+      const at = getCoordinates(event);
+      drag = { id: event.pointerId, dir: handle.dataset.boardHandle, startX: at.x, startY: at.y, width: view.width, height: view.height, next: null };
       pop.classList.add("is-dragging");
     });
     pop.addEventListener("pointermove", (event) => {
@@ -8073,21 +8087,39 @@
       if (!view.draggingObject) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
-      showObjectDrop(view, objectDropGap(view, event.clientY));
+      showObjectDrop(view, objectDropGap(view, getCoordinates(event).y));
     });
     list.addEventListener("dragleave", (event) => {
       const r = list.getBoundingClientRect();
-      if (event.clientX <= r.left || event.clientX >= r.right || event.clientY <= r.top || event.clientY >= r.bottom) showObjectDrop(view, null);
+      const { x, y } = getCoordinates(event);
+      if (x <= r.left || x >= r.right || y <= r.top || y >= r.bottom) showObjectDrop(view, null);
     });
     list.addEventListener("drop", (event) => {
       const objectId = view.draggingObject;
       if (!objectId) return;
       event.preventDefault();
-      const gap = objectDropGap(view, event.clientY);
+      const gap = objectDropGap(view, getCoordinates(event).y);
       endObjectDrag(view);
       moveBoardObject(view, objectId, gap);
     });
     list.addEventListener("dragend", () => endObjectDrag(view));
+    // The same restacking with a finger or pen, from a row's grip.
+    window.FicusInput.bindGripReorder(list, {
+      grip: ".board-object-grip",
+      start: (grip) => {
+        const row = grip.closest(".board-object");
+        if (!row || !view.board || !view.editing || !row.draggable) return false;
+        view.draggingObject = row.dataset.objectId;
+        row.classList.add("is-dragging");
+      },
+      move: ({ y }) => showObjectDrop(view, objectDropGap(view, y)),
+      end: (at) => {
+        const objectId = view.draggingObject;
+        const gap = at && objectId ? objectDropGap(view, at.y) : null;
+        endObjectDrag(view);
+        if (gap !== null) moveBoardObject(view, objectId, gap);
+      },
+    });
   }
 
   function objectRows(view) {
@@ -8177,8 +8209,9 @@
   const BLOCK_REPLACE_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12.5 6A4.75 4.75 0 0 0 3.6 4.6L2.5 5.8M2.5 2.8v3h3M3.5 10a4.75 4.75 0 0 0 8.9 1.4l1.1-1.2M13.5 13.2v-3h-3" /></svg>';
   const BLOCK_LINK_ICON = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 11.5a3.5 3.5 0 0 0 5 0l2.5-2.5a3.5 3.5 0 0 0-5-5l-1 1" /><path d="M11.5 8.5a3.5 3.5 0 0 0-5 0L4 11a3.5 3.5 0 0 0 5 5l1-1" /></svg>';
   // Block types whose settings open in place at their display size, with their controls floating outside the
-  // block; the others grow to fit their settings panel.
-  const IN_PLACE_TYPES = new Set(["note", "photo", "link", "file", "album", "audio", "video", "calendar", "scrapboard", "frame"]);
+  // block; the others grow to fit their settings panel. (A calendar event block's settings are the engine's Calendar
+  // Event sheet, so it never opens in the grid.)
+  const IN_PLACE_TYPES = new Set(["note", "photo", "link", "file", "album", "audio", "video", "scrapboard", "frame"]);
   // Where those floating controls sit (kept EDIT_CHROME_MARGIN inside the page): Done / Delete EDIT_ACTIONS_LIFT
   // above one top corner, and the rest below the block, its bottom edge `drop` under the block's, centred on the
   // block or (`start`) level with its left edge; `span` rows are as wide as the block (at least EDIT_ROW_MIN).
@@ -8191,7 +8224,6 @@
     album: { corner: "right", drop: 88, span: true },
     audio: { corner: "right", drop: 55, span: true },
     video: { corner: "right", drop: 92, span: true },
-    calendar: { corner: "right", drop: 50, span: false },
     scrapboard: { corner: "right", drop: 75, span: false },
     frame: { corner: "right", drop: 75, span: false, start: true },
   };
@@ -8351,7 +8383,8 @@
     container.addEventListener("pointermove", onBlockPointerMove);
     container.addEventListener("pointerup", onBlockPointerUp);
     container.addEventListener("pointercancel", onBlockPointerUp);
-    // Not passive: a finger drawing a block cancels its touchmoves so iOS Safari doesn't scroll the page instead.
+    // Not passive: a finger drawing, moving or resizing a block cancels its touchmoves so iOS Safari doesn't scroll
+    // the page instead.
     container.addEventListener("touchstart", onBlockTouchStart, { passive: true });
     container.addEventListener("touchmove", onBlockTouchMove, { passive: false });
     container.addEventListener("touchend", onBlockTouchEnd);
@@ -8374,6 +8407,7 @@
       view.observer.observe(container);
     }
     renderBlockWidgets();
+    void syncCalendarBlocks(dot.id);
   }
 
   function paintBlockLayout(view) {
@@ -8929,6 +8963,15 @@
      top right. The engine draws its own pencil in a different spot per block type, so that one is taken out and
      the corner's Edit button stands in for it (the engine opens settings from any [data-ublock-open] carrying the
      block's source and id). */
+  // The engine's own pencils go: a block is opened from its Edit control.
+  function dropDisplayPencils(body) {
+    body.querySelectorAll('[data-ublock-state="display"] button[data-ublock-open]').forEach((pencil) => {
+      const holder = pencil.parentElement;
+      if (holder && !holder.matches("[data-ublock]") && holder.childElementCount === 1) holder.remove();
+      else pencil.remove();
+    });
+  }
+
   function buildBlockWidget(view, engine, block, index) {
     const id = String(block.id);
     const meta = blockTypeMeta(block.type);
@@ -8946,11 +8989,7 @@
     const body = document.createElement("div");
     body.className = "grid-widget-body";
     if (!isFrameBlock(block) && !isChildBlock(block)) body.innerHTML = engine.render(block, { source: BLOCK_SOURCE, ownerId: view.dotId, index, hideTypeBadge: true });
-    body.querySelectorAll('[data-ublock-state="display"] button[data-ublock-open]').forEach((pencil) => {
-      const holder = pencil.parentElement;
-      if (holder && !holder.matches("[data-ublock]") && holder.childElementCount === 1) holder.remove();
-      else pencil.remove();
-    });
+    dropDisplayPencils(body);
     if (block.type === "note") stripNoteSettings(body, block);
     else if (block.type === "photo") stripPhotoSettings(body, block);
     else if (block.type === "link") dressLinkCard(body, block);
@@ -8958,7 +8997,6 @@
     else if (block.type === "album") dressAlbumCard(body, block);
     else if (block.type === "audio") dressAudioCard(body, block);
     else if (block.type === "video") dressVideoCard(body, block);
-    else if (block.type === "calendar") dressCalendarCard(body);
     else if (block.type === "scrapboard") dressBoardCard(view, body, block);
     else if (isFrameBlock(block)) body.append(buildFrameCard(view, block, index));
     else if (isChildBlock(block)) body.append(buildChildPortal(view, block));
@@ -9075,14 +9113,6 @@
     const root = widgetFor(view, id)?.querySelector('[data-ublock-state="settings"]');
     if (root) showPhotoCaption(root, value);
     queueBlockSave(view);
-  }
-
-  /* A calendar event block shows its date tile, title, when and a link to the event in Google Calendar. Open, it
-     shows the same (the link keeps its place but hides) so it keeps its size: the engine's Change event, Delete and
-     Done row is hidden, and Change event outside presses the hidden copy, so its sheet runs as usual. */
-  function dressCalendarCard(body) {
-    const actions = body.querySelector('[data-ublock-state="settings"] [data-ublock-cal-actions]');
-    if (actions) actions.hidden = true;
   }
 
   /* A file block is a tile: its extension, huge and faint (tinted by kind), fills the block over a footer with its
@@ -9821,12 +9851,11 @@
     widgetFor(view, block.id)?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
   }
 
-  /* While a rich note, photo, link, file, album, audio, video, calendar, scrapboard or frame block is open its controls float
+  /* While a rich note, photo, link, file, album, audio, video, scrapboard or frame block is open its controls float
      outside the block, in a layer over the whole page: Done and Delete above one of its top corners, and below it the
      note's toolbar (as a capsule), the photo's caption field and Replace button, the link's address and title fields,
      the file's note / title field and Replace button, the album's title field and layout toggle, the audio's title
-     field and Replace button, the video's title field, link field and Replace button, the calendar event's Change
-     event button, the scrapboard's tool capsule
+     field and Replace button, the video's title field, link field and Replace button, the scrapboard's tool capsule
      (with its Objects panel beside the block), or the frame's title field, header sides and colours. The layer counts
      as part of the open settings, so the engine doesn't treat a click there as a click away.
      A note's toolbar is a text dot's, put in place of the one the engine mounts with the editor (see
@@ -9957,14 +9986,6 @@
       below.append(title, row);
       Object.assign(chrome, { titleField: title, linkField: link, previewTimer: 0 });
       if (view.lastPointerType !== "touch") focus = title;
-    } else if (type === "calendar") {
-      below.className = "block-photo-controls";
-      const change = document.createElement("button");
-      change.type = "button";
-      change.className = "block-edit-btn is-replace";
-      change.innerHTML = `${BLOCK_REPLACE_ICON}<span>Change event</span>`;
-      change.addEventListener("click", () => widgetFor(view, id)?.querySelector("[data-ublock-calendar-change]")?.click());
-      below.append(change);
     } else if (type === "album") {
       below.className = "block-album-controls";
       const title = field("text", "Album title", "Album title", block?.title, (value) => setBlockTitle(view, id, value));
@@ -10307,29 +10328,44 @@
      position (or size) is rounded to the nearest whole cell on every move. A block in a frame leaves it once the
      drag gets going (a press alone leaves it be) and is dropped into whichever frame holds its middle, if any. A
      populated frame can't be resized itself: resizing the blocks in it reshapes it. A move keeps a block's stored
-     size (a populated frame's is its size for when it's empty again). */
+     size (a populated frame's is its size for when it's empty again). A finger moves and resizes through the touch
+     events (see onBlockTouchStart), its touchmoves cancelled so iOS Safari doesn't scroll the page instead; the
+     corner handle resizes freely in both directions. */
 
   function onBlockPointerDown(event) {
     const view = blockView;
     if (view) view.lastPointerType = event.pointerType;
     if (!view || !view.editing || view.gesture || view.sketch || event.button !== 0) return;
+    // A finger draws, moves and resizes through the touch events instead (see onBlockTouchStart).
+    const touch = event.pointerType === "touch";
     const frameId = blockSketchSurface(view, event.target);
     if (frameId !== null) {
-      // A finger draws through the touch events instead (see onBlockTouchStart).
-      if (view.dismissPress === event || event.pointerType === "touch") return;
+      if (view.dismissPress === event || touch) return;
       startBlockSketch(view, event, event);
       if (frameId) view.sketch.frameId = frameId;
       return;
     }
-    const handle = event.target.closest("[data-widget-resize]");
-    const grip = handle ? null : event.target.closest("[data-widget-drag], .frame-header");
-    if (!handle && !grip) return;
-    const widget = (handle || grip).closest(".grid-widget-block");
-    const id = widget?.dataset.widgetId;
-    const rect = id && view.rects.get(id);
-    if (!rect || (handle && (widget.classList.contains("is-editing") || widget.classList.contains("is-populated")))) return;
+    if (touch || !blockGestureTarget(view, event.target)) return;
     event.preventDefault();
     try { view.container.setPointerCapture(event.pointerId); } catch (_) {}
+    startBlockGesture(view, event.target, event, { pointerId: event.pointerId });
+  }
+
+  // The resize handle or grip (a frame's header is one too) under `target`, on a block that can be moved or resized.
+  function blockGestureTarget(view, target) {
+    const handle = target.closest?.("[data-widget-resize]");
+    const grip = handle ? null : target.closest?.("[data-widget-drag], .frame-header");
+    const widget = (handle || grip)?.closest(".grid-widget-block");
+    const id = widget?.dataset.widgetId;
+    if (!id || !view.rects.get(id)) return null;
+    if (handle && (widget.classList.contains("is-editing") || widget.classList.contains("is-populated"))) return null;
+    return { handle, widget, id };
+  }
+
+  // From a press on a handle or grip at `point` (a pointer event or a Touch); `who` is its { pointerId } or { touchId }.
+  function startBlockGesture(view, target, point, who) {
+    const { handle, widget, id } = blockGestureTarget(view, target);
+    const rect = view.rects.get(id);
     // A block in a frame starts from where it shows (a move) or from its bare size (a resize).
     const parent = view.parents.get(id) || null;
     let start = shownRect(view, liveRect(view, id));
@@ -10340,9 +10376,10 @@
       const siblings = frameChildIds(view, parent);
       home = { parent, before: siblings[siblings.indexOf(id) + 1] || null };
     }
+    const at = getCoordinates(point);
     view.gesture = {
-      id, widget, pointerId: event.pointerId, kind: handle ? "resize" : "move", dir: handle?.dataset.widgetResize || "",
-      startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY,
+      id, widget, pointerId: who.pointerId ?? null, touchId: who.touchId ?? null, kind: handle ? "resize" : "move",
+      dir: handle?.dataset.widgetResize || "", startX: at.x, startY: at.y, x: at.x, y: at.y,
       scrollLeft: view.container.scrollLeft, scrollTop: view.container.scrollTop, start, next: start, frame: 0,
       parent, home, out: false,
     };
@@ -10355,14 +10392,20 @@
     const view = blockView;
     if (view?.sketch && view.sketch.pointerId === event.pointerId) {
       if (view.sketch.mouse) event.preventDefault();
-      moveBlockSketch(view, event.clientX, event.clientY);
+      const at = getCoordinates(event);
+      moveBlockSketch(view, at.x, at.y);
       return;
     }
     const gesture = view?.gesture;
     if (!gesture || event.pointerId !== gesture.pointerId) return;
     event.preventDefault();
-    gesture.x = event.clientX;
-    gesture.y = event.clientY;
+    moveBlockGesture(view, event);
+  }
+
+  function moveBlockGesture(view, point) {
+    const at = getCoordinates(point);
+    view.gesture.x = at.x;
+    view.gesture.y = at.y;
     trackBlockGesture(view);
     runBlockAutoScroll(view, () => view.gesture, trackBlockGesture);
   }
@@ -10447,13 +10490,17 @@
     }
     const gesture = view?.gesture;
     if (!gesture || event.pointerId !== gesture.pointerId) return;
+    endBlockGesture(view, event.type === "pointercancel");
+  }
+
+  function endBlockGesture(view, cancelled) {
+    const gesture = view.gesture;
     cancelAnimationFrame(gesture.frame);
     view.gesture = null;
     gesture.widget.classList.remove("is-lifted");
     delete document.documentElement.dataset.blockGesture;
     markDropFrame(view, null);
     const saved = view.rects.get(gesture.id);
-    const cancelled = event.type === "pointercancel";
     const isFrame = gesture.widget.dataset.widgetType === "frame";
     if (gesture.out && cancelled) {
       putInFrame(view, gesture.id, gesture.home.parent, gesture.home.before);
@@ -10667,10 +10714,11 @@
       event.preventDefault();
       try { view.container.setPointerCapture(event.pointerId); } catch (_) {}
     }
+    const at = getCoordinates(point);
     view.sketch = {
       pointerId: touch ? null : event.pointerId, touchId: touch ? point.identifier : null, mouse,
-      startX: point.clientX, startY: point.clientY, x: point.clientX, y: point.clientY,
-      origin: blockGridPoint(view, point.clientX, point.clientY), dragged: false, rect: null, ghost: null, menu: null, frame: 0,
+      startX: at.x, startY: at.y, x: at.x, y: at.y,
+      origin: blockGridPoint(view, at.x, at.y), dragged: false, rect: null, ghost: null, menu: null, frame: 0,
     };
   }
 
@@ -10692,6 +10740,11 @@
     return sketch?.touchId == null ? null : [...event.changedTouches].find((touch) => touch.identifier === sketch.touchId) || null;
   }
 
+  // The finger moving or resizing a block among a touch event's changed touches, if it's one of them.
+  function gestureTouch(gesture, event) {
+    return gesture?.touchId == null ? null : [...event.changedTouches].find((touch) => touch.identifier === gesture.touchId) || null;
+  }
+
   function onBlockTouchStart(event) {
     const view = blockView;
     if (!view) return;
@@ -10700,6 +10753,11 @@
       return;
     }
     if (!view.editing || view.gesture || view.sketch) return;
+    if (blockGestureTarget(view, event.target)) {
+      view.lastPointerType = "touch";
+      startBlockGesture(view, event.target, event.changedTouches[0], { touchId: event.changedTouches[0].identifier });
+      return;
+    }
     const frameId = blockSketchSurface(view, event.target);
     if (frameId === null) return;
     // The press's pointerdown (which comes first) found something to dismiss.
@@ -10710,24 +10768,38 @@
     if (frameId) view.sketch.frameId = frameId;
   }
 
-  // Cancelled while a finger or pen draws, so the page holds still under it.
+  // Cancelled while a finger or pen draws, moves or resizes, so the page holds still under it.
   function onBlockTouchMove(event) {
-    const sketch = blockView?.sketch;
+    const view = blockView;
+    if (view?.gesture) {
+      if (event.cancelable) event.preventDefault();
+      const touch = gestureTouch(view.gesture, event);
+      if (touch) moveBlockGesture(view, touch);
+      return;
+    }
+    const sketch = view?.sketch;
     if (!sketch || (sketch.touchId == null && sketch.pointerId == null)) return;
     if (event.cancelable) event.preventDefault();
-    const touch = sketchTouch(sketch, event);
-    if (touch) moveBlockSketch(blockView, touch.clientX, touch.clientY);
+    if (!sketchTouch(sketch, event)) return;
+    const at = getCoordinates(event, sketch.touchId);
+    moveBlockSketch(view, at.x, at.y);
   }
 
   function onBlockTouchEnd(event) {
     const view = blockView;
-    const touch = sketchTouch(view?.sketch, event);
-    if (!touch) return;
+    const moving = gestureTouch(view?.gesture, event);
+    if (moving) {
+      if (event.type !== "touchcancel") moveBlockGesture(view, moving);
+      endBlockGesture(view, event.type === "touchcancel");
+      return;
+    }
+    if (!sketchTouch(view?.sketch, event)) return;
     if (event.type === "touchcancel") {
       endBlockSketch(view, true);
       return;
     }
-    moveBlockSketch(view, touch.clientX, touch.clientY);
+    const at = getCoordinates(event, view.sketch.touchId);
+    moveBlockSketch(view, at.x, at.y);
     endBlockSketch(view, false);
   }
 
@@ -11080,6 +11152,72 @@
     view.saveTimer = setTimeout(saveBlockDot, BLOCK_AUTOSAVE_MS);
   }
 
+  /* Calendar Event blocks follow their events in Google Calendar. When Space opens (every block dot's) and when a
+     block dot opens (its own), each event not looked up in the last CALENDAR_CHECK_MS is fetched again, a few at a
+     time, and its blocks take on any new title or times, or are marked deleted. Without a live token carrying
+     Calendar this quietly does nothing (each card's refresh button asks Google for access). */
+  const CALENDAR_CHECK_MS = 60 * 1000;
+  const CALENDAR_FETCHES = 3;
+  const calendarChecked = new Map();
+
+  function calendarBlocksOf(dotId) {
+    const blocks = blockView?.dotId === dotId ? blockView.blocks : (readBlockState(dotId)?.blocks || []).map((item) => item?.block);
+    return blocks.filter((block) => block?.type === "calendar" && block.eventId);
+  }
+
+  async function syncCalendarBlocks(onlyDotId = null) {
+    const drive = window.FicusDrive;
+    if (!drive?.hasCalendar || !drive.tokenLive || typeof window.UniversalBlockEngine?.applyCalendarEvent !== "function") return;
+    const dotIds = onlyDotId ? [onlyDotId] : spaceDots.filter((dot) => dot.type === "block").map((dot) => dot.id);
+    const now = Date.now();
+    const queue = [...new Set(dotIds.flatMap((id) => calendarBlocksOf(id).map((block) => String(block.eventId))))]
+      .filter((eventId) => !(now - (calendarChecked.get(eventId) || 0) < CALENDAR_CHECK_MS));
+    if (!queue.length) return;
+    for (const eventId of queue) calendarChecked.set(eventId, now);
+    const latest = new Map();
+    const fetchSome = async () => {
+      while (queue.length) {
+        const eventId = queue.shift();
+        try {
+          latest.set(eventId, await drive.getEvent(eventId));
+        } catch (err) {
+          calendarChecked.delete(eventId);
+          // Without access, or a connection, the rest would fail the same way.
+          if (err instanceof drive.AuthError || err instanceof drive.CalendarAccessError || !err?.status) {
+            for (const rest of queue.splice(0)) calendarChecked.delete(rest);
+          }
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: CALENDAR_FETCHES }, fetchSome));
+    if (latest.size) applyCalendarEvents(dotIds, latest);
+  }
+
+  function applyCalendarEvents(dotIds, latest) {
+    const engine = window.UniversalBlockEngine;
+    const update = (block) => latest.has(String(block.eventId)) && engine.applyCalendarEvent(block, latest.get(String(block.eventId)));
+    for (const dotId of dotIds) {
+      if (!findDot(dotId)) continue;
+      const view = blockView?.dotId === dotId ? blockView : null;
+      if (view) {
+        const changed = calendarBlocksOf(dotId).filter(update);
+        if (!changed.length) continue;
+        // Just the cards change, so a block being edited, dragged or drawn carries on undisturbed.
+        for (const block of changed) {
+          const body = widgetFor(view, block.id)?.querySelector(":scope > .grid-widget-card > .grid-widget-body");
+          if (!body) continue;
+          body.innerHTML = engine.render(block, { source: BLOCK_SOURCE, ownerId: view.dotId, index: view.blocks.indexOf(block), hideTypeBadge: true });
+          dropDisplayPencils(body);
+        }
+        saveBlockDot();
+      } else {
+        const state = readBlockState(dotId);
+        const changed = (state?.blocks || []).map((item) => item?.block).filter((block) => block?.type === "calendar" && block.eventId && update(block));
+        if (changed.length) store()?.setPage("block", dotId, state, dotId);
+      }
+    }
+  }
+
   function blockEditingOpen() {
     return String(window.UniversalBlockEngine?.settingsKey?.() || "").startsWith(`${BLOCK_SOURCE}:`);
   }
@@ -11385,14 +11523,14 @@
     if (!view.drag || view.drag.pointerId !== null) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
-    paintHubDrop(view, event.clientY);
+    paintHubDrop(view, getCoordinates(event).y);
   }
 
   function onHubDrop(view, event) {
     if (!view.drag || view.drag.pointerId !== null) return;
     event.preventDefault();
     const { id } = view.drag;
-    const { index } = hubDropIndex(view, event.clientY);
+    const { index } = hubDropIndex(view, getCoordinates(event).y);
     endHubDrag(view);
     moveHubChild(view, id, index);
   }
@@ -11413,18 +11551,19 @@
   function onHubGripMove(view, event) {
     if (view.drag?.pointerId !== event.pointerId) return;
     event.preventDefault();
-    paintHubDrop(view, event.clientY);
+    const { y } = getCoordinates(event);
+    paintHubDrop(view, y);
     // Near the top or bottom of the screen, the page scrolls to reach cards out of view.
     const edge = 72;
     const room = window.innerHeight;
-    if (event.clientY < edge) el.docScroll.scrollTop -= Math.ceil((edge - event.clientY) / 6);
-    else if (event.clientY > room - edge) el.docScroll.scrollTop += Math.ceil((event.clientY - room + edge) / 6);
+    if (y < edge) el.docScroll.scrollTop -= Math.ceil((edge - y) / 6);
+    else if (y > room - edge) el.docScroll.scrollTop += Math.ceil((y - room + edge) / 6);
   }
 
   function onHubGripUp(view, event) {
     if (view.drag?.pointerId !== event.pointerId) return;
     const { id } = view.drag;
-    const { index } = hubDropIndex(view, event.clientY);
+    const { index } = hubDropIndex(view, getCoordinates(event).y);
     endHubDrag(view);
     moveHubChild(view, id, index);
   }
@@ -12072,7 +12211,8 @@
     const node = group && mini.nodes.get(group.dataset.dotId);
     if (!node || event.button > 0) return;
     event.preventDefault();
-    mini.drag = { id: node.id, group, startX: event.clientX, startY: event.clientY, originX: node.x, originY: node.y, moved: false };
+    const at = getCoordinates(event);
+    mini.drag = { id: node.id, group, startX: at.x, startY: at.y, originX: node.x, originY: node.y, moved: false };
     try { el.miniSvg.setPointerCapture(event.pointerId); } catch (_) {}
   }
 
@@ -12080,8 +12220,9 @@
     const drag = mini.drag;
     const node = drag && mini.nodes.get(drag.id);
     if (!node || node.role === "center") return;
-    const dx = event.clientX - drag.startX;
-    const dy = event.clientY - drag.startY;
+    const at = getCoordinates(event);
+    const dx = at.x - drag.startX;
+    const dy = at.y - drag.startY;
     if (!drag.moved) {
       if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
       drag.moved = true;
@@ -12229,7 +12370,7 @@
     "data-ublock-media-replace", "data-ublock-check-add", "data-ublock-check-remove", "data-sbx-add",
     "data-ublock-album-add", "data-ublock-album-remove", "data-ublock-album-move", "data-ublock-album-layout",
     "data-ublock-sb-add", "data-ublock-sb-remove", "data-ublock-sb-move", "data-ublock-sb-layout", "data-ublock-link-mode",
-    "data-ublock-calendar-change"];
+    "data-ublock-calendar-refresh"];
 
   function lockReadBlock(body) {
     for (const hook of READ_BLOCK_HOOKS) {
@@ -13942,6 +14083,7 @@
     loadDots();
     if (!openDotId) render();
     if (shown && !openDotId) scatterDots();
+    if (shown) void syncCalendarBlocks();
   }
 
   window.renderDotContent = renderDotContent;

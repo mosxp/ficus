@@ -436,17 +436,64 @@
     return (result.items || []).filter((event) => event.status !== "cancelled").map(eventFields);
   }
 
-  // Makes a timed event from `start` to `end` (Dates) in the device's time zone.
-  async function createEvent({ title, start, end }) {
+  const dayAfter = (date) => {
+    const [y, m, d] = date.split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, d + 1)).toISOString().slice(0, 10);
+  };
+
+  /* An event's start / end as Calendar takes them. A timed event's `start` / `end` are Dates, kept in the device's
+     time zone (the same moment for both is a 0-minute event). An all-day one's are dates ("2026-10-13"), `end` the
+     last day it covers, which Calendar wants as the day after. With `swap`, the other kind's field is cleared, for
+     a patch that turns a timed event into an all-day one or back. */
+  function eventTimes({ allDay, start, end }, swap = false) {
+    if (allDay) {
+      const clear = swap ? { dateTime: null, timeZone: null } : {};
+      return { start: { date: start, ...clear }, end: { date: dayAfter(end), ...clear } };
+    }
     const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+    const clear = swap ? { date: null } : {};
+    return {
+      start: { dateTime: start.toISOString(), timeZone, ...clear },
+      end: { dateTime: end.toISOString(), timeZone, ...clear },
+    };
+  }
+
+  const gone = (err) => err?.status === 404 || err?.status === 410;
+
+  // Makes an event: { title, allDay, start, end } (see eventTimes).
+  async function createEvent(fields) {
     const event = await calendarCall((calendar) => calendar.events.insert({
       calendarId: "primary",
-      resource: {
-        summary: String(title || "").trim(),
-        start: { dateTime: start.toISOString(), timeZone },
-        end: { dateTime: end.toISOString(), timeZone },
-      },
+      resource: { summary: String(fields.title || "").trim(), ...eventTimes(fields) },
     }));
+    return eventFields(event);
+  }
+
+  // The event as it is now in Google Calendar, or null if it's been deleted there.
+  async function getEvent(eventId) {
+    try {
+      const event = await calendarCall((calendar) => calendar.events.get({ calendarId: "primary", eventId }));
+      return event.status === "cancelled" ? null : eventFields(event);
+    } catch (err) {
+      if (gone(err)) return null;
+      throw err;
+    }
+  }
+
+  // Changes the event's title and times to { title, allDay, start, end } (see eventTimes).
+  async function updateEvent(eventId, fields) {
+    const missing = () => new DriveError("This event isn't in your Google Calendar any more.", 410);
+    let event;
+    try {
+      event = await calendarCall((calendar) => calendar.events.patch({
+        calendarId: "primary",
+        eventId,
+        resource: { summary: String(fields.title || "").trim(), ...eventTimes(fields, true) },
+      }));
+    } catch (err) {
+      throw gone(err) ? missing() : err;
+    }
+    if (event.status === "cancelled") throw missing();
     return eventFields(event);
   }
 
@@ -479,6 +526,8 @@
     signOut,
     searchEvents,
     createEvent,
+    getEvent,
+    updateEvent,
     // Calls back with (session, tokenLive) whenever either changes.
     onChange(listener) {
       listeners.add(listener);

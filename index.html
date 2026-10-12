@@ -14,11 +14,12 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Emoji:wght@400..700&display=swap" />
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="canvas-editor.js"></script>
-    <script src="scrapboard.js?v=25"></script>
-    <script src="quick_line.js"></script>
-    <script src="space.js?v=81" defer></script>
-    <script src="collection.js?v=18" defer></script>
+    <script src="ficus_input.js?v=1"></script>
+    <script src="canvas-editor.js?v=2"></script>
+    <script src="scrapboard.js?v=26"></script>
+    <script src="quick_line.js?v=2"></script>
+    <script src="space.js?v=83" defer></script>
+    <script src="collection.js?v=19" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
       const APP_STORAGE_EPOCH = "2026-10-03-clean";
@@ -36,7 +37,7 @@
       };
     </script>
     <!-- Bump ?v= whenever these change so browsers never pair them with a different index.html. -->
-    <script src="ficus_drive.js?v=2"></script>
+    <script src="ficus_drive.js?v=3"></script>
     <script src="ficus_cloud.js?v=15"></script>
     <script src="ficus_store.js?v=2"></script>
     <script>
@@ -73,7 +74,9 @@
     </script>
     <style>
       /* Emergency: any fixed full-screen layer that is hidden must not capture clicks. */
-      html { font-variant-emoji: text; }
+      /* manipulation: a tap is a click at once (no wait to see if it's a double-tap zoom); pans and pinches still
+         work, and anything dragged with a finger sets touch-action: none for itself. */
+      html { font-variant-emoji: text; touch-action: manipulation; }
       .overlay {
         opacity: 0;
         visibility: hidden;
@@ -739,8 +742,10 @@
       .ctags-preview-inner { width: calc(var(--ctags-preview-width) - 1px); flex-shrink: 0; height: 100%; overflow-y: auto; overscroll-behavior: contain; }
       .resize-handle {
         position: absolute; left: -3px; top: 0; bottom: 0; z-index: 10; width: 6px; cursor: col-resize; background: transparent;
-        transition: background 0.2s;
+        touch-action: none; transition: background 0.2s;
       }
+      /* A finger needs more to land on than the line a mouse finds. */
+      @media (hover: none), (pointer: coarse) { .resize-handle { left: -11px; width: 22px; } }
       .resize-handle:hover, .resize-handle.is-active { background: rgba(0, 0, 0, 0.1); }
       .resize-handle:focus-visible { outline: none; background: rgba(0, 0, 0, 0.2); }
       html.ctags-resizing, html.ctags-resizing * { cursor: col-resize !important; user-select: none !important; -webkit-user-select: none !important; }
@@ -1073,7 +1078,16 @@
       .nb-outline-item:hover .nb-outline-remove, .nb-outline-remove:focus-visible { opacity: 1; }
       .nb-outline-remove:hover { background: rgba(0, 0, 0, 0.05); color: #1c1917; }
       .nb-outline-go:focus-visible, .nb-outline-remove:focus-visible { outline: 2px solid #1c1917; outline-offset: -2px; }
-      @media (hover: none) { .nb-outline-remove { opacity: 1; } }
+      /* Touch screens: the remove button shows without a hover, and rows move from a grip (a mouse drags the row). */
+      .nb-outline-grip {
+        display: none; width: 20px; height: 28px; flex-shrink: 0; align-items: center; justify-content: center; color: #a8a29e;
+        cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+      }
+      .nb-outline-grip svg { width: 14px; height: 14px; }
+      @media (hover: none), (pointer: coarse) {
+        .nb-outline-remove { opacity: 1; }
+        .notebook-wrapper:not(.notebook-reading-mode) .nb-outline-grip { display: inline-flex; }
+      }
       .nb-outline-empty { padding: 8px; font-size: 0.8rem; line-height: 1.5; color: #a8a29e; }
       /* A card wraps its dot's page: as wide and tall as that is (never narrower than 280px), within what its layout
          allows. Its title and badges wrap to the page's width rather than widening it. */
@@ -1504,7 +1518,7 @@
       }
       .tag-name-badge:hover .space-dot-tag-remove, .tag-name-badge:focus-within .space-dot-tag-remove { opacity: 1; }
       .space-dot-tag-remove:hover, .space-dot-tag-remove:focus-visible { background: rgba(0, 0, 0, 0.08); color: #1c1917; outline: none; }
-      @media (hover: none) { .space-dot-tag-remove { opacity: 1; } }
+      @media (hover: none), (pointer: coarse) { .space-dot-tag-remove { opacity: 1; } }
       .space-dot-tag-add { font-weight: 600; color: #57534e; cursor: pointer; transition: background 120ms ease, color 120ms ease; }
       .space-dot-tag-add:hover, .space-dot-tag-add[aria-expanded="true"] { background: rgba(0, 0, 0, 0.1); color: #1c1917; }
       .space-dot-tag-add:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
@@ -1616,7 +1630,7 @@
       .space-tag-row-btn.is-danger { border-color: #b91c1c; background: #b91c1c; color: #fff; }
       .space-tag-row-btn.is-danger:hover { background: #991b1b; }
       .space-tag-row-btn:focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
-      @media (hover: none) { .space-tag-row-action { opacity: 0.75; } }
+      @media (hover: none), (pointer: coarse) { .space-tag-row-action { opacity: 0.75; } }
       /* A Name's colour: a 12px square opening a sharp popover of the dot palette and a custom picker. */
       .space-tag-row.has-swatch .space-tag-row-main { padding-left: 0.4rem; }
       .space-tag-swatch-btn {
@@ -1769,6 +1783,7 @@
       .hub-child-grip {
         display: inline-flex; flex-shrink: 0; align-self: stretch; align-items: center; justify-content: center;
         width: 16px; margin: -8px -4px -8px -10px; color: #a8a29e; cursor: grab; touch-action: none;
+        -webkit-touch-callout: none; user-select: none; -webkit-user-select: none;
       }
       .hub-child-grip svg { width: 14px; height: 14px; }
       .hub-child-card:hover .hub-child-grip, .hub-child-card:focus-visible .hub-child-grip { color: #57534e; }
@@ -2374,7 +2389,8 @@
       .board-object.is-selected { background: #1c1917; color: #fff; }
       .board-object.is-dragging { opacity: 0.4; }
       .board-object-grip { display: inline-flex; width: 1rem; flex-shrink: 0; justify-content: center; color: #d6d3d1; }
-      .board-object[draggable="true"] .board-object-grip { color: #a8a29e; cursor: grab; }
+      .board-object[draggable="true"] .board-object-grip { color: #a8a29e; cursor: grab; touch-action: none; -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
+      @media (hover: none), (pointer: coarse) { .board-object-grip { width: 1.75rem; align-self: stretch; align-items: center; } }
       .board-object.is-selected .board-object-grip { color: rgba(255, 255, 255, 0.5); }
       .board-object-grip svg { width: 0.85rem; height: 0.85rem; }
       .board-object-kind { display: inline-flex; flex-shrink: 0; color: #78716c; }
@@ -2517,7 +2533,8 @@
       }
       /* No header: the content fills the card. Two control groups float over it, the drag grip + type symbol top
          left and Delete + Edit top right, hidden until the block is hovered, tapped (.controls-active, set by
-         space.js on touch) or tabbed into. Revealed, they're solid pills that cover the text beneath them. The card
+         space.js on touch) or tabbed into. On a touch screen, with no hover to reveal them, they always show while
+         a block dot is being edited. Revealed, they're solid pills that cover the text beneath them. The card
          is its own stacking context, so their z-index lifts them over the block's content but not other blocks. */
       .grid-widget-card {
         position: absolute; inset: 4px; display: flex; min-width: 0; flex-direction: column; overflow: hidden; isolation: isolate;
@@ -2537,6 +2554,9 @@
          controls only while the pointer is on the frame itself, not on a block inside it. */
       @media (hover: hover) {
         .grid-widget-block:hover:not(:has(.grid-widget-block:hover)) > .grid-widget-card > .block-controls { opacity: 1; pointer-events: auto; }
+      }
+      @media (hover: none), (pointer: coarse) {
+        .block-dot:not(.is-reading) .grid-widget-block > .grid-widget-card > .block-controls { opacity: 1; pointer-events: auto; }
       }
       .grid-widget-block.controls-active > .grid-widget-card > .block-controls,
       .grid-widget-card:has(> .block-controls :focus-visible) > .block-controls,
@@ -2701,13 +2721,18 @@
       }
       .block-cal-open:hover { background: #f5f5f4; color: #1c1917; }
       .block-cal-open svg { width: 0.85rem; height: 0.85rem; }
-      .block-cal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.375rem; }
-      .block-cal-actions[hidden] { display: none; }
-      .block-cal-btn { height: 2rem; padding: 0 0.75rem; border: 1px solid #e7e5e4; background: #fff; font-size: 0.72rem; font-weight: 600; color: #57534e; }
-      .block-cal-btn:hover { background: #f5f5f4; color: #1c1917; }
-      .block-cal-btn.is-danger { color: #be123c; }
-      .block-cal-btn.is-done { margin-left: auto; border-color: #1c1917; background: #1c1917; color: #fff; }
-      .grid-widget-block.is-editing .block-cal-open { visibility: hidden; }
+      .block-cal-when.is-gone { font-style: italic; }
+      /* The refresh button, quieter than the link beside it; it spins while Google is asked. */
+      .block-cal-refresh {
+        display: inline-flex; width: 1.75rem; height: 1.75rem; flex-shrink: 0; align-items: center; justify-content: center;
+        border-radius: 0; color: #b5b5b5; transition: background 120ms ease, color 120ms ease;
+      }
+      .block-cal-refresh:hover, .block-cal-refresh:focus-visible { background: #f5f5f4; color: #8c8c8c; }
+      .block-cal-refresh svg { width: 0.8rem; height: 0.8rem; }
+      .block-cal-refresh[aria-busy="true"] { cursor: progress; color: #8c8c8c; }
+      .block-cal-refresh[aria-busy="true"] svg { animation: block-cal-spin 0.8s linear infinite; }
+      @keyframes block-cal-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) { .block-cal-refresh[aria-busy="true"] svg { animation: none; } }
       /* The Calendar Event sheet: find one of the user's upcoming Google Calendar events, or make one. */
       #block-calendar-sheet {
         position: fixed; inset: 0; z-index: 1000; display: flex; align-items: flex-end; justify-content: center;
@@ -2736,6 +2761,22 @@
         background: #fafaf9; font-size: 1rem; color: #1c1917;
       }
       .cal-sheet-field:focus { border-color: #8c8c8c; background: #fff; }
+      /* All day: a square switch, gray when off and dark when on. */
+      .cal-sheet-switch {
+        display: flex; align-items: center; gap: 0.6rem; margin-top: 0.75rem; cursor: pointer;
+        font-size: 0.8rem; font-weight: 600; color: #57534e; user-select: none; -webkit-user-select: none;
+      }
+      .cal-sheet-switch input {
+        position: relative; width: 2.25rem; height: 1.25rem; flex-shrink: 0; margin: 0; cursor: pointer;
+        appearance: none; -webkit-appearance: none; background: #8c8c8c; transition: background 150ms ease;
+      }
+      .cal-sheet-switch input::after {
+        content: ""; position: absolute; top: 3px; left: 3px; width: calc(1.25rem - 6px); height: calc(1.25rem - 6px);
+        background: #fff; transition: transform 150ms ease;
+      }
+      .cal-sheet-switch input:checked { background: #1c1917; }
+      .cal-sheet-switch input:checked::after { transform: translateX(1rem); }
+      .cal-sheet-switch input:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
       .cal-sheet-results { max-height: 17rem; margin-top: 0.5rem; overflow-y: auto; overscroll-behavior: contain; }
       .cal-sheet-result { display: flex; width: 100%; align-items: center; gap: 0.65rem; padding: 0.5rem; border-bottom: 1px solid #f5f5f4; text-align: left; }
       .cal-sheet-result:hover, .cal-sheet-result:focus-visible { outline: none; background: #f5f5f4; }
@@ -2893,7 +2934,11 @@
       }
       .grid-widget-block:hover:not(:has(.grid-widget-block:hover)) > .grid-widget-resize.is-se::after,
       .grid-widget-block.is-lifted > .grid-widget-resize.is-se::after { opacity: 1; }
-      @media (hover: none) { .grid-widget-resize.is-se::after { opacity: 0.7; } }
+      /* A fingertip-sized corner handle, its mark always showing, on a touch screen. */
+      @media (hover: none), (pointer: coarse) {
+        .grid-widget-resize.is-se { width: 32px; height: 32px; }
+        .grid-widget-resize.is-se::after { opacity: 1; }
+      }
       .grid-widget-block.is-lifted { z-index: 50; }
       .grid-widget-block.is-lifted > .grid-widget-card {
         box-shadow: 0 18px 40px rgba(28, 25, 23, 0.16), 0 2px 6px rgba(28, 25, 23, 0.08); transform: scale(1.01);
@@ -3035,7 +3080,7 @@
       .frame-block[data-header-position="bottom"] .frame-content { border-bottom: 0; }
       .frame-block[data-header-position="left"] .frame-content { border-left: 0; }
       .frame-block[data-header-position="right"] .frame-content { border-right: 0; }
-      .block-dot:not(.is-reading) .frame-header { cursor: grab; }
+      .block-dot:not(.is-reading) .frame-header { cursor: grab; touch-action: none; -webkit-touch-callout: none; }
       .block-dot:not(.is-reading) .grid-widget-block:not(.is-editing) .frame-content { cursor: crosshair; }
       .block-frame-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
       .block-frame-controls > .block-edit-field { flex: 0 1 12rem; width: 12rem; }
@@ -8827,32 +8872,29 @@
         const month = start ? start.toLocaleDateString(undefined, { month: "short" }) : "";
         return `<span class="block-cal-date" aria-hidden="true"><span class="block-cal-month">${escapeHtml(month)}</span><span class="block-cal-day">${start ? start.getDate() : "?"}</span></span>`;
       }
-      function calendarCardMainHtml(block, extra = "") {
+      const CALENDAR_REFRESH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.34-5.66"/><path d="M20 4v5h-5"/></svg>';
+      /* The card is the block's Display state; its Settings state is the Calendar Event sheet (the pencil opens it to
+         edit the event). The refresh button pulls the event's latest title and times from Google, which also happens
+         by itself when a block dot opens (space.js). A block whose event was deleted in Google keeps its last details,
+         marked `deleted`. */
+      function calendarCardMainHtml(block) {
         const title = String(block.title || "").trim() || "(No title)";
-        const link = /^https:\/\//.test(String(block.htmlLink || "")) ? block.htmlLink : "";
+        const link = !block.deleted && /^https:\/\//.test(String(block.htmlLink || "")) ? block.htmlLink : "";
+        const when = block.deleted ? "No longer in your Google Calendar" : calendarWhenText(block);
         return `<div class="block-cal-main">
             ${calendarDateTileHtml(block)}
             <div class="block-cal-text">
               <p class="block-cal-title">${escapeHtml(title)}</p>
-              <p class="block-cal-when">${escapeHtml(calendarWhenText(block))}</p>
+              <p class="block-cal-when${block.deleted ? " is-gone" : ""}">${escapeHtml(when)}</p>
             </div>
+            ${block.eventId ? `<button type="button" data-ublock-calendar-refresh class="block-cal-refresh" title="Get the latest from Google Calendar" aria-label="Refresh ${escapeHtml(title)} from Google Calendar">${CALENDAR_REFRESH_ICON}</button>` : ""}
             ${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer" data-ublock-open-link class="block-cal-open" title="Open in Google Calendar" aria-label="Open ${escapeHtml(title)} in Google Calendar">${externalArrowIconSvg()}</a>` : ""}
-            ${extra}
+            ${pencilIconButton('data-ublock-open="1"', "Edit calendar event")}
           </div>`;
       }
       function renderCalendarBlockDisplayHtml(block, opts = {}) {
         return `<div class="block-cal-card" ${ublockMetaAttrs(block, opts)} data-ublock-state="display">
-          ${calendarCardMainHtml(block, pencilIconButton('data-ublock-open="1"', "Edit calendar event"))}
-        </div>`;
-      }
-      function renderCalendarBlockSettingsHtml(block, opts = {}) {
-        return `<div class="block-cal-card" ${ublockMetaAttrs(block, opts)} data-ublock-state="settings">
           ${calendarCardMainHtml(block)}
-          <div class="block-cal-actions" data-ublock-cal-actions>
-            <button type="button" data-ublock-calendar-change class="block-cal-btn">Change event</button>
-            <button type="button" data-ublock-delete class="block-cal-btn is-danger">Delete Block</button>
-            <button type="button" data-ublock-done class="block-cal-btn is-done">Done ✓</button>
-          </div>
         </div>`;
       }
       function calendarBlockFields(event) {
@@ -8866,6 +8908,20 @@
           calendarId: "primary",
         };
       }
+      // Brings a calendar block up to date with `latest` (FicusDrive.getEvent's answer, null once the event is
+      // deleted in Google). Whether anything changed.
+      function applyCalendarEvent(block, latest) {
+        if (!latest) {
+          if (block.deleted) return false;
+          block.deleted = true;
+          return true;
+        }
+        const next = calendarBlockFields(latest);
+        const changed = Boolean(block.deleted) || Object.keys(next).some((key) => block[key] !== next[key]);
+        Object.assign(block, next);
+        delete block.deleted;
+        return changed;
+      }
       function closeCalendarEventSheet() {
         document.getElementById("block-calendar-sheet")?._close?.(null);
       }
@@ -8876,24 +8932,32 @@
       }
       function localDateTimeValue(date) {
         const pad = (n) => String(n).padStart(2, "0");
-        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+        return `${localDateValue(date)}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
       }
-      /** Find Event searches the user's upcoming events; New Event makes one. Resolves the event's fields, or null. */
-      function openCalendarEventSheet({ replacing = false } = {}) {
+      function localDateValue(date) {
+        const pad = (n) => String(n).padStart(2, "0");
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+      }
+      /** Find Event searches the user's upcoming events; New Event makes one. Given `editing` (a calendar block), it
+          opens on Edit Event instead, the form filled in from the block, and saving changes the event in Google
+          Calendar; Find Event then switches the block to another event. Resolves the event's fields, or null. */
+      function openCalendarEventSheet({ editing = null } = {}) {
         closeCalendarEventSheet();
         return new Promise((resolve) => {
           const drive = window.FicusDrive;
+          const editId = editing?.eventId && !editing.deleted ? String(editing.eventId) : "";
+          const formTab = `<button type="button" role="tab" id="cal-tab-new" class="cal-sheet-tab" data-cal-tab="new" aria-controls="cal-pane-new">${editId ? "Edit Event" : "New Event"}</button>`;
+          const findTab = `<button type="button" role="tab" id="cal-tab-find" class="cal-sheet-tab" data-cal-tab="find" aria-controls="cal-pane-find">Find Event</button>`;
           const overlay = document.createElement("div");
           overlay.id = "block-calendar-sheet";
           overlay.innerHTML = `<div class="cal-sheet" role="dialog" aria-modal="true" aria-labelledby="block-calendar-sheet-title">
               <div class="cal-sheet-head">
                 <span aria-hidden="true">${blockTypeSymbol("calendar")}</span>
-                <h3 id="block-calendar-sheet-title">${replacing ? "Change Calendar Event" : "Calendar Event"}</h3>
+                <h3 id="block-calendar-sheet-title">${editing ? "Edit Calendar Event" : "Calendar Event"}</h3>
                 <button type="button" data-cal-close class="cal-sheet-close" aria-label="Close">✕</button>
               </div>
               <div class="cal-sheet-tabs" role="tablist" aria-label="Calendar event">
-                <button type="button" role="tab" id="cal-tab-find" class="cal-sheet-tab" data-cal-tab="find" aria-controls="cal-pane-find">Find Event</button>
-                <button type="button" role="tab" id="cal-tab-new" class="cal-sheet-tab" data-cal-tab="new" aria-controls="cal-pane-new">New Event</button>
+                ${editId ? formTab + findTab : findTab + formTab}
               </div>
               <div class="cal-sheet-body">
                 <div data-cal-connect class="cal-sheet-connect" hidden>
@@ -8909,11 +8973,15 @@
                 <form id="cal-pane-new" role="tabpanel" aria-labelledby="cal-tab-new" data-cal-pane="new" novalidate>
                   <label class="cal-sheet-label" for="cal-new-title">Title</label>
                   <input id="cal-new-title" name="title" type="text" class="cal-sheet-field" maxlength="300" placeholder="Event title" autocomplete="off" />
-                  <label class="cal-sheet-label" for="cal-new-start">Start Time</label>
+                  <label class="cal-sheet-switch">
+                    <input name="allDay" type="checkbox" role="switch" />
+                    <span>All day</span>
+                  </label>
+                  <label class="cal-sheet-label" for="cal-new-start" data-cal-start-label>Start Time</label>
                   <input id="cal-new-start" name="start" type="datetime-local" class="cal-sheet-field" />
-                  <label class="cal-sheet-label" for="cal-new-end">End Time</label>
+                  <label class="cal-sheet-label" for="cal-new-end" data-cal-end-label>End Time</label>
                   <input id="cal-new-end" name="end" type="datetime-local" class="cal-sheet-field" />
-                  <button type="submit" class="cal-sheet-primary">Create Event</button>
+                  <button type="submit" class="cal-sheet-primary">${editId ? "Save Changes" : "Create Event"}</button>
                 </form>
                 <p data-cal-status class="cal-sheet-note" role="status" hidden></p>
               </div>
@@ -8930,7 +8998,7 @@
           const submit = form.querySelector("button[type='submit']");
           const status = $("[data-cal-status]");
           const touch = window.matchMedia?.("(pointer: coarse)").matches;
-          let tab = "find";
+          let tab = editId ? "new" : "find";
           // While Google needs a click first ("signin", "reconnect" or "calendar"), the connect panel stands in for the tabs.
           let blocked = null;
           let searchSeq = 0;
@@ -9045,42 +9113,89 @@
             event.preventDefault();
             runSearch();
           });
+          const HALF_HOUR = 30 * 60 * 1000;
+          const titleField = form.elements.namedItem("title");
+          const allDayField = form.elements.namedItem("allDay");
           const startField = form.elements.namedItem("start");
           const endField = form.elements.namedItem("end");
+          // All day swaps the date-and-time pickers for date ones (an all-day event's end is the last day it covers).
+          const showAllDay = (on) => {
+            allDayField.checked = on;
+            startField.type = endField.type = on ? "date" : "datetime-local";
+            $("[data-cal-start-label]").textContent = on ? "Start Date" : "Start Time";
+            $("[data-cal-end-label]").textContent = on ? "End Date" : "End Time";
+          };
           const firstStart = new Date();
           firstStart.setMinutes(0, 0, 0);
           firstStart.setHours(firstStart.getHours() + 1);
-          let length = 60 * 60 * 1000;
-          startField.value = localDateTimeValue(firstStart);
-          endField.value = localDateTimeValue(new Date(firstStart.getTime() + length));
-          // Moving the start moves the end with it, keeping the event's length; moving the end sets a new length.
+          // The times to put back when All day is switched off ("15:00").
+          let times = [firstStart, new Date(firstStart.getTime() + HALF_HOUR)].map((date) => localDateTimeValue(date).slice(11));
+          // A new event starts at the next hour for half an hour; an edited one (or a deleted one, to make again) as it was.
+          const editStart = editing ? calendarEventDate(editing.start, editing.allDay) : null;
+          titleField.value = editing?.title || "";
+          if (editStart && editing.allDay) {
+            const after = calendarEventDate(editing.end, true);
+            const last = after ? new Date(after.getFullYear(), after.getMonth(), after.getDate() - 1) : editStart;
+            showAllDay(true);
+            startField.value = localDateValue(editStart);
+            endField.value = localDateValue(last > editStart ? last : editStart);
+          } else {
+            const start = editStart || firstStart;
+            const end = (editStart && calendarEventDate(editing.end, false)) || new Date(start.getTime() + HALF_HOUR);
+            showAllDay(false);
+            startField.value = localDateTimeValue(start);
+            endField.value = localDateTimeValue(end > start ? end : start);
+          }
+          allDayField.addEventListener("change", () => {
+            const [start, end] = [startField.value, endField.value];
+            const on = allDayField.checked;
+            if (on && start.includes("T") && end.includes("T")) times = [start.slice(11, 16), end.slice(11, 16)];
+            showAllDay(on);
+            const day = start.slice(0, 10) || localDateValue(firstStart);
+            const endDay = end.slice(0, 10) > day ? end.slice(0, 10) : day;
+            startField.value = on ? day : `${day}T${times[0]}`;
+            endField.value = on ? endDay : `${endDay}T${times[1]}`;
+            const from = parseLocalDateTime(startField.value);
+            const to = parseLocalDateTime(endField.value);
+            if (!on && from && !(to >= from)) endField.value = localDateTimeValue(new Date(from.getTime() + HALF_HOUR));
+          });
+          // Picking a start time sets the end half an hour after it (a start day pushes a too-early end day along).
           startField.addEventListener("change", () => {
+            if (allDayField.checked) {
+              if (startField.value && !(endField.value >= startField.value)) endField.value = startField.value;
+              return;
+            }
             const start = parseLocalDateTime(startField.value);
-            if (start) endField.value = localDateTimeValue(new Date(start.getTime() + length));
+            if (start) endField.value = localDateTimeValue(new Date(start.getTime() + HALF_HOUR));
           });
-          endField.addEventListener("change", () => {
-            const start = parseLocalDateTime(startField.value);
-            const end = parseLocalDateTime(endField.value);
-            if (start && end && end > start) length = end - start;
-          });
+          const isDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(value);
           form.addEventListener("submit", async (event) => {
             event.preventDefault();
             if (submit.disabled) return;
-            const titleField = form.elements.namedItem("title");
             const title = titleField.value.trim();
-            const start = parseLocalDateTime(startField.value);
-            const end = parseLocalDateTime(endField.value);
+            const allDay = allDayField.checked;
             if (!title) {
               setStatus("Give the event a title.", true);
               titleField.focus();
               return;
             }
-            if (!start || !end) return setStatus("Pick a start and an end time.", true);
-            if (end <= start) return setStatus("The end time has to be after the start.", true);
+            let fields;
+            if (allDay) {
+              if (!isDate(startField.value) || !isDate(endField.value)) return setStatus("Pick a start and an end date.", true);
+              if (endField.value < startField.value) return setStatus("The end date can't be before the start.", true);
+              fields = { title, allDay, start: startField.value, end: endField.value };
+            } else {
+              const start = parseLocalDateTime(startField.value);
+              const end = parseLocalDateTime(endField.value);
+              if (!start || !end) return setStatus("Pick a start and an end time.", true);
+              // The same time for both is a 0-minute event, which Google Calendar allows.
+              if (end < start) return setStatus("The end time can't be before the start.", true);
+              fields = { title, allDay, start, end };
+            }
             submit.disabled = true;
-            setStatus("Adding it to your calendar…");
+            setStatus(editId ? "Saving it to your calendar…" : "Adding it to your calendar…");
             try {
-              close(await drive.createEvent({ title, start, end }));
+              close(await (editId ? drive.updateEvent(editId, fields) : drive.createEvent(fields)));
             } catch (err) {
               fail(err);
             } finally {
@@ -9116,17 +9231,57 @@
           begin();
         });
       }
-      // Change event: picks another event for an open calendar block, keeping its place.
-      async function changeCalendarBlockEvent(root) {
-        const { list, block } = uBlockFromRoot(root);
-        if (!block) return;
+      // Saves a calendar block that's taken on its event's latest details, straight through to Drive.
+      async function saveCalendarBlock(root, list) {
         const source = root.dataset.ublockSource || "tray";
         const { ublockOwnerId: ownerId, ublockOwnerKind: ownerKind } = root.dataset;
-        const event = await openCalendarEventSheet({ replacing: true });
-        if (!event) return;
-        Object.assign(block, calendarBlockFields(event));
-        await persistUBlockOwner(source, ownerId, ownerKind, list);
+        const saved = await persistUBlockOwner(source, ownerId, ownerKind, list);
         refreshUBlockHosts(source);
+        if (saved) void window.FicusStore?.flush?.();
+        return saved;
+      }
+      // The pencil: edits the event in Google Calendar (or switches the block to another one) in the sheet.
+      async function editCalendarBlock(root) {
+        const { list, block } = uBlockFromRoot(root);
+        if (!block) return;
+        const event = await openCalendarEventSheet({ editing: { ...block } });
+        if (!event) return;
+        applyCalendarEvent(block, event);
+        await saveCalendarBlock(root, list);
+      }
+      /* The refresh button: the event's latest title and times from Google. Run straight from the click, so that a
+         run-out sign-in or missing Calendar permission can bring up Google's popup first. */
+      function refreshCalendarBlock(button) {
+        const root = button.closest("[data-ublock]");
+        const { list, block } = root ? uBlockFromRoot(root) : {};
+        const drive = window.FicusDrive;
+        if (!block?.eventId || !drive || button.getAttribute("aria-busy") === "true") return;
+        if (!drive.session) return showAppToast("Sign in with Google to refresh calendar events.");
+        let access = Promise.resolve();
+        if (!drive.tokenLive || !drive.hasCalendar) {
+          if (!drive.ready) {
+            drive.prepare().catch(() => {});
+            return showAppToast("Still connecting to Google. Try again in a moment.");
+          }
+          access = drive.tokenLive ? drive.connectCalendar() : drive.reconnect().then(() => window.FicusStore?.retry?.());
+        }
+        button.setAttribute("aria-busy", "true");
+        void (async () => {
+          try {
+            await access;
+            const latest = await drive.getEvent(block.eventId);
+            if (!applyCalendarEvent(block, latest)) {
+              showAppToast("Already up to date with Google Calendar.");
+              return;
+            }
+            await saveCalendarBlock(root, list);
+            showAppToast(latest ? "Updated from Google Calendar." : "This event was deleted in Google Calendar.");
+          } catch (err) {
+            if (!err?.cancelled) showAppToast(err?.message || "Google Calendar didn't answer. Try again.");
+          } finally {
+            button.removeAttribute("aria-busy");
+          }
+        })();
       }
       function applyMediaBlockSettings(block, root) {
         const title = root?.querySelector("[data-ublock-title]");
@@ -9176,7 +9331,7 @@
           return settings ? renderVideoBlockSettingsHtml(block, opts) : renderVideoBlockDisplayHtml(block, opts);
         }
         if (block.type === "calendar") {
-          return settings ? renderCalendarBlockSettingsHtml(block, opts) : renderCalendarBlockDisplayHtml(block, opts);
+          return renderCalendarBlockDisplayHtml(block, opts);
         }
         return "";
       }
@@ -10339,8 +10494,8 @@
           if (!track) return;
           event.preventDefault();
           const root = track.closest("[data-ublock]");
-          seekUBlockAudio(root, ratioFor(track, event.clientX));
-          const move = (e) => seekUBlockAudio(root, ratioFor(track, e.clientX));
+          seekUBlockAudio(root, ratioFor(track, getCoordinates(event).x));
+          const move = (e) => seekUBlockAudio(root, ratioFor(track, getCoordinates(e).x));
           const up = () => {
             window.removeEventListener("pointermove", move);
             window.removeEventListener("pointerup", up);
@@ -10377,6 +10532,7 @@
             addBlockMenuHtml: universalAddBlockMenuHtml,
             createMediaBlocks,
             attachBlock: attachUBlock,
+            applyCalendarEvent,
             flushSettings: flushOpenUBlockSettings,
             settingsKey: () => uBlockSettingsKey,
             /** Replace photo for a block whose settings controls live outside its card. */
@@ -10395,6 +10551,12 @@
         wireUBlockAudioSeeking();
         wireScrapboardEmbeds();
         wireFilePreviewTriggers();
+        document.addEventListener("click", (event) => {
+          const refresh = event.target.closest?.("[data-ublock-calendar-refresh]");
+          if (!refresh || event.target.closest("#block-calendar-sheet")) return;
+          event.preventDefault();
+          refreshCalendarBlock(refresh);
+        });
         document.addEventListener("click", async (event) => {
           if (event.target.closest("#block-media-sheet, #block-calendar-sheet, [id$='add-block-menu'], #ql-field-popover")) return;
           // Read from the path as dispatched: a click can re-render the popover it lands in, leaving its target
@@ -10438,13 +10600,7 @@
             return;
           }
           if (event.target.closest("[data-ublock] .scrapboard-root")) return;
-          const calendarChange = event.target.closest("[data-ublock-calendar-change]");
-          if (calendarChange) {
-            event.preventDefault();
-            event.stopPropagation();
-            await changeCalendarBlockEvent(calendarChange.closest("[data-ublock]"));
-            return;
-          }
+          if (event.target.closest("[data-ublock-calendar-refresh]")) return;
           const mediaReplace = event.target.closest("[data-ublock-media-replace]");
           if (mediaReplace) {
             event.preventDefault();
@@ -10546,7 +10702,8 @@
               const openRoot = document.querySelector(`[data-ublock-state="settings"][data-ublock="1"]`);
               if (openRoot) await commitUBlockSettings(openRoot);
             }
-            openUBlockSettings(source, blockId);
+            if (uBlockFromRoot(root).block?.type === "calendar") await editCalendarBlock(root);
+            else openUBlockSettings(source, blockId);
             return;
           }
           if (uBlockSettingsKey && !inOpenSettings) {

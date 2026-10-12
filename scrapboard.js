@@ -3071,6 +3071,10 @@
       this.canvas.addEventListener("pointerup", this._onPointerUp);
       this.canvas.addEventListener("pointercancel", this._onPointerUp);
       this.canvas.addEventListener("lostpointercapture", this._onPointerUp);
+      // Not passive: while a finger or pen draws, moves or resizes, the page and the zoom hold still under it.
+      this.canvas.addEventListener("touchmove", (e) => {
+        if ((this._gesture || this._eyedrop?.down) && e.cancelable) e.preventDefault();
+      }, { passive: false });
 
       if (typeof ResizeObserver === "function") {
         this._resizeObserver = new ResizeObserver(() => this._resize());
@@ -3652,9 +3656,10 @@
 
     _pointFromEvent(e) {
       const rect = this.canvas.getBoundingClientRect();
+      const at = getCoordinates(e);
       return {
-        x: ((e.clientX - rect.left) / Math.max(1, rect.width)) * this._cssW,
-        y: ((e.clientY - rect.top) / Math.max(1, rect.height)) * this._cssH,
+        x: ((at.x - rect.left) / Math.max(1, rect.width)) * this._cssW,
+        y: ((at.y - rect.top) / Math.max(1, rect.height)) * this._cssH,
         pressure: e.pressure > 0 ? e.pressure : 0.5,
         t: e.timeStamp || performance.now(),
       };
@@ -4744,7 +4749,8 @@
       const point = (e) => {
         const r = c.getBoundingClientRect();
         const zoom = c.offsetWidth ? r.width / c.offsetWidth || 1 : 1;
-        return { x: round1((e.clientX - r.left) / zoom), y: round1((e.clientY - r.top) / zoom), t: Math.round(performance.now() - t0) };
+        const at = getCoordinates(e);
+        return { x: round1((at.x - r.left) / zoom), y: round1((at.y - r.top) / zoom), t: Math.round(performance.now() - t0) };
       };
       c.addEventListener("pointerdown", (e) => {
         e.preventDefault();
@@ -4765,6 +4771,10 @@
       const end = () => { current = null; };
       c.addEventListener("pointerup", end);
       c.addEventListener("pointercancel", end);
+      // Not passive: the page holds still while a finger or pen writes.
+      c.addEventListener("touchmove", (e) => {
+        if (current && e.cancelable) e.preventDefault();
+      }, { passive: false });
     }
 
     _clearHandwriting() {
@@ -5640,8 +5650,9 @@
 
     _palWheelAt(wheel, e) {
       const r = wheel.getBoundingClientRect();
-      const dx = e.clientX - (r.left + r.width / 2);
-      const dy = e.clientY - (r.top + r.height / 2);
+      const at = getCoordinates(e);
+      const dx = at.x - (r.left + r.width / 2);
+      const dy = at.y - (r.top + r.height / 2);
       const hsv = {
         h: ((Math.atan2(dx, -dy) * 180) / Math.PI + 360) % 360,
         s: Math.min(1, Math.hypot(dx, dy) / (r.width / 2)),

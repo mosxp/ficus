@@ -259,6 +259,7 @@
           editor.addEventListener("input", onInput);
           editor.addEventListener("keyup", trackSelection);
           editor.addEventListener("mouseup", trackSelection);
+          editor.addEventListener("touchend", trackSelection);
           editor.addEventListener("focus", trackSelection);
           document.addEventListener("selectionchange", onSelectionChange);
           containerElement.querySelector(".note-toolbar-shell") && containerElement.querySelector(".note-toolbar-shell").addEventListener("click", function () {
@@ -285,6 +286,7 @@
                 editor.removeEventListener("input", onInput);
                 editor.removeEventListener("keyup", trackSelection);
                 editor.removeEventListener("mouseup", trackSelection);
+                editor.removeEventListener("touchend", trackSelection);
                 editor.removeEventListener("focus", trackSelection);
                 document.removeEventListener("selectionchange", onSelectionChange);
               }
@@ -362,6 +364,7 @@
       };
       document.addEventListener("keyup", trackInlineScratchTarget, true);
       document.addEventListener("mouseup", trackInlineScratchTarget, true);
+      document.addEventListener("touchend", trackInlineScratchTarget, true);
       document.addEventListener("focusin", trackInlineScratchTarget, true);
       document.addEventListener("selectionchange", function () {
         try {

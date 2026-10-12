@@ -163,6 +163,7 @@
     forward: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" /></svg>',
     plus: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" /></svg>',
     remove: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" aria-hidden="true"><path d="m4.5 4.5 7 7m0-7-7 7" /></svg>',
+    grip: '<svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><circle cx="6" cy="4" r="1.1" /><circle cx="10" cy="4" r="1.1" /><circle cx="6" cy="8" r="1.1" /><circle cx="10" cy="8" r="1.1" /><circle cx="6" cy="12" r="1.1" /><circle cx="10" cy="12" r="1.1" /></svg>',
     // Space's own: a pencil while editing, an eye while reading.
     pencil: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M13.6 3.4a1.9 1.9 0 0 1 2.7 2.7L7 15.4l-3.6.9.9-3.6 9.3-9.3z" /><path d="M12.2 4.8l3 3" /></svg>',
     eye: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.8 10S4.8 4.6 10 4.6s8.2 5.4 8.2 5.4-3 5.4-8.2 5.4S1.8 10 1.8 10z" /><circle cx="10" cy="10" r="2.5" /></svg>',
@@ -233,8 +234,9 @@
       if (pick) openPreview(pick.dataset.dotId);
     });
     tags.resizeHandle.addEventListener("mousedown", onResizeStart);
+    tags.resizeHandle.addEventListener("touchstart", onResizeStart, { passive: false });
     tags.resizeHandle.addEventListener("keydown", onResizeKey);
-    tags.resizeHandle.addEventListener("dblclick", () => setPreviewWidth(PREVIEW_WIDTH.initial, true));
+    window.FicusInput.onDoubleActivate(tags.resizeHandle, () => setPreviewWidth(PREVIEW_WIDTH.initial, true));
     // The preview keeps to the room there is as the window changes size.
     if (typeof ResizeObserver === "function") {
       new ResizeObserver(() => {
@@ -636,19 +638,27 @@
     try { localStorage.setItem(PREVIEW_WIDTH_KEY, String(tags.previewWidth)); } catch (_) {}
   }
 
-  // Dragging left widens the preview. The width follows the pointer without easing until the button is let go.
+  // Dragging left widens the preview, with the mouse or a finger. The width follows the pointer without easing until
+  // the button or the finger is let go; the finger's touchmoves are cancelled so the page doesn't scroll under it.
   function onResizeStart(event) {
-    if (event.button !== 0 || !tags.previewId) return;
+    const touch = event.type === "touchstart";
+    if ((!touch && event.button !== 0) || (touch && event.touches.length > 1) || !tags.previewId) return;
     event.preventDefault();
-    const startX = event.clientX;
+    const touchId = touch ? event.changedTouches[0].identifier : null;
+    const startX = getCoordinates(event).x;
     const startWidth = tags.preview.getBoundingClientRect().width;
     tags.root.classList.add("is-resizing");
     tags.resizeHandle.classList.add("is-active");
     document.documentElement.classList.add("ctags-resizing");
-    const onMove = (move) => setPreviewWidth(startWidth + (startX - move.clientX), false);
-    const onUp = () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
+    const onMove = (move) => {
+      if (touch && move.cancelable) move.preventDefault();
+      setPreviewWidth(startWidth + (startX - getCoordinates(move, touchId).x), false);
+    };
+    const onUp = (up) => {
+      if (touch && ![...up.changedTouches].some((t) => t.identifier === touchId)) return;
+      document.removeEventListener(touch ? "touchmove" : "mousemove", onMove);
+      document.removeEventListener(touch ? "touchend" : "mouseup", onUp);
+      if (touch) document.removeEventListener("touchcancel", onUp);
       // The last width is laid out before the slide's easing comes back, so it isn't eased into.
       void tags.preview.offsetWidth;
       tags.root.classList.remove("is-resizing");
@@ -656,8 +666,14 @@
       document.documentElement.classList.remove("ctags-resizing");
       setPreviewWidth(tags.previewWidth, true);
     };
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
+    if (touch) {
+      document.addEventListener("touchmove", onMove, { passive: false });
+      document.addEventListener("touchend", onUp);
+      document.addEventListener("touchcancel", onUp);
+    } else {
+      document.addEventListener("mousemove", onMove);
+      document.addEventListener("mouseup", onUp);
+    }
   }
 
   function onResizeKey(event) {
@@ -1284,9 +1300,10 @@
 
     function pointFor(event) {
       const rect = svg.getBoundingClientRect();
+      const { x, y } = getCoordinates(event);
       return {
-        x: (event.clientX - rect.left - rect.width / 2) / view.zoom,
-        y: (event.clientY - rect.top - rect.height / 2) / view.zoom,
+        x: (x - rect.left - rect.width / 2) / view.zoom,
+        y: (y - rect.top - rect.height / 2) / view.zoom,
       };
     }
 
@@ -1294,7 +1311,8 @@
       const group = event.target.closest?.(".cgraph-node");
       const node = group && view.nodes.get(group.dataset.dotId);
       if (!node || event.button > 0) return;
-      view.drag = { id: node.id, group, startX: event.clientX, startY: event.clientY, moved: false, offset: null };
+      const press = getCoordinates(event);
+      view.drag = { id: node.id, group, startX: press.x, startY: press.y, moved: false, offset: null };
       const at = pointFor(event);
       view.drag.offset = { x: node.x - at.x, y: node.y - at.y };
       try { svg.setPointerCapture(event.pointerId); } catch (_) {}
@@ -1304,7 +1322,8 @@
       const node = drag && view.nodes.get(drag.id);
       if (!node) return;
       if (!drag.moved) {
-        if (Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < FORCE.dragThreshold) return;
+        const { x, y } = getCoordinates(event);
+        if (Math.hypot(x - drag.startX, y - drag.startY) < FORCE.dragThreshold) return;
         drag.moved = true;
         drag.group.classList.add("is-dragging");
         view.alphaTarget = FORCE.dragAlpha;
@@ -1805,8 +1824,8 @@
       const go = event.target.closest(".nb-outline-go");
       if (go) scrollToAnchor(go.dataset.target);
     });
-    refs.outline.addEventListener("dblclick", (event) => {
-      const go = isNotebookEditing && event.target.closest(".nb-outline-topic .nb-outline-go");
+    window.FicusInput.onDoubleActivate(refs.outline, (event) => {
+      const go = isNotebookEditing && event.target.closest?.(".nb-outline-topic .nb-outline-go");
       if (go) renameTopic(book, Number(go.dataset.index));
     });
     refs.outline.addEventListener("keydown", (event) => onOutlineKey(event, book));
@@ -2228,6 +2247,14 @@
     row.className = className;
     row.draggable = isNotebookEditing;
     row.dataset.index = String(index);
+    // A finger can't drag the row itself everywhere, so it moves it from this (shown on touch screens).
+    if (isNotebookEditing) {
+      const grip = document.createElement("span");
+      grip.className = "nb-outline-grip";
+      grip.setAttribute("aria-hidden", "true");
+      grip.innerHTML = ICONS.grip;
+      row.append(grip);
+    }
     return row;
   }
 
@@ -2321,19 +2348,29 @@
   function wireOutlineDrag(book) {
     const list = nb.refs.outline;
     const clearMarks = () => list.querySelectorAll(".drop-before, .drop-after").forEach((row) => row.classList.remove("drop-before", "drop-after"));
-    const landing = (event) => {
-      const row = event.target.closest?.(".nb-outline-item[data-index]");
+    const spotAt = (row, y) => {
       if (!row || nb.dragIndex === null) return null;
       const box = row.getBoundingClientRect();
-      return { row, index: Number(row.dataset.index), after: event.clientY > box.top + box.height / 2 };
+      return { row, index: Number(row.dataset.index), after: y > box.top + box.height / 2 };
+    };
+    const landing = (event) => spotAt(event.target.closest?.(".nb-outline-item[data-index]"), getCoordinates(event).y);
+    const markSpot = (spot) => {
+      clearMarks();
+      if (spot && spot.index !== nb.dragIndex) spot.row.classList.add(spot.after ? "drop-after" : "drop-before");
+    };
+    const dropAt = (spot, from) => {
+      if (!spot || from === null || spot.index === from) return;
+      const place = spot.index + (spot.after ? 1 : 0);
+      const at = moveItem(book, from, place > from ? place - 1 : place);
+      const row = at >= 0 && list.querySelector(`.nb-outline-item[data-index="${at}"]`);
+      if (row) flash(row);
     };
     const mark = (event) => {
       const spot = landing(event);
       if (!spot) return;
       event.preventDefault();
       event.dataTransfer.dropEffect = "move";
-      clearMarks();
-      if (spot.index !== nb.dragIndex) spot.row.classList.add(spot.after ? "drop-after" : "drop-before");
+      markSpot(spot);
     };
     list.addEventListener("dragstart", (event) => {
       const row = event.target.closest?.(".nb-outline-item[data-index]");
@@ -2359,16 +2396,34 @@
       clearMarks();
       if (!spot || from === null) return;
       event.preventDefault();
-      if (spot.index === from) return;
-      const place = spot.index + (spot.after ? 1 : 0);
-      const at = moveItem(book, from, place > from ? place - 1 : place);
-      const row = at >= 0 && list.querySelector(`.nb-outline-item[data-index="${at}"]`);
-      if (row) flash(row);
+      dropAt(spot, from);
     });
-    list.addEventListener("dragend", () => {
+    const endDrag = () => {
       nb.dragIndex = null;
       clearMarks();
       list.querySelectorAll(".is-dragging").forEach((row) => row.classList.remove("is-dragging"));
+    };
+    list.addEventListener("dragend", endDrag);
+    // The same with a finger or pen, from a row's grip: the row under the finger is found from where it is.
+    const rowAt = (y) => [...list.querySelectorAll(".nb-outline-item[data-index]")].find((row) => {
+      const box = row.getBoundingClientRect();
+      return y >= box.top && y < box.bottom;
+    });
+    window.FicusInput.bindGripReorder(list, {
+      grip: ".nb-outline-grip",
+      start: (grip) => {
+        const row = grip.closest(".nb-outline-item[data-index]");
+        if (!isNotebookEditing || !row) return false;
+        nb.dragIndex = Number(row.dataset.index);
+        row.classList.add("is-dragging");
+      },
+      move: ({ y }) => markSpot(spotAt(rowAt(y), y)),
+      end: (at) => {
+        const from = nb.dragIndex;
+        const spot = at ? spotAt(rowAt(at.y), at.y) : null;
+        endDrag();
+        dropAt(spot, from);
+      },
     });
   }
 

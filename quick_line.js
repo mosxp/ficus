@@ -428,7 +428,7 @@
       const input = pop.querySelector("[data-ql-pop-primary]") || pop.querySelector("input");
       const secondaryInput = pop.querySelector("[data-ql-pop-secondary]");
       const finish = (value) => {
-        document.removeEventListener("mousedown", onDoc, true);
+        document.removeEventListener("pointerdown", onDoc, true);
         closeFieldPopover();
         if (value == null) options.onCancel?.();
         else if (secondary) options.onSubmit?.(String(value), String(secondaryInput?.value || "").trim());
@@ -455,7 +455,8 @@
       bindKeys(input);
       bindKeys(secondaryInput);
       setTimeout(() => {
-        document.addEventListener("mousedown", onDoc, true);
+        // pointerdown, not mousedown: iOS Safari sends no mousedown for a tap on most of the page.
+        document.addEventListener("pointerdown", onDoc, true);
         input.focus();
         input.select();
       }, 30);
@@ -1065,7 +1066,7 @@
       tagMenu.addEventListener("click", onTagClick);
       photoInput.addEventListener("change", onPhoto);
       fileInput.addEventListener("change", onFile);
-      document.addEventListener("mousedown", onDocDown);
+      document.addEventListener("pointerdown", onDocDown);
 
       function teardown() {
         editor.removeEventListener("input", onInput);
@@ -1077,7 +1078,7 @@
         tagMenu.removeEventListener("click", onTagClick);
         photoInput.removeEventListener("change", onPhoto);
         fileInput.removeEventListener("change", onFile);
-        document.removeEventListener("mousedown", onDocDown);
+        document.removeEventListener("pointerdown", onDocDown);
         closeMenus();
         closeFieldPopover();
       }

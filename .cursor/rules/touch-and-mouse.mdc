@@ -1,0 +1,46 @@
+---
+description: Every Ficus interaction must work with both a mouse and a touch screen (iPad first)
+alwaysApply: true
+---
+
+# Mouse and touch, always
+
+Never assume a mouse. Every new feature, component and UI element handles mouse and touch by default.
+Helpers live in `ficus_input.js` (`window.FicusInput`, loaded first).
+
+- **Events**: prefer Pointer Events (`pointerdown/move/up/cancel`) with `setPointerCapture`. If you must use
+  mouse events, bind the touch twins (`touchstart/move/end/cancel`) to the same handlers.
+- **Coordinates**: read them with `getCoordinates(event)` (or `getCoordinates(event, touchId)`), never
+  `event.clientX` / `touches[0]` directly.
+- **Drags, resizes, drawing**: give the element `touch-action: none` in CSS. Where TouchEvents drive it, cancel
+  `touchmove` from a `{ passive: false }` listener so iOS doesn't pan or zoom the page.
+- **No hover-only UI**: anything revealed on `:hover` / `mouseenter` also shows under
+  `@media (hover: none), (pointer: coarse)`, on tap/focus, or always in edit mode.
+- **Double-click**: `FicusInput.onDoubleActivate(el, handler)`, not a bare `dblclick` (iOS sends none for taps).
+- **HTML drag and drop** (`draggable`): add a grip and `FicusInput.bindGripReorder(list, { grip, start, move, end })`
+  for fingers and pens.
+- **Outside-click dismiss**: listen to `pointerdown`, not `mousedown` (iOS sends no mousedown for most taps).
+- **Focus keepers** (`mousedown` → `preventDefault` on menus and toolbars) are fine as they are.
+- **Hit areas**: handles at least ~28px on coarse pointers.
+
+```js
+// BAD
+handle.addEventListener("mousedown", (e) => { startX = e.clientX; window.addEventListener("mousemove", move); });
+
+// GOOD
+handle.addEventListener("pointerdown", (e) => {
+  e.preventDefault();
+  handle.setPointerCapture(e.pointerId);
+  startX = getCoordinates(e).x;
+});
+handle.addEventListener("pointermove", (e) => { if (handle.hasPointerCapture(e.pointerId)) move(getCoordinates(e)); });
+```
+
+```css
+/* BAD */
+.row:hover .row-delete { opacity: 1; }
+/* GOOD */
+.row:hover .row-delete, .row:focus-within .row-delete { opacity: 1; }
+@media (hover: none), (pointer: coarse) { .row-delete { opacity: 1; } }
+.row-grip { touch-action: none; -webkit-touch-callout: none; }
+```
