@@ -167,7 +167,11 @@ Block dots and the note editor share one block engine (`attachUBlock`, `BLOCK_TY
 | **Display** | A clean, minimal card. |
 | **Settings** | Opened on click or tap, for inline configuration. |
 
-The block types are Rich Note, Photo, Link, Checklist, File, Photo Album, Audio / Voice, Video and Scrapboard.
+The block types are Rich Note, Photo, Link, Checklist, File, Photo Album, Audio / Voice, Video, Calendar Event and Scrapboard.
+
+A **Calendar Event** block (`{ type: "calendar", eventId, title, start, end, allDay, htmlLink, calendarId: "primary" }`) stands for an event in the user's primary Google Calendar. Adding one opens a sheet with two tabs: **Find Event** searches upcoming events (`events.list` with the typed text), and **New Event** makes one from a title, start and end (`events.insert`). The block shows the event's date tile, title, when (all-day events by date) and a link that opens it in Google Calendar. Open, it keeps its size and offers **Change event**. The block keeps a copy of the event as it was picked; later edits in Google Calendar don't reach it.
+
+In a block dot, a press on the empty grid (or the empty part of a frame) marks out a new block, by mouse, pen or finger. A finger draws through `touchstart` / `touchmove` / `touchend` (its `pointerdown` is ignored), and its `touchmove`s are cancelled (`preventDefault`, on a non-passive listener) so iOS Safari doesn't scroll the page instead. A second finger drops the block being drawn.
 
 The shared note editor (`canvas-editor.js`) adds smart chips: "@" mentions for contacts, places, links and photos.
 
@@ -190,7 +194,9 @@ The numbered SQL files in `supabase/` belong to the old Supabase backend, which 
 
 ### Signing in
 
-Signing in is required however the app is served, the local server included. `ficus_drive.js` (`window.FicusDrive`) loads Google Identity Services and the Google API client (`gapi`, with the Drive v3 discovery document). It gets an access token for `drive.file openid email profile` from the OAuth client in `FICUS_GOOGLE_CONFIG.clientId` (`index.html`), and hands it to `gapi.client.setToken`. The user's id is their Google account's `sub`, from the userinfo endpoint. The session (`{ uid, email, name, picture, accessToken, expiresAt }`) is kept in IndexedDB, so a reload within the token's hour opens straight in.
+Signing in is required however the app is served, the local server included. `ficus_drive.js` (`window.FicusDrive`) loads Google Identity Services and the Google API client (`gapi`, with the Drive v3 discovery document). It gets an access token for `drive.file calendar.events openid email profile` from the OAuth client in `FICUS_GOOGLE_CONFIG.clientId` (`index.html`), and hands it to `gapi.client.setToken`. The Calendar v3 discovery document is loaded separately, so if it fails Drive still works. The user's id is their Google account's `sub`, from the userinfo endpoint. The session (`{ uid, email, name, picture, accessToken, expiresAt, calendar }`) is kept in IndexedDB, so a reload within the token's hour opens straight in.
+
+Drive is required and Calendar is optional. `calendar` records whether Google granted `calendar.events` (with granular consent the user can untick it). Every new token, from sign-in or Reconnect, asks for both scopes. If the token lacks Calendar, the Calendar Event sheet shows **Connect Google Calendar**, which asks again with Google's consent screen (`FicusDrive.connectCalendar`). If the token has run out, the sheet shows **Reconnect Google**.
 
 `initFicusAuth`, the last script in `index.html`, guards the app:
 - The body starts as `ficus-locked ficus-auth-pending`. While locked, the section tabs and the account corner are hidden and the app stays on Cover, which shows a square **Log in with Google** button once the session check is done. Google's popup only opens straight from a click, so its libraries load ahead. Without a client ID the button is disabled with a note saying so. If the user unticks Drive on Google's consent screen, sign-in stops and asks them to allow it.
@@ -200,7 +206,7 @@ Signing in is required however the app is served, the local server included. `fi
 - Ficus runs in one tab at a time (a `BroadcastChannel` named `ficus`). A tab that opens asks the others to save and step aside; they show "Ficus is open in another tab" with **Use here**.
 - Sign Out saves to Drive first. If that fails it asks, and the unsaved changes stay on the device for the next sign-in there. Then it forgets the session, the device copy (once Drive has it all) and the cached uploads, and reloads. Other tabs reload too.
 
-Setting it up: create an OAuth client ID ("Web application") in Google Cloud and enable the Google Drive API in its project. Add each address Ficus is served from to its Authorized JavaScript origins (`https://ficus.website`, `http://localhost:8000`). Put the client ID in `FICUS_GOOGLE_CONFIG` in `index.html`. While the consent screen is in Testing, only listed test users can sign in.
+Setting it up: create an OAuth client ID ("Web application") in Google Cloud and enable the Google Drive API and Google Calendar API in its project. Add the `drive.file` and `calendar.events` scopes to the OAuth consent screen. Add each address Ficus is served from to its Authorized JavaScript origins (`https://ficus.website`, `http://localhost:8000`). Put the client ID in `FICUS_GOOGLE_CONFIG` in `index.html`. While the consent screen is in Testing, only listed test users can sign in.
 
 ---
 

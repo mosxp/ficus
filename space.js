@@ -8178,7 +8178,7 @@
   const BLOCK_LINK_ICON = '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 11.5a3.5 3.5 0 0 0 5 0l2.5-2.5a3.5 3.5 0 0 0-5-5l-1 1" /><path d="M11.5 8.5a3.5 3.5 0 0 0-5 0L4 11a3.5 3.5 0 0 0 5 5l1-1" /></svg>';
   // Block types whose settings open in place at their display size, with their controls floating outside the
   // block; the others grow to fit their settings panel.
-  const IN_PLACE_TYPES = new Set(["note", "photo", "link", "file", "album", "audio", "video", "scrapboard", "frame"]);
+  const IN_PLACE_TYPES = new Set(["note", "photo", "link", "file", "album", "audio", "video", "calendar", "scrapboard", "frame"]);
   // Where those floating controls sit (kept EDIT_CHROME_MARGIN inside the page): Done / Delete EDIT_ACTIONS_LIFT
   // above one top corner, and the rest below the block, its bottom edge `drop` under the block's, centred on the
   // block or (`start`) level with its left edge; `span` rows are as wide as the block (at least EDIT_ROW_MIN).
@@ -8191,13 +8191,14 @@
     album: { corner: "right", drop: 88, span: true },
     audio: { corner: "right", drop: 55, span: true },
     video: { corner: "right", drop: 92, span: true },
+    calendar: { corner: "right", drop: 50, span: false },
     scrapboard: { corner: "right", drop: 75, span: false },
     frame: { corner: "right", drop: 75, span: false, start: true },
   };
   // The grid's Add Block menu, in groups split by a rule: Add child dot (which turns the menu into a pick of dot
-  // types), frames and the two blocks you write or draw on, then the ones that hold a link, file or media.
-  // (Checklists live inside rich notes.)
-  const BLOCK_ADD_MENU = [["childdot", "frame", "note", "scrapboard"], ["link", "file", "photo", "album", "video", "audio"]];
+  // types), frames and the two blocks you write or draw on, then the ones that hold a link, file, media or calendar
+  // event. (Checklists live inside rich notes.)
+  const BLOCK_ADD_MENU = [["childdot", "frame", "note", "scrapboard"], ["link", "file", "photo", "album", "video", "audio", "calendar"]];
   const BLOCK_ADD_ICONS = {
     childdot: CHILD_DOT_ICON,
     frame: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="14" height="14" rx="2.5" /><path d="M3 7.5h14" /></svg>',
@@ -8350,6 +8351,11 @@
     container.addEventListener("pointermove", onBlockPointerMove);
     container.addEventListener("pointerup", onBlockPointerUp);
     container.addEventListener("pointercancel", onBlockPointerUp);
+    // Not passive: a finger drawing a block cancels its touchmoves so iOS Safari doesn't scroll the page instead.
+    container.addEventListener("touchstart", onBlockTouchStart, { passive: true });
+    container.addEventListener("touchmove", onBlockTouchMove, { passive: false });
+    container.addEventListener("touchend", onBlockTouchEnd);
+    container.addEventListener("touchcancel", onBlockTouchEnd);
     container.addEventListener("keydown", onBlockKeyDown);
     container.addEventListener("wheel", onBlockWheel, { passive: false });
     container.addEventListener("scroll", () => {
@@ -8952,6 +8958,7 @@
     else if (block.type === "album") dressAlbumCard(body, block);
     else if (block.type === "audio") dressAudioCard(body, block);
     else if (block.type === "video") dressVideoCard(body, block);
+    else if (block.type === "calendar") dressCalendarCard(body);
     else if (block.type === "scrapboard") dressBoardCard(view, body, block);
     else if (isFrameBlock(block)) body.append(buildFrameCard(view, block, index));
     else if (isChildBlock(block)) body.append(buildChildPortal(view, block));
@@ -9068,6 +9075,14 @@
     const root = widgetFor(view, id)?.querySelector('[data-ublock-state="settings"]');
     if (root) showPhotoCaption(root, value);
     queueBlockSave(view);
+  }
+
+  /* A calendar event block shows its date tile, title, when and a link to the event in Google Calendar. Open, it
+     shows the same (the link keeps its place but hides) so it keeps its size: the engine's Change event, Delete and
+     Done row is hidden, and Change event outside presses the hidden copy, so its sheet runs as usual. */
+  function dressCalendarCard(body) {
+    const actions = body.querySelector('[data-ublock-state="settings"] [data-ublock-cal-actions]');
+    if (actions) actions.hidden = true;
   }
 
   /* A file block is a tile: its extension, huge and faint (tinted by kind), fills the block over a footer with its
@@ -9806,11 +9821,12 @@
     widgetFor(view, block.id)?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
   }
 
-  /* While a rich note, photo, link, file, album, audio, video, scrapboard or frame block is open its controls float
+  /* While a rich note, photo, link, file, album, audio, video, calendar, scrapboard or frame block is open its controls float
      outside the block, in a layer over the whole page: Done and Delete above one of its top corners, and below it the
      note's toolbar (as a capsule), the photo's caption field and Replace button, the link's address and title fields,
      the file's note / title field and Replace button, the album's title field and layout toggle, the audio's title
-     field and Replace button, the video's title field, link field and Replace button, the scrapboard's tool capsule
+     field and Replace button, the video's title field, link field and Replace button, the calendar event's Change
+     event button, the scrapboard's tool capsule
      (with its Objects panel beside the block), or the frame's title field, header sides and colours. The layer counts
      as part of the open settings, so the engine doesn't treat a click there as a click away.
      A note's toolbar is a text dot's, put in place of the one the engine mounts with the editor (see
@@ -9941,6 +9957,14 @@
       below.append(title, row);
       Object.assign(chrome, { titleField: title, linkField: link, previewTimer: 0 });
       if (view.lastPointerType !== "touch") focus = title;
+    } else if (type === "calendar") {
+      below.className = "block-photo-controls";
+      const change = document.createElement("button");
+      change.type = "button";
+      change.className = "block-edit-btn is-replace";
+      change.innerHTML = `${BLOCK_REPLACE_ICON}<span>Change event</span>`;
+      change.addEventListener("click", () => widgetFor(view, id)?.querySelector("[data-ublock-calendar-change]")?.click());
+      below.append(change);
     } else if (type === "album") {
       below.className = "block-album-controls";
       const title = field("text", "Album title", "Album title", block?.title, (value) => setBlockTitle(view, id, value));
@@ -10289,12 +10313,12 @@
     const view = blockView;
     if (view) view.lastPointerType = event.pointerType;
     if (!view || !view.editing || view.gesture || view.sketch || event.button !== 0) return;
-    // The empty part of a frame is page to draw new blocks on, unless the frame is open.
-    const inFrame = event.target.classList?.contains("frame-content") && !event.target.closest(".grid-widget-block.is-editing");
-    if (event.target === view.container || event.target === view.canvas || inFrame) {
-      if (view.dismissPress === event) return;
-      startBlockSketch(view, event);
-      if (inFrame) view.sketch.frameId = event.target.closest(".grid-widget-block").dataset.widgetId;
+    const frameId = blockSketchSurface(view, event.target);
+    if (frameId !== null) {
+      // A finger draws through the touch events instead (see onBlockTouchStart).
+      if (view.dismissPress === event || event.pointerType === "touch") return;
+      startBlockSketch(view, event, event);
+      if (frameId) view.sketch.frameId = frameId;
       return;
     }
     const handle = event.target.closest("[data-widget-resize]");
@@ -10330,7 +10354,8 @@
   function onBlockPointerMove(event) {
     const view = blockView;
     if (view?.sketch && view.sketch.pointerId === event.pointerId) {
-      moveBlockSketch(view, event);
+      if (view.sketch.mouse) event.preventDefault();
+      moveBlockSketch(view, event.clientX, event.clientY);
       return;
     }
     const gesture = view?.gesture;
@@ -10417,7 +10442,7 @@
   function onBlockPointerUp(event) {
     const view = blockView;
     if (view?.sketch && view.sketch.pointerId === event.pointerId) {
-      endBlockSketch(view, event);
+      endBlockSketch(view, event.type === "pointercancel");
       return;
     }
     const gesture = view?.gesture;
@@ -10610,7 +10635,9 @@
      nearest the pointer. On release the ghost stays put and a menu of block types opens beside it: picking one
      makes that block in the ghost's place, open for editing, and pressing anywhere else (or Escape) drops both, as
      for any Space popover. A press that only dismisses something (a popover, an open block, a block's touch
-     controls) doesn't also start a block. On touch a drag scrolls the grid as usual, so only a tap adds a block. */
+     controls) doesn't also start a block. A finger draws the same way, through touch events: iOS Safari would
+     otherwise take the drag as a scroll and cancel it, so its touchmoves are cancelled while it draws. A second
+     finger lets the block go (two fingers pinch or scroll), and the grid still scrolls from a drag on a block. */
 
   // The grid point nearest a pointer position, kept on the canvas and inside its fixed side.
   function blockGridPoint(view, clientX, clientY) {
@@ -10624,30 +10651,84 @@
     };
   }
 
-  function startBlockSketch(view, event) {
-    const mouse = event.pointerType === "mouse";
+  // Where a press can mark out a new block: "" for the page, a frame's id for the empty part of a frame (unless
+  // the frame is open), or null for anywhere else.
+  function blockSketchSurface(view, target) {
+    if (target === view.container || target === view.canvas) return "";
+    if (!target.classList?.contains("frame-content") || target.closest(".grid-widget-block.is-editing")) return null;
+    return target.closest(".grid-widget-block")?.dataset.widgetId ?? null;
+  }
+
+  // From a pointer press (`event`) or a finger (`point`, a Touch, with `event` its touchstart).
+  function startBlockSketch(view, event, point) {
+    const touch = point !== event;
+    const mouse = !touch && event.pointerType === "mouse";
     if (mouse) {
       event.preventDefault();
       try { view.container.setPointerCapture(event.pointerId); } catch (_) {}
     }
     view.sketch = {
-      pointerId: event.pointerId, mouse, startX: event.clientX, startY: event.clientY, x: event.clientX, y: event.clientY,
-      origin: blockGridPoint(view, event.clientX, event.clientY), dragged: false, rect: null, ghost: null, menu: null, frame: 0,
+      pointerId: touch ? null : event.pointerId, touchId: touch ? point.identifier : null, mouse,
+      startX: point.clientX, startY: point.clientY, x: point.clientX, y: point.clientY,
+      origin: blockGridPoint(view, point.clientX, point.clientY), dragged: false, rect: null, ghost: null, menu: null, frame: 0,
     };
   }
 
-  function moveBlockSketch(view, event) {
+  function moveBlockSketch(view, x, y) {
     const sketch = view.sketch;
-    sketch.x = event.clientX;
-    sketch.y = event.clientY;
+    sketch.x = x;
+    sketch.y = y;
     if (!sketch.dragged) {
       if (Math.hypot(sketch.x - sketch.startX, sketch.y - sketch.startY) < BLOCK_SKETCH_SLOP) return;
       sketch.dragged = true;
       document.documentElement.dataset.blockGesture = "create";
     }
-    if (sketch.mouse) event.preventDefault();
     trackBlockSketch(view);
     runBlockAutoScroll(view, () => view.sketch, trackBlockSketch);
+  }
+
+  // The finger drawing this sketch among a touch event's changed touches, if it's one of them.
+  function sketchTouch(sketch, event) {
+    return sketch?.touchId == null ? null : [...event.changedTouches].find((touch) => touch.identifier === sketch.touchId) || null;
+  }
+
+  function onBlockTouchStart(event) {
+    const view = blockView;
+    if (!view) return;
+    if (event.touches.length > 1) {
+      if (view.sketch?.touchId != null) cancelBlockSketch(view);
+      return;
+    }
+    if (!view.editing || view.gesture || view.sketch) return;
+    const frameId = blockSketchSurface(view, event.target);
+    if (frameId === null) return;
+    // The press's pointerdown (which comes first) found something to dismiss.
+    const press = view.dismissPress;
+    if (press?.pointerType === "touch" && Math.abs(event.timeStamp - press.timeStamp) < 1000) return;
+    view.lastPointerType = "touch";
+    startBlockSketch(view, event, event.changedTouches[0]);
+    if (frameId) view.sketch.frameId = frameId;
+  }
+
+  // Cancelled while a finger or pen draws, so the page holds still under it.
+  function onBlockTouchMove(event) {
+    const sketch = blockView?.sketch;
+    if (!sketch || (sketch.touchId == null && sketch.pointerId == null)) return;
+    if (event.cancelable) event.preventDefault();
+    const touch = sketchTouch(sketch, event);
+    if (touch) moveBlockSketch(blockView, touch.clientX, touch.clientY);
+  }
+
+  function onBlockTouchEnd(event) {
+    const view = blockView;
+    const touch = sketchTouch(view?.sketch, event);
+    if (!touch) return;
+    if (event.type === "touchcancel") {
+      endBlockSketch(view, true);
+      return;
+    }
+    moveBlockSketch(view, touch.clientX, touch.clientY);
+    endBlockSketch(view, false);
   }
 
   // The box between the grid point pressed and the one nearest the pointer, at least the smallest block size
@@ -10685,12 +10766,12 @@
     style.height = `${sketch.rect.height}px`;
   }
 
-  function endBlockSketch(view, event) {
+  function endBlockSketch(view, cancelled) {
     const sketch = view.sketch;
     cancelAnimationFrame(sketch.frame);
     sketch.frame = 0;
     if (document.documentElement.dataset.blockGesture === "create") delete document.documentElement.dataset.blockGesture;
-    if (event.type === "pointercancel") {
+    if (cancelled) {
       cancelBlockSketch(view);
       return;
     }
@@ -10713,6 +10794,7 @@
   function openBlockSketchMenu(view, fromKeyboard) {
     const sketch = view.sketch;
     sketch.pointerId = null;
+    sketch.touchId = null;
     showBlockGhost(view);
     sketch.ghost.classList.add("is-set");
     sizeBlockCanvas(view);
@@ -12146,7 +12228,8 @@
   const READ_BLOCK_HOOKS = ["data-ublock-open", "data-ublock-done", "data-ublock-delete", "data-ublock-replace",
     "data-ublock-media-replace", "data-ublock-check-add", "data-ublock-check-remove", "data-sbx-add",
     "data-ublock-album-add", "data-ublock-album-remove", "data-ublock-album-move", "data-ublock-album-layout",
-    "data-ublock-sb-add", "data-ublock-sb-remove", "data-ublock-sb-move", "data-ublock-sb-layout", "data-ublock-link-mode"];
+    "data-ublock-sb-add", "data-ublock-sb-remove", "data-ublock-sb-move", "data-ublock-sb-layout", "data-ublock-link-mode",
+    "data-ublock-calendar-change"];
 
   function lockReadBlock(body) {
     for (const hook of READ_BLOCK_HOOKS) {

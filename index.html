@@ -17,7 +17,7 @@
     <script src="canvas-editor.js"></script>
     <script src="scrapboard.js?v=25"></script>
     <script src="quick_line.js"></script>
-    <script src="space.js?v=80" defer></script>
+    <script src="space.js?v=81" defer></script>
     <script src="collection.js?v=18" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -28,15 +28,15 @@
           localStorage.setItem("ficus_storage_epoch", APP_STORAGE_EPOCH);
         }
       } catch (_) {}
-      // The Google Cloud OAuth client (type "Web application") that signs users in and reaches their Drive. Its
-      // Authorized JavaScript origins must list every address Ficus is served from, and the project needs the
-      // Google Drive API enabled.
+      // The Google Cloud OAuth client (type "Web application") that signs users in and reaches their Drive and
+      // Calendar. Its Authorized JavaScript origins must list every address Ficus is served from, and the project
+      // needs the Google Drive API and Google Calendar API enabled.
       window.FICUS_GOOGLE_CONFIG = {
         clientId: "245135305204-l479tldfvcu4vvg09m31vbtph2m81fve.apps.googleusercontent.com",
       };
     </script>
     <!-- Bump ?v= whenever these change so browsers never pair them with a different index.html. -->
-    <script src="ficus_drive.js?v=1"></script>
+    <script src="ficus_drive.js?v=2"></script>
     <script src="ficus_cloud.js?v=15"></script>
     <script src="ficus_store.js?v=2"></script>
     <script>
@@ -2679,6 +2679,75 @@
       .block-file-open:hover { background: #f5f5f4; color: #1c1917; }
       .block-file-open svg { width: 0.85rem; height: 0.85rem; }
       .grid-widget-block.is-editing:not([data-widget-type="frame"]) .block-file-open { visibility: hidden; }
+      /* A Calendar Event block: a date tile beside the event's title and when, and a link to it in Google Calendar. */
+      .block-cal-card { display: flex; flex-direction: column; justify-content: center; gap: 0.5rem; padding: 0.75rem; border: 1px solid #e7e5e4; background: #fff; }
+      .grid-widget-body > .block-cal-card { height: 100%; border: 0; }
+      .block-cal-main { display: flex; min-width: 0; align-items: center; gap: 0.75rem; }
+      .block-cal-date {
+        display: flex; width: 3rem; height: 3rem; flex-shrink: 0; flex-direction: column; align-items: center; justify-content: center;
+        border: 1px solid #e7e5e4; background: #fafaf9;
+      }
+      .block-cal-month { font-size: 0.6rem; font-weight: 700; line-height: 1; letter-spacing: 0.08em; text-transform: uppercase; color: #8c8c8c; }
+      .block-cal-day { margin-top: 0.15rem; font-size: 1.2rem; font-weight: 600; line-height: 1; color: #1c1917; font-variant-numeric: tabular-nums; }
+      .block-cal-text { min-width: 0; flex: 1; }
+      .block-cal-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.85rem; font-weight: 600; line-height: 1.25; color: #1c1917; }
+      .block-cal-when {
+        display: -webkit-box; margin-top: 0.15rem; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+        font-size: 0.72rem; line-height: 1.3; color: #8c8c8c;
+      }
+      .block-cal-open {
+        display: inline-flex; width: 1.75rem; height: 1.75rem; flex-shrink: 0; align-items: center; justify-content: center;
+        color: #8c8c8c; transition: background 120ms ease, color 120ms ease;
+      }
+      .block-cal-open:hover { background: #f5f5f4; color: #1c1917; }
+      .block-cal-open svg { width: 0.85rem; height: 0.85rem; }
+      .block-cal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.375rem; }
+      .block-cal-actions[hidden] { display: none; }
+      .block-cal-btn { height: 2rem; padding: 0 0.75rem; border: 1px solid #e7e5e4; background: #fff; font-size: 0.72rem; font-weight: 600; color: #57534e; }
+      .block-cal-btn:hover { background: #f5f5f4; color: #1c1917; }
+      .block-cal-btn.is-danger { color: #be123c; }
+      .block-cal-btn.is-done { margin-left: auto; border-color: #1c1917; background: #1c1917; color: #fff; }
+      .grid-widget-block.is-editing .block-cal-open { visibility: hidden; }
+      /* The Calendar Event sheet: find one of the user's upcoming Google Calendar events, or make one. */
+      #block-calendar-sheet {
+        position: fixed; inset: 0; z-index: 1000; display: flex; align-items: flex-end; justify-content: center;
+        padding: 0.75rem; background: rgba(28, 25, 23, 0.25);
+      }
+      @media (min-width: 640px) { #block-calendar-sheet { align-items: center; } }
+      #block-calendar-sheet, #block-calendar-sheet * { border-radius: 0; }
+      .cal-sheet {
+        display: flex; width: 100%; max-width: 24rem; max-height: calc(100dvh - 1.5rem); flex-direction: column;
+        border: 1px solid #e7e5e4; background: #fff; box-shadow: 0 24px 48px rgba(28, 25, 23, 0.18), 0 2px 6px rgba(28, 25, 23, 0.08);
+      }
+      .cal-sheet-head { display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 0.75rem 0.5rem 1rem; }
+      .cal-sheet-head h3 { flex: 1; font-size: 0.875rem; font-weight: 600; color: #1c1917; }
+      .cal-sheet-close { display: inline-flex; width: 2rem; height: 2rem; align-items: center; justify-content: center; color: #8c8c8c; }
+      .cal-sheet-close:hover { background: #f5f5f4; color: #1c1917; }
+      .cal-sheet-tabs { display: grid; grid-template-columns: 1fr 1fr; margin: 0 1rem; border-bottom: 1px solid #e7e5e4; }
+      .cal-sheet-tab { height: 2.25rem; margin-bottom: -1px; border-bottom: 2px solid transparent; font-size: 0.8rem; font-weight: 600; color: #8c8c8c; }
+      .cal-sheet-tab:hover { color: #1c1917; }
+      .cal-sheet-tab[aria-selected="true"] { border-bottom-color: #1c1917; color: #1c1917; }
+      .cal-sheet-body { min-height: 0; overflow-y: auto; padding: 0.75rem 1rem 1rem; }
+      .cal-sheet-label { display: block; margin: 0.6rem 0 0.25rem; font-size: 0.65rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #8c8c8c; }
+      .cal-sheet-label:first-child { margin-top: 0; }
+      /* 16px text, so iPhone and iPad Safari don't zoom in on the field. */
+      .cal-sheet-field {
+        display: block; width: 100%; height: 2.5rem; padding: 0 0.75rem; border: 1px solid #e7e5e4; outline: none;
+        background: #fafaf9; font-size: 1rem; color: #1c1917;
+      }
+      .cal-sheet-field:focus { border-color: #8c8c8c; background: #fff; }
+      .cal-sheet-results { max-height: 17rem; margin-top: 0.5rem; overflow-y: auto; overscroll-behavior: contain; }
+      .cal-sheet-result { display: flex; width: 100%; align-items: center; gap: 0.65rem; padding: 0.5rem; border-bottom: 1px solid #f5f5f4; text-align: left; }
+      .cal-sheet-result:hover, .cal-sheet-result:focus-visible { outline: none; background: #f5f5f4; }
+      .cal-sheet-result .block-cal-date { width: 2.5rem; height: 2.5rem; }
+      .cal-sheet-result .block-cal-day { font-size: 1rem; }
+      .cal-sheet-primary { width: 100%; height: 2.5rem; margin-top: 0.9rem; background: #1c1917; font-size: 0.8rem; font-weight: 600; color: #fff; }
+      .cal-sheet-primary:hover { background: #44403c; }
+      .cal-sheet-primary:disabled { cursor: default; background: #8c8c8c; }
+      .cal-sheet-note { padding: 0.75rem 0 0.25rem; font-size: 0.75rem; line-height: 1.4; text-align: center; color: #8c8c8c; }
+      .cal-sheet-note.is-error { color: #be123c; }
+      .cal-sheet-connect { padding: 0.25rem 0 0.5rem; text-align: center; }
+      .cal-sheet-connect p { font-size: 0.8rem; line-height: 1.45; color: #57534e; }
       /* A photo album: its photos (mosaic or carousel) over a title / photo-count footer. Open, just the photo manager. */
       .grid-widget-body > .block-album-card { display: flex; height: 100%; flex-direction: column; padding: 0 !important; background: #fff; }
       .block-album-media { position: relative; flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: 8px; }
@@ -7621,9 +7690,10 @@
         audio: { symbol: "\u266A", label: "Audio", menuLabel: "Audio / Voice", type: "audio" },
         video: { symbol: "\u25B7", label: "Video", type: "video" },
         scrapboard: { symbol: "\u2726", label: "Scrapboard", type: "scrapboard" },
+        calendar: { symbol: "\u{1F4C5}", label: "Calendar Event", type: "calendar" },
       };
       const MEDIA_BLOCK_TYPES = ["file", "album", "scrapboard", "audio", "video"];
-      const ADD_BLOCK_MENU_TYPES = ["note", "photo", "link", "checklist", ...MEDIA_BLOCK_TYPES];
+      const ADD_BLOCK_MENU_TYPES = ["note", "photo", "link", "checklist", "file", "album", "scrapboard", "audio", "calendar", "video"];
       function isMediaBlockType(type) {
         return MEDIA_BLOCK_TYPES.includes(String(type || ""));
       }
@@ -8720,6 +8790,344 @@
           ${mediaActionsHtml(`<button type="button" data-ublock-media-replace class="${MEDIA_BUTTON_CLASS}">Replace video</button>`)}
         </div>`;
       }
+      /* ── Calendar Event blocks ──
+         { type: "calendar", eventId, title, start, end, allDay, htmlLink, calendarId }: an event in the user's primary
+         Google Calendar, found or made in the Calendar Event sheet (Google calls through window.FicusDrive). */
+      // An all-day event's start / end are days on the calendar, read in local time (not as UTC midnight).
+      function calendarEventDate(value, allDay) {
+        const text = String(value || "");
+        if (allDay || /^\d{4}-\d{2}-\d{2}$/.test(text)) {
+          const [y, m, d] = text.split("-").map(Number);
+          return y && m && d ? new Date(y, m - 1, d) : null;
+        }
+        const date = new Date(text);
+        return Number.isNaN(date.getTime()) ? null : date;
+      }
+      function formatDateRange(format, from, to) {
+        return typeof format.formatRange === "function" ? format.formatRange(from, to) : `${format.format(from)} – ${format.format(to)}`;
+      }
+      // "Tue, Oct 13, 3:00 – 4:00 PM" or "Tue, Oct 13 · All day", with the year only when it isn't this one.
+      function calendarWhenText(event) {
+        const start = calendarEventDate(event?.start, event?.allDay);
+        if (!start) return "";
+        let end = calendarEventDate(event.end, event.allDay);
+        const day = { weekday: "short", month: "short", day: "numeric" };
+        if (start.getFullYear() !== new Date().getFullYear()) day.year = "numeric";
+        if (event.allDay) {
+          // Google's end date for an all-day event is the day after it ends.
+          if (end) end = new Date(end.getFullYear(), end.getMonth(), end.getDate() - 1);
+          const format = new Intl.DateTimeFormat(undefined, day);
+          return `${end && end > start ? formatDateRange(format, start, end) : format.format(start)} · All day`;
+        }
+        const format = new Intl.DateTimeFormat(undefined, { ...day, hour: "numeric", minute: "2-digit" });
+        return end && end > start ? formatDateRange(format, start, end) : format.format(start);
+      }
+      function calendarDateTileHtml(event) {
+        const start = calendarEventDate(event?.start, event?.allDay);
+        const month = start ? start.toLocaleDateString(undefined, { month: "short" }) : "";
+        return `<span class="block-cal-date" aria-hidden="true"><span class="block-cal-month">${escapeHtml(month)}</span><span class="block-cal-day">${start ? start.getDate() : "?"}</span></span>`;
+      }
+      function calendarCardMainHtml(block, extra = "") {
+        const title = String(block.title || "").trim() || "(No title)";
+        const link = /^https:\/\//.test(String(block.htmlLink || "")) ? block.htmlLink : "";
+        return `<div class="block-cal-main">
+            ${calendarDateTileHtml(block)}
+            <div class="block-cal-text">
+              <p class="block-cal-title">${escapeHtml(title)}</p>
+              <p class="block-cal-when">${escapeHtml(calendarWhenText(block))}</p>
+            </div>
+            ${link ? `<a href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer" data-ublock-open-link class="block-cal-open" title="Open in Google Calendar" aria-label="Open ${escapeHtml(title)} in Google Calendar">${externalArrowIconSvg()}</a>` : ""}
+            ${extra}
+          </div>`;
+      }
+      function renderCalendarBlockDisplayHtml(block, opts = {}) {
+        return `<div class="block-cal-card" ${ublockMetaAttrs(block, opts)} data-ublock-state="display">
+          ${calendarCardMainHtml(block, pencilIconButton('data-ublock-open="1"', "Edit calendar event"))}
+        </div>`;
+      }
+      function renderCalendarBlockSettingsHtml(block, opts = {}) {
+        return `<div class="block-cal-card" ${ublockMetaAttrs(block, opts)} data-ublock-state="settings">
+          ${calendarCardMainHtml(block)}
+          <div class="block-cal-actions" data-ublock-cal-actions>
+            <button type="button" data-ublock-calendar-change class="block-cal-btn">Change event</button>
+            <button type="button" data-ublock-delete class="block-cal-btn is-danger">Delete Block</button>
+            <button type="button" data-ublock-done class="block-cal-btn is-done">Done ✓</button>
+          </div>
+        </div>`;
+      }
+      function calendarBlockFields(event) {
+        return {
+          eventId: String(event.eventId || ""),
+          title: String(event.title || "").trim(),
+          start: String(event.start || ""),
+          end: String(event.end || ""),
+          allDay: Boolean(event.allDay),
+          htmlLink: String(event.htmlLink || ""),
+          calendarId: "primary",
+        };
+      }
+      function closeCalendarEventSheet() {
+        document.getElementById("block-calendar-sheet")?._close?.(null);
+      }
+      // A datetime-local value ("2026-10-13T15:00") as a local time (some Safaris read the bare string as UTC).
+      function parseLocalDateTime(value) {
+        const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(value || ""));
+        return m ? new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])) : null;
+      }
+      function localDateTimeValue(date) {
+        const pad = (n) => String(n).padStart(2, "0");
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+      }
+      /** Find Event searches the user's upcoming events; New Event makes one. Resolves the event's fields, or null. */
+      function openCalendarEventSheet({ replacing = false } = {}) {
+        closeCalendarEventSheet();
+        return new Promise((resolve) => {
+          const drive = window.FicusDrive;
+          const overlay = document.createElement("div");
+          overlay.id = "block-calendar-sheet";
+          overlay.innerHTML = `<div class="cal-sheet" role="dialog" aria-modal="true" aria-labelledby="block-calendar-sheet-title">
+              <div class="cal-sheet-head">
+                <span aria-hidden="true">${blockTypeSymbol("calendar")}</span>
+                <h3 id="block-calendar-sheet-title">${replacing ? "Change Calendar Event" : "Calendar Event"}</h3>
+                <button type="button" data-cal-close class="cal-sheet-close" aria-label="Close">✕</button>
+              </div>
+              <div class="cal-sheet-tabs" role="tablist" aria-label="Calendar event">
+                <button type="button" role="tab" id="cal-tab-find" class="cal-sheet-tab" data-cal-tab="find" aria-controls="cal-pane-find">Find Event</button>
+                <button type="button" role="tab" id="cal-tab-new" class="cal-sheet-tab" data-cal-tab="new" aria-controls="cal-pane-new">New Event</button>
+              </div>
+              <div class="cal-sheet-body">
+                <div data-cal-connect class="cal-sheet-connect" hidden>
+                  <p data-cal-connect-text></p>
+                  <button type="button" data-cal-connect-btn class="cal-sheet-primary"></button>
+                </div>
+                <div id="cal-pane-find" role="tabpanel" aria-labelledby="cal-tab-find" data-cal-pane="find">
+                  <form data-cal-search role="search">
+                    <input type="search" class="cal-sheet-field" placeholder="Search upcoming events" aria-label="Search upcoming events" enterkeyhint="search" autocomplete="off" />
+                  </form>
+                  <div data-cal-results class="cal-sheet-results"></div>
+                </div>
+                <form id="cal-pane-new" role="tabpanel" aria-labelledby="cal-tab-new" data-cal-pane="new" novalidate>
+                  <label class="cal-sheet-label" for="cal-new-title">Title</label>
+                  <input id="cal-new-title" name="title" type="text" class="cal-sheet-field" maxlength="300" placeholder="Event title" autocomplete="off" />
+                  <label class="cal-sheet-label" for="cal-new-start">Start Time</label>
+                  <input id="cal-new-start" name="start" type="datetime-local" class="cal-sheet-field" />
+                  <label class="cal-sheet-label" for="cal-new-end">End Time</label>
+                  <input id="cal-new-end" name="end" type="datetime-local" class="cal-sheet-field" />
+                  <button type="submit" class="cal-sheet-primary">Create Event</button>
+                </form>
+                <p data-cal-status class="cal-sheet-note" role="status" hidden></p>
+              </div>
+            </div>`;
+          document.body.appendChild(overlay);
+          const $ = (sel) => overlay.querySelector(sel);
+          const tabs = [...overlay.querySelectorAll("[data-cal-tab]")];
+          const findPane = $("[data-cal-pane='find']");
+          const form = $("[data-cal-pane='new']");
+          const search = $("[data-cal-search] input");
+          const results = $("[data-cal-results]");
+          const connect = $("[data-cal-connect]");
+          const connectBtn = $("[data-cal-connect-btn]");
+          const submit = form.querySelector("button[type='submit']");
+          const status = $("[data-cal-status]");
+          const touch = window.matchMedia?.("(pointer: coarse)").matches;
+          let tab = "find";
+          // While Google needs a click first ("signin", "reconnect" or "calendar"), the connect panel stands in for the tabs.
+          let blocked = null;
+          let searchSeq = 0;
+          let searchTimer = 0;
+          let searched = false;
+          const setStatus = (text, error = false) => {
+            status.textContent = text || "";
+            status.hidden = !text;
+            status.classList.toggle("is-error", Boolean(error));
+          };
+          const close = (value) => {
+            if (!overlay.isConnected) return;
+            clearTimeout(searchTimer);
+            searchSeq += 1;
+            document.removeEventListener("keydown", onKey, true);
+            overlay.remove();
+            resolve(value);
+          };
+          overlay._close = close;
+          const onKey = (event) => {
+            if (event.key !== "Escape") return;
+            event.stopPropagation();
+            close(null);
+          };
+          document.addEventListener("keydown", onKey, true);
+          overlay.addEventListener("click", (event) => {
+            event.stopPropagation();
+            if (event.target === overlay || event.target.closest("[data-cal-close]")) close(null);
+          });
+          const paint = () => {
+            connect.hidden = !blocked;
+            for (const button of tabs) {
+              const on = button.dataset.calTab === tab;
+              button.setAttribute("aria-selected", String(on));
+              button.tabIndex = on ? 0 : -1;
+            }
+            findPane.hidden = Boolean(blocked) || tab !== "find";
+            form.hidden = Boolean(blocked) || tab !== "new";
+          };
+          const block = (kind) => {
+            blocked = kind;
+            $("[data-cal-connect-text]").textContent = kind === "signin" ? "Sign in with Google to use calendar events."
+              : kind === "reconnect" ? "Your Google sign-in has run out. Reconnect to reach your calendar."
+                : "Ficus needs your permission to find and add events in your Google Calendar.";
+            connectBtn.textContent = kind === "reconnect" ? "Reconnect Google" : "Connect Google Calendar";
+            connectBtn.hidden = kind === "signin";
+            setStatus("");
+            paint();
+          };
+          // Failures only a click can fix bring up the connect panel; the rest show under the form.
+          const fail = (err) => {
+            if (drive?.AuthError && err instanceof drive.AuthError) block("reconnect");
+            else if (drive?.CalendarAccessError && err instanceof drive.CalendarAccessError) block("calendar");
+            else setStatus(err?.message || "Google Calendar didn't answer. Try again.", true);
+          };
+          const showResults = (events) => {
+            results.replaceChildren(...events.map((event) => {
+              const button = document.createElement("button");
+              button.type = "button";
+              button.className = "cal-sheet-result";
+              button.innerHTML = `${calendarDateTileHtml(event)}<span class="block-cal-text"><span class="block-cal-title">${escapeHtml(event.title || "(No title)")}</span><span class="block-cal-when">${escapeHtml(calendarWhenText(event))}</span></span>`;
+              button.addEventListener("click", () => close(event));
+              return button;
+            }));
+            setStatus(events.length ? "" : search.value.trim() ? "No upcoming events match that." : "No upcoming events in your calendar.");
+          };
+          const runSearch = async () => {
+            clearTimeout(searchTimer);
+            searched = true;
+            const seq = ++searchSeq;
+            setStatus("Searching…");
+            try {
+              const events = await drive.searchEvents(search.value);
+              if (seq === searchSeq) showResults(events);
+            } catch (err) {
+              if (seq !== searchSeq) return;
+              results.replaceChildren();
+              fail(err);
+            }
+          };
+          const showTab = (next, focus = true) => {
+            tab = next;
+            setStatus("");
+            paint();
+            if (blocked) return;
+            if (tab === "find" && !searched) runSearch();
+            if (focus && !touch) (tab === "find" ? search : form.elements.namedItem("title")).focus();
+          };
+          // Opens on the tabs if the token is good and carries Calendar, else on the connect panel.
+          const begin = () => {
+            if (!drive?.session) return block("signin");
+            if (!drive.tokenLive) return block("reconnect");
+            if (!drive.hasCalendar) return block("calendar");
+            blocked = null;
+            showTab(tab);
+          };
+          for (const button of tabs) {
+            button.addEventListener("click", () => showTab(button.dataset.calTab));
+            button.addEventListener("keydown", (event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              const other = tabs.find((row) => row !== button);
+              other.focus();
+              showTab(other.dataset.calTab, false);
+            });
+          }
+          search.addEventListener("input", () => {
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(runSearch, 350);
+          });
+          $("[data-cal-search]").addEventListener("submit", (event) => {
+            event.preventDefault();
+            runSearch();
+          });
+          const startField = form.elements.namedItem("start");
+          const endField = form.elements.namedItem("end");
+          const firstStart = new Date();
+          firstStart.setMinutes(0, 0, 0);
+          firstStart.setHours(firstStart.getHours() + 1);
+          let length = 60 * 60 * 1000;
+          startField.value = localDateTimeValue(firstStart);
+          endField.value = localDateTimeValue(new Date(firstStart.getTime() + length));
+          // Moving the start moves the end with it, keeping the event's length; moving the end sets a new length.
+          startField.addEventListener("change", () => {
+            const start = parseLocalDateTime(startField.value);
+            if (start) endField.value = localDateTimeValue(new Date(start.getTime() + length));
+          });
+          endField.addEventListener("change", () => {
+            const start = parseLocalDateTime(startField.value);
+            const end = parseLocalDateTime(endField.value);
+            if (start && end && end > start) length = end - start;
+          });
+          form.addEventListener("submit", async (event) => {
+            event.preventDefault();
+            if (submit.disabled) return;
+            const titleField = form.elements.namedItem("title");
+            const title = titleField.value.trim();
+            const start = parseLocalDateTime(startField.value);
+            const end = parseLocalDateTime(endField.value);
+            if (!title) {
+              setStatus("Give the event a title.", true);
+              titleField.focus();
+              return;
+            }
+            if (!start || !end) return setStatus("Pick a start and an end time.", true);
+            if (end <= start) return setStatus("The end time has to be after the start.", true);
+            submit.disabled = true;
+            setStatus("Adding it to your calendar…");
+            try {
+              close(await drive.createEvent({ title, start, end }));
+            } catch (err) {
+              fail(err);
+            } finally {
+              submit.disabled = false;
+            }
+          });
+          // Google's popup has to open straight from this click.
+          connectBtn.addEventListener("click", async () => {
+            if (!drive.ready) {
+              drive.prepare().catch(() => {});
+              setStatus("Still connecting to Google. Try again in a moment.");
+              return;
+            }
+            const asked = blocked;
+            connectBtn.disabled = true;
+            setStatus("");
+            try {
+              if (asked === "reconnect") {
+                await drive.reconnect();
+                window.FicusStore?.retry?.();
+              } else {
+                await drive.connectCalendar();
+              }
+              if (overlay.isConnected) begin();
+            } catch (err) {
+              if (!overlay.isConnected || err?.cancelled) return;
+              fail(err);
+              if (asked === "calendar") setStatus(err?.message || "Google Calendar couldn't be connected.", true);
+            } finally {
+              connectBtn.disabled = false;
+            }
+          });
+          begin();
+        });
+      }
+      // Change event: picks another event for an open calendar block, keeping its place.
+      async function changeCalendarBlockEvent(root) {
+        const { list, block } = uBlockFromRoot(root);
+        if (!block) return;
+        const source = root.dataset.ublockSource || "tray";
+        const { ublockOwnerId: ownerId, ublockOwnerKind: ownerKind } = root.dataset;
+        const event = await openCalendarEventSheet({ replacing: true });
+        if (!event) return;
+        Object.assign(block, calendarBlockFields(event));
+        await persistUBlockOwner(source, ownerId, ownerKind, list);
+        refreshUBlockHosts(source);
+      }
       function applyMediaBlockSettings(block, root) {
         const title = root?.querySelector("[data-ublock-title]");
         if (title) block.title = String(title.value || "").trim();
@@ -8766,6 +9174,9 @@
         }
         if (block.type === "video") {
           return settings ? renderVideoBlockSettingsHtml(block, opts) : renderVideoBlockDisplayHtml(block, opts);
+        }
+        if (block.type === "calendar") {
+          return settings ? renderCalendarBlockSettingsHtml(block, opts) : renderCalendarBlockDisplayHtml(block, opts);
         }
         return "";
       }
@@ -8880,13 +9291,17 @@
           if (inlineNoteEditing) block.editing = true;
         } else if (kind === "checklist") {
           block = { id: newBlockId(), type: "checklist", title: "Checklist", items: [{ id: newBlockId(), text: "", done: false }], expanded: true };
+        } else if (kind === "calendar") {
+          const event = await openCalendarEventSheet();
+          block = event ? { id: newBlockId(), type: "calendar", ...calendarBlockFields(event) } : null;
         }
         const list = getList();
         if (!block || !list) return null;
         if (hostSelector && uBlockSettingsKey?.startsWith(`${source}:`)) flushOpenUBlockSettings(hostSelector);
         list.push(block);
         if (persist && !(await persist(list))) return null;
-        if (kind !== "note" || !inlineNoteEditing) uBlockSettingsKey = uBlockKey(source, block.id);
+        // A calendar block is done once its event is picked, so it goes straight onto the page shut.
+        if (kind !== "calendar" && (kind !== "note" || !inlineNoteEditing)) uBlockSettingsKey = uBlockKey(source, block.id);
         rerender();
         requestAnimationFrame(() => {
           const host = hostSelector ? document.querySelector(hostSelector) : document;
@@ -9981,7 +10396,7 @@
         wireScrapboardEmbeds();
         wireFilePreviewTriggers();
         document.addEventListener("click", async (event) => {
-          if (event.target.closest("#block-media-sheet, [id$='add-block-menu'], #ql-field-popover")) return;
+          if (event.target.closest("#block-media-sheet, #block-calendar-sheet, [id$='add-block-menu'], #ql-field-popover")) return;
           // Read from the path as dispatched: a click can re-render the popover it lands in, leaving its target
           // detached by the time this runs (and the path is gone once the handler awaits).
           const inOpenSettings = event.composedPath().some((node) => node instanceof Element && node.matches("[data-ublock-state='settings']"));
@@ -10023,6 +10438,13 @@
             return;
           }
           if (event.target.closest("[data-ublock] .scrapboard-root")) return;
+          const calendarChange = event.target.closest("[data-ublock-calendar-change]");
+          if (calendarChange) {
+            event.preventDefault();
+            event.stopPropagation();
+            await changeCalendarBlockEvent(calendarChange.closest("[data-ublock]"));
+            return;
+          }
           const mediaReplace = event.target.closest("[data-ublock-media-replace]");
           if (mediaReplace) {
             event.preventDefault();

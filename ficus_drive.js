@@ -9,16 +9,22 @@
  * Tokens last about an hour and the browser gets no refresh token, so once one runs out the user presses
  * Reconnect (a new token needs a click, for the popup). The session (profile and token) is kept in IndexedDB,
  * where ficus_sw.js reads the token to serve uploads at /drive-file/<file id>.
+ *
+ * The same token can carry the calendar.events scope, for Calendar Event blocks (find or make events in the
+ * user's primary calendar). Drive is required; Calendar is optional, so someone who unticks it (or signed in
+ * before Ficus asked for it) still gets in, and is asked again only when they add a calendar block.
  */
 (function () {
   "use strict";
 
   const config = window.FICUS_GOOGLE_CONFIG || {};
   const DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file";
-  const SCOPES = `${DRIVE_SCOPE} openid email profile`;
+  const CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events";
+  const SCOPES = `${DRIVE_SCOPE} ${CALENDAR_SCOPE} openid email profile`;
   const GIS_SRC = "https://accounts.google.com/gsi/client";
   const GAPI_SRC = "https://apis.google.com/js/api.js";
   const DISCOVERY = "https://www.googleapis.com/discovery/v1/apis/drive/v3/rest";
+  const CALENDAR_DISCOVERY = "https://www.googleapis.com/discovery/v1/apis/calendar/v3/rest";
   const DRIVE_API = "https://www.googleapis.com/drive/v3";
   const UPLOAD_API = "https://www.googleapis.com/upload/drive/v3";
   const USERINFO = "https://www.googleapis.com/oauth2/v3/userinfo";
@@ -79,6 +85,8 @@
   }
   // The token is missing, ran out or was refused: only Reconnect can fix it.
   class AuthError extends DriveError {}
+  // The token works but doesn't carry the Calendar scope: only connectCalendar() (from a click) can fix it.
+  class CalendarAccessError extends DriveError {}
 
   function driveError(status, message) {
     if (status === 401) return new AuthError("Google Drive needs you to reconnect.", 401);
@@ -120,6 +128,7 @@
           window.gapi.load("client", { callback: resolve, onerror: () => reject(new DriveError("The Google API client didn't load.")) });
         });
         await window.gapi.client.init({ discoveryDocs: [DISCOVERY] });
+        calendarApi().catch(() => {});
         if (session?.accessToken) window.gapi.client.setToken({ access_token: session.accessToken });
         tokenClient = window.google.accounts.oauth2.initTokenClient({
           client_id: config.clientId,
@@ -134,10 +143,22 @@
     return preparing;
   }
 
+  // The Calendar API (gapi.client.calendar), loaded apart from Drive's so a failure here leaves Drive working.
+  let calendarLoading = null;
+  function calendarApi() {
+    if (window.gapi?.client?.calendar) return Promise.resolve(window.gapi.client.calendar);
+    if (!calendarLoading) {
+      calendarLoading = Promise.resolve(window.gapi.client.load(CALENDAR_DISCOVERY)).then(() => window.gapi.client.calendar);
+      calendarLoading.catch(() => { calendarLoading = null; });
+    }
+    return calendarLoading;
+  }
+
   /* ---------- Session ---------- */
 
   const SESSION_KEY = "session";
-  // { uid, email, name, picture, accessToken, expiresAt }; uid is the Google account's stable id ("sub").
+  // { uid, email, name, picture, accessToken, expiresAt, calendar }; uid is the Google account's stable id ("sub"),
+  // and calendar says whether the token carries the Calendar scope.
   let session = null;
   const listeners = new Set();
 
@@ -204,6 +225,7 @@
         picture: /^https:\/\//.test(profile.picture || "") ? profile.picture : "",
         accessToken: response.access_token,
         expiresAt: Date.now() + (Number(response.expires_in) || 3600) * 1000,
+        calendar: window.google.accounts.oauth2.hasGrantedAllScopes(response, CALENDAR_SCOPE),
       };
     });
   }
@@ -221,14 +243,23 @@
     return requestToken({ hint }).then(keep);
   }
 
-  // A fresh token for the signed-in user (from a click). Rejects if a different account was picked.
-  function reconnect() {
+  // A fresh token for the signed-in user (from a click), asking for every scope again, Calendar included. Rejects
+  // if a different account was picked. `consent` shows Google's consent screen even if nothing new is asked for,
+  // so a Calendar box unticked before can be ticked.
+  function reconnect({ consent = false } = {}) {
     if (!session) return Promise.reject(new DriveError("No one is signed in."));
     const uid = session.uid;
-    return requestToken({ hint: session.email }).then((next) => {
+    return requestToken({ hint: session.email, prompt: consent ? "consent" : "" }).then((next) => {
       if (next.uid !== uid) throw new DriveError(`That's a different Google account. Reconnect as ${session.email || "the account you signed in with"}.`);
       return keep(next);
     });
+  }
+
+  // From a click: asks Google for the Calendar scope. The new token is kept even if it was refused again.
+  async function connectCalendar() {
+    const next = await reconnect({ consent: true });
+    if (!next.calendar) throw new CalendarAccessError("Ficus can't reach your calendar without it. Tick the Google Calendar box when Google asks.");
+    return next;
   }
 
   // Forgets the session and the uploads cached on this device. The Google grant stays, so signing back in is quick.
@@ -343,9 +374,86 @@
 
   const jsonBlob = (text) => new Blob([text], { type: "application/json" });
 
+  /* ---------- Calendar requests (the user's primary calendar) ---------- */
+
+  function calendarError(err) {
+    const status = Number(err?.status ?? err?.result?.error?.code) || 0;
+    const body = err?.result?.error || {};
+    const reasons = `${body.status || ""} ${(body.errors || []).map((row) => row.reason).join(" ")} ${body.message || ""}`;
+    if (status === 401) return new AuthError("Google needs you to reconnect.", 401);
+    if (status === 403 && /insufficient|scope/i.test(reasons)) {
+      return new CalendarAccessError("Ficus isn't allowed to use your calendar yet.", 403);
+    }
+    if (status === 403 && /accessNotConfigured|SERVICE_DISABLED|has not been used|is disabled/i.test(reasons)) {
+      return new DriveError("The Google Calendar API isn't turned on for Ficus yet (in its Google Cloud project).", 403);
+    }
+    if (!status) return new DriveError("Google Calendar couldn't be reached. Check the connection.", 0);
+    return new DriveError(body.message || `Google Calendar answered ${status}.`, status);
+  }
+
+  async function calendarCall(run) {
+    bearer();
+    if (!session.calendar) throw new CalendarAccessError("Connect Google Calendar to use calendar events.", 403);
+    await prepare();
+    let calendar;
+    try {
+      calendar = await calendarApi();
+    } catch (_) {
+      throw new DriveError("Google Calendar couldn't be reached. Check the connection.", 0);
+    }
+    try {
+      return (await run(calendar)).result;
+    } catch (err) {
+      throw calendarError(err);
+    }
+  }
+
+  // What a Calendar Event block keeps of an event. An all-day event's start / end are dates ("2026-10-13", the end
+  // the day after it finishes); a timed one's are date-times with their offset.
+  function eventFields(event) {
+    return {
+      eventId: String(event.id || ""),
+      title: String(event.summary || "").trim(),
+      start: String(event.start?.dateTime || event.start?.date || ""),
+      end: String(event.end?.dateTime || event.end?.date || ""),
+      allDay: !event.start?.dateTime,
+      htmlLink: /^https:\/\//.test(event.htmlLink || "") ? event.htmlLink : "",
+    };
+  }
+
+  // Upcoming events (those not yet over) whose text matches `text`, soonest first; all of them for no text.
+  async function searchEvents(text = "") {
+    const params = {
+      calendarId: "primary",
+      timeMin: new Date().toISOString(),
+      singleEvents: true,
+      orderBy: "startTime",
+      maxResults: 25,
+    };
+    const q = String(text || "").trim();
+    if (q) params.q = q;
+    const result = await calendarCall((calendar) => calendar.events.list(params));
+    return (result.items || []).filter((event) => event.status !== "cancelled").map(eventFields);
+  }
+
+  // Makes a timed event from `start` to `end` (Dates) in the device's time zone.
+  async function createEvent({ title, start, end }) {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+    const event = await calendarCall((calendar) => calendar.events.insert({
+      calendarId: "primary",
+      resource: {
+        summary: String(title || "").trim(),
+        start: { dateTime: start.toISOString(), timeZone },
+        end: { dateTime: end.toISOString(), timeZone },
+      },
+    }));
+    return eventFields(event);
+  }
+
   window.FicusDrive = {
     DriveError,
     AuthError,
+    CalendarAccessError,
     MASTER_NAME,
     get configured() {
       return Boolean(config.clientId);
@@ -359,11 +467,18 @@
     get tokenLive() {
       return tokenLive();
     },
+    // Whether the current token carries the Calendar scope.
+    get hasCalendar() {
+      return Boolean(session?.calendar);
+    },
     prepare,
     restore,
     signIn,
     reconnect,
+    connectCalendar,
     signOut,
+    searchEvents,
+    createEvent,
     // Calls back with (session, tokenLive) whenever either changes.
     onChange(listener) {
       listeners.add(listener);
