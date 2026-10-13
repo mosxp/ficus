@@ -4087,7 +4087,7 @@
      as [⇢ Deleted Dot], in red, and opens nothing. Following one opens its dot in place of this one, with a way
      back (see followDotRef).
        text   <span class="dot-ref-pill" data-target-id contenteditable="false"><span class="ref-icon">⇢</span><span class="ref-title">title</span></span>
-       board  one of its page's elements: { id: "ref_…", type: "dot_reference", targetDotId, title, x, y, width, height }
+       board  an object on its sheet: { id, type: "dot_reference", targetDotId, title, x, y, w, h, rotation }
        block  { id, type: "dot_reference", targetDotId, title }, sized on the grid like any block */
   const DOT_REF_TYPE = "dot_reference";
   const DOT_REF_PILL = ".dot-ref-pill[data-target-id]";
@@ -4409,7 +4409,11 @@
 
   // The open page's references to dot `id` (just renamed) show its new title.
   function refreshDotRefs(id) {
-    if (boardView?.elements.some((element) => element.type === DOT_REF_TYPE && element.targetDotId === id)) renderBoardElements(boardView);
+    const b = boardView?.board;
+    if (b && syncBoardRefTitles(b.objects)) {
+      refreshBoardItems(boardView);
+      b.markDirty();
+    }
     if (blockView?.blocks.some((block) => isRefBlock(block) && block.targetDotId === id)) renderBlockWidgets();
   }
 
@@ -7230,13 +7234,16 @@
   /* A board saves one object list in stacking order: the first object is painted first (at the back), the last
      on top. An object with isVisible: false stays in the stack but isn't painted and can't be picked on the sheet.
      Boards saved while Space had drawing layers flatten into that same order, with a hidden layer's objects
-     coming back hidden. */
+     coming back hidden, and calendar, task and reference cards saved in a list of their own (`elements`) come
+     on top. */
   function readBoardObjects(saved) {
     const hiddenLayers = new Set((Array.isArray(saved?.layers) ? saved.layers : [])
       .filter((layer) => layer && layer.visible === false).map((layer) => layer.id));
-    return (Array.isArray(saved?.objects) ? saved.objects : [])
+    const objects = (Array.isArray(saved?.objects) ? saved.objects : [])
       .filter((o) => o && typeof o === "object")
       .map(({ layerId, ...object }) => (hiddenLayers.has(layerId) ? Object.assign(object, { isVisible: false }) : object));
+    const ids = new Set(objects.map((o) => o.id));
+    return objects.concat(boardItemsFromElements(saved?.elements).filter((o) => !ids.has(o.id)));
   }
 
   const isHiddenObject = (o) => o.isVisible === false;
@@ -7264,6 +7271,9 @@
     pad: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M4 3.5h12v9l-4 4H4z" /><path d="M16 12.5h-4v4" /></svg>',
     group: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="9" height="9" rx="1.5" /><rect x="8" y="8" width="9" height="9" rx="1.5" /></svg>',
     dot: CHILD_DOT_ICON,
+    calendar_event: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="14" height="13" rx="1.5" /><path d="M3 8.5h14M7 2.5v3M13 2.5v3" /></svg>',
+    google_task: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3.5" y="3.5" width="13" height="13" rx="1.5" /><path d="M7 10.2l2.2 2.2L13.5 8" /></svg>',
+    dot_reference: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 10h2M6.5 10h2M10.5 10h4" /><path d="M11.5 6.5 15 10l-3.5 3.5" /></svg>',
   };
   const BOARD_TOOL_NAMES = { pen: "Pen", pencil: "Pencil", highlighter: "Highlighter", brush: "Brush", crayon: "Oil Crayon" };
   const BOARD_PAD_NAMES = { memo: "Memo Note", lined: "Lined List", grid: "Grid Sheet", ticket: "Ticket", tag: "Tag", frame: "Frame", custom: "Custom Pad" };
@@ -7428,8 +7438,7 @@
       host, width: 0, height: 0, placed: false, zoom: 1, x: 0, y: 0,
       touches: new Map(), swallow: new Set(), pinch: null, pan: null, gestureZoom: null, sharpenTimer: null, observer: null,
       editing: false, draggingObject: null, panelFrame: 0, panelRows: "", panelSelection: "", cardPress: null,
-      dotId: id, cardDots: null, renamePress: null, renaming: null,
-      elements: cleanBoardElements(saved?.elements), itemLayer: null, itemDrag: null,
+      dotId: id, cardDots: null, renamePress: null, renaming: null, itemLayer: null, itemPress: null, interact: null,
     };
     if (Number.isFinite(saved?.size?.width) && Number.isFinite(saved?.size?.height)) {
       view.width = clampBoardSide(saved.size.width);
@@ -7447,7 +7456,6 @@
             objects: payload.canvas.objects,
             background: payload.canvas.background,
             size: { width: view.width, height: view.height },
-            elements: view.elements,
           };
           store()?.setPage("board", id, state, id);
           const savedDot = findDot(id);
@@ -7459,10 +7467,11 @@
       });
       view.board = board;
       view.cardDots = boardCardDots(board.objects);
+      syncBoardRefTitles(board.objects);
       boardView = view;
+      mountBoardItems(view);
       adaptBoard(board, view);
       renderObjectPanel(view);
-      mountBoardElements(view);
     } catch (err) {
       console.error("Space: the board couldn't start", err);
       board = null;
@@ -7596,6 +7605,7 @@
   /** Re-homes the engine's controls in the unscaled overlay and teaches it about the zoomable viewport. */
   function adaptBoard(b, view) {
     adaptBoardEngine(b, view, (target) => view.host.contains(target));
+    adaptBoardItems(b, view);
     view.bar.append(b.dock, b.topbar);
     view.chrome.append(b.popover, b.textbar, b.textStatus, b.hwpad, b.hint, b.eyeHint);
 
@@ -7623,8 +7633,8 @@
       this.popover.style.left = `${Math.min(Math.max(center, half + 12), Math.max(half + 12, box.width - half - 12))}px`;
     };
 
-    // The + menu leads with Add child dot, which turns the menu into a pick of dot types, and ends with the calendar
-    // event and task cards (board elements, not dots).
+    // The + menu leads with Add child dot, which turns the menu into a pick of dot types, and Reference, and ends with
+    // the calendar event and task cards.
     const popoverHtml = b._popoverHtml;
     b._popoverHtml = function (kind) {
       if (kind === "childDots") return childDotsMenuHtml();
@@ -7659,7 +7669,7 @@
       else if (event.target.closest("[data-space-board-link-back]")) b._openPopover("childDots");
       else if (event.target.closest("[data-space-board-child-back]")) b._openPopover("insert");
       else if (event.target.closest("[data-space-board-google]")) {
-        void addBoardElement(event.target.closest("[data-space-board-google]").dataset.spaceBoardGoogle);
+        void addBoardItem(event.target.closest("[data-space-board-google]").dataset.spaceBoardGoogle);
       } else {
         const item = event.target.closest("[data-space-board-child-type]");
         if (item) addBoardChildDot(item.dataset.spaceBoardChildType);
@@ -7731,40 +7741,38 @@
   }
 
   function placeBoardCard(child) {
-    const view = boardView;
     const { w, h } = cardSize(child.title);
+    placeBoardObject({ id: newBoardObjectId(), type: DOT_CARD, dotId: child.id, title: child.title, x: 0, y: 0, w, h, baseH: h, rotation: 0 });
+    render();
+  }
+
+  // A new card (its w × h set) goes in the middle of the board's visible room, or the nearest row above or below it
+  // clear of the other cards, selected so it can be dragged straight away.
+  function placeBoardObject(o) {
+    const view = boardView;
     const room = boardRoom();
-    const x = Math.round(Math.min(Math.max(view.width / 2 - view.x / view.zoom - w / 2, 8), Math.max(8, view.width - w - 8)));
-    const middle = view.height / 2 + (room.cy - view.y) / view.zoom - h / 2;
-    const cards = board.objects.filter((o) => o.type === DOT_CARD && !isHiddenObject(o)).map((o) => board._aabb(o));
-    const y = clearCardRow(cards, x, w, h, middle, view.height);
-    const card = {
-      id: newBoardObjectId(),
-      type: DOT_CARD,
-      dotId: child.id,
-      title: child.title,
-      x,
-      y,
-      w,
-      h,
-      baseH: h,
-      rotation: 0,
-    };
-    board.objects.push(card);
+    o.x = Math.round(Math.min(Math.max(view.width / 2 - view.x / view.zoom - o.w / 2, 8), Math.max(8, view.width - o.w - 8)));
+    const middle = view.height / 2 + (room.cy - view.y) / view.zoom - o.h / 2;
+    const cards = board.objects.filter((item) => (item.type === DOT_CARD || isBoardItem(item)) && !isHiddenObject(item));
+    o.y = clearCardRow(cards.map((item) => board._aabb(item)), o.x, o.w, o.h, middle, view.height);
+    board.objects.push(o);
     board.setTool("lasso");
-    board.selection = new Set([card.id]);
+    board.selection = new Set([o.id]);
     board._active = true;
     board._commit();
     board._syncSelbar();
     board._scheduleRedraw();
-    render();
   }
 
-  // The card under a press on the sheet, if that press would land on it (nothing stacked above it is hit first).
-  function boardCardAt(event) {
+  // The object a press on the sheet would land on (the top one there).
+  function boardObjectAt(event) {
     if (!board || event.target !== board.canvas) return null;
     const p = board._pointFromEvent(event);
-    const hit = board._hitTest(p.x, p.y, true, event.pointerType);
+    return board._hitTest(p.x, p.y, true, event.pointerType);
+  }
+
+  function boardCardAt(event) {
+    const hit = boardObjectAt(event);
     return hit?.type === DOT_CARD ? hit : null;
   }
 
@@ -7780,268 +7788,550 @@
     else showToast("That dot has been deleted from Space.");
   }
 
-  /* Calendar events and Google Tasks on a board dot's sheet. The + menu ends with 📅 Calendar Event and ✅ Google Task
-     (below GIF, beside the other things put on the sheet), which open the Block dot's Find / New sheets (through the
-     block engine), and the block made there goes on the board as one of the `elements` of its saved page:
-       { id, type: "calendar_event" | "google_task", x, y, width, block }
-     x, y and width in board pixels, `block` being the calendar or task block a Block dot would hold (its eventId or
-     taskId and tasklistId, title, times or tick). Each is drawn as that block's own card (engine.render) on a layer
-     over the drawing inside the sheet, so it pans and zooms with it, and the board registers as the engine's
-     "space-board" source, so a card ticks, refreshes and edits as it does in a Block dot. They aren't drawing
-     objects: the engine's undo, Objects panel and eraser leave them be. Editing, a card drags by
-     anything but its controls (mouse, pen or finger) and its ✕ takes it off the board; reading, its controls work
-     and a press anywhere else on it pans the board. Dot references (⇢ Reference in the + menu) are elements too,
-     drawn as their cards (refCardNode) without a block: ↗ Open or a double tap follows one, and reading, so
-     does a tap that doesn't pan. */
+  /* Calendar events, Google Tasks and dot references on a board dot's sheet are objects of the board like any other,
+     in its one stacking list (board.objects), so the engine selects, lassoes, drags, resizes, turns, restacks,
+     duplicates, groups, erases, deletes and undoes them, and the Objects panel lists them:
+       { id, type: "calendar_event" | "google_task", x, y, w, h, rotation, block }
+       { id, type: "dot_reference", targetDotId, title, x, y, w, h, rotation }
+     `block` being the calendar or task block a Block dot would hold (its eventId or taskId and tasklistId, title,
+     times or tick), and `title` the title a reference's dot had when last seen. The + menu adds them: 📅 Calendar
+     Event and ✅ Google Task through the block engine's Find / New sheets, ⇢ Reference through DotSearchModal.
+     Boards saved before kept them in a list of their own (`elements`), which readBoardObjects puts on top of the
+     stack.
+     The board is one canvas, so each is painted there as its card's face (BOARD_ITEM_WIDTH or DOT_REF_CARD_WIDTH
+     wide, scaled to its w), without its controls. Those (the tick, refresh, links and pencil, ↗ Open) only answer
+     once the card is open for interacting: its real card (engine.render or refCardNode) then sits over the face,
+     turned and scaled with it, and takes its presses. Editing, a press on a card selects it and drags it; a second
+     tap on the selected card, or Interact on the selection bar, opens it, and it closes with the selection (or Done).
+     Reading, a tap on a calendar or task card opens it and a press anywhere else closes it; a tap on a reference
+     follows it. The board is the engine's "space-board" source, so an open card ticks, refreshes and edits as it
+     does in a Block dot. */
   const BOARD_ITEM_KINDS = {
     calendar: { type: "calendar_event", symbol: "\u{1F4C5}", label: "Calendar Event", hint: "Find · new event" },
     task: { type: "google_task", symbol: "\u2705", label: "Google Task", hint: "Find · new task" },
   };
+  // Board object type → the type of the block it holds.
+  const BOARD_ITEM_BLOCKS = { calendar_event: "calendar", google_task: "task" };
   const BOARD_ITEM_WIDTH = 280;
-  const BOARD_ITEM_CONTROLS = "a, button, input, label, select, textarea";
+  const isBoardItem = (o) => Boolean(o) && (o.type === DOT_REF_TYPE || has(BOARD_ITEM_BLOCKS, o.type));
+  const boardItemWidth = (o) => (o.type === DOT_REF_TYPE ? DOT_REF_CARD_WIDTH : BOARD_ITEM_WIDTH);
+  const newBoardBlockId = () => `blk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  const BOARD_INTERACT_ICON = '<svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11.5V5a1.5 1.5 0 0 1 3 0v6" /><path d="M12 10V8.5a1.5 1.5 0 0 1 3 0V11" /><path d="M15 10.5a1.5 1.5 0 0 1 3 0V15a6 6 0 0 1-6 6h-.8a6 6 0 0 1-4.7-2.3L4.3 16a1.5 1.5 0 0 1 2.3-1.9L9 16.5" /></svg>';
 
-  function cleanBoardElements(raw) {
+  // Unscaled height of a new card: an event's date tile, or a task's title and due day (and two lines of notes).
+  function boardItemHeight(o) {
+    if (o.type === DOT_REF_TYPE) return DOT_REF_CARD_HEIGHT;
+    if (o.type === "calendar_event") return 74;
+    return String(o.block?.notes || "").trim() ? 92 : 62;
+  }
+
+  // A board's `elements` from before they were objects, as objects (at the scale they had).
+  function boardItemsFromElements(raw) {
     if (!Array.isArray(raw)) return [];
-    const kinds = new Map(Object.entries(BOARD_ITEM_KINDS).map(([kind, { type }]) => [type, kind]));
     const seen = new Set();
     return raw.flatMap((element) => {
-      if (element?.type === DOT_REF_TYPE) {
-        if (!element.id || !element.targetDotId || seen.has(String(element.id))) return [];
-        seen.add(String(element.id));
-        const width = Number(element.width);
+      const id = element?.id ? String(element.id) : "";
+      if (!id || seen.has(id)) return [];
+      const x = Number.isFinite(element.x) ? element.x : 0;
+      const y = Number.isFinite(element.y) ? element.y : 0;
+      const width = Number(element.width);
+      if (element.type === DOT_REF_TYPE) {
+        if (!element.targetDotId) return [];
+        seen.add(id);
         const height = Number(element.height);
         return [{
-          id: String(element.id),
-          type: DOT_REF_TYPE,
-          targetDotId: String(element.targetDotId),
-          title: String(element.title || ""),
-          x: Number.isFinite(element.x) ? element.x : 0,
-          y: Number.isFinite(element.y) ? element.y : 0,
-          width: Number.isFinite(width) && width > 0 ? width : DOT_REF_CARD_WIDTH,
-          height: Number.isFinite(height) && height > 0 ? height : DOT_REF_CARD_HEIGHT,
+          id, type: DOT_REF_TYPE, targetDotId: String(element.targetDotId), title: String(element.title || ""), x, y,
+          w: width > 0 ? width : DOT_REF_CARD_WIDTH, h: height > 0 ? height : DOT_REF_CARD_HEIGHT, rotation: 0,
         }];
       }
-      const kind = kinds.get(element?.type);
-      const block = element?.block;
-      if (!kind || block?.type !== kind || !block.id || !element.id || seen.has(String(element.id))) return [];
-      seen.add(String(element.id));
-      const width = Number(element.width);
-      return [{
-        id: String(element.id),
-        type: element.type,
-        x: Number.isFinite(element.x) ? element.x : 0,
-        y: Number.isFinite(element.y) ? element.y : 0,
-        width: Number.isFinite(width) && width > 0 ? width : BOARD_ITEM_WIDTH,
-        block,
-      }];
+      const block = element.block;
+      if (BOARD_ITEM_BLOCKS[element.type] === undefined || block?.type !== BOARD_ITEM_BLOCKS[element.type] || !block.id) return [];
+      seen.add(id);
+      const item = { id, type: element.type, x, y, w: width > 0 ? width : BOARD_ITEM_WIDTH, h: 0, rotation: 0, block };
+      item.h = Math.round(boardItemHeight(item) * (item.w / BOARD_ITEM_WIDTH));
+      return [item];
     });
   }
 
-  function mountBoardElements(view) {
+  // The calendar and task blocks on a board, grouped ones too.
+  function boardItemBlocks(objects, out = []) {
+    for (const o of objects) {
+      if (o.type === "group") boardItemBlocks(Array.isArray(o.children) ? o.children : [], out);
+      else if (has(BOARD_ITEM_BLOCKS, o.type) && o.block) out.push(o.block);
+    }
+    return out;
+  }
+
+  // References take their dots' current titles (one whose dot was deleted keeps its last). Whether any changed.
+  function syncBoardRefTitles(objects) {
+    let changed = false;
+    for (const o of objects) {
+      if (o.type === "group") changed = syncBoardRefTitles(Array.isArray(o.children) ? o.children : []) || changed;
+      else if (o.type === DOT_REF_TYPE) {
+        const title = findDot(o.targetDotId)?.title;
+        if (title && title !== o.title) {
+          o.title = title;
+          changed = true;
+        }
+      }
+    }
+    return changed;
+  }
+
+  // A duplicated calendar or task card holds a copy of its block (the same event or task) under an id of its own.
+  function renewBoardItemBlocks(objects) {
+    for (const o of objects) {
+      if (o.type === "group" && Array.isArray(o.children)) renewBoardItemBlocks(o.children);
+      else if (has(BOARD_ITEM_BLOCKS, o.type) && o.block) o.block = { ...o.block, id: newBoardBlockId() };
+    }
+  }
+
+  /* The faces: the cards as .block-cal-card, .block-task-card and .dot-ref-card (index.html) draw them, minus their
+     buttons. A calendar or task card's words (its title, when, due day and notes) are the engine's own, read from
+     the card it renders for the block. */
+  let boardItemFamily = "";
+  let boardSwatch = "";
+  const boardItemFaces = new Map();
+  const boardItemPaths = new Map();
+  const BOARD_CHECK_PATH = "M3.5 8.5l3 3 6-7";
+  const BOARD_OPEN_PATH = "M5 11 11 5M6 5h5v5";
+  const BOARD_HUB_PATH = "M0 .75h2.6v2.6H0zM4 .75h8v2.6H4zM0 4.7h2.6v2.6H0zM4 4.7h8v2.6H4zM0 8.65h2.6v2.6H0zM4 8.65h8v2.6H4z";
+
+  function boardItemFont(weight, size, style = "normal") {
+    if (!boardItemFamily) boardItemFamily = getComputedStyle(document.body).fontFamily || "system-ui, sans-serif";
+    return `${style} ${weight} ${size}px ${boardItemFamily}`;
+  }
+
+  function boardItemPath(d) {
+    if (!boardItemPaths.has(d)) boardItemPaths.set(d, new Path2D(d));
+    return boardItemPaths.get(d);
+  }
+
+  function boardItemFace(block) {
+    const key = `${new Date().toDateString()}\n${JSON.stringify(block)}`;
+    if (boardItemFaces.has(key)) return boardItemFaces.get(key);
+    const engine = window.UniversalBlockEngine;
+    const html = document.createElement("template");
+    html.innerHTML = typeof engine?.render === "function" ? engine.render({ ...block }, { source: READ_SOURCE, hideTypeBadge: true }) : "";
+    const text = (selector) => html.content.querySelector(selector)?.textContent.replace(/\s+/g, " ").trim() || "";
+    const found = (selector) => Boolean(html.content.querySelector(selector));
+    const face = block.type === "task"
+      ? {
+        title: text(".block-task-title") || String(block.title || "").trim() || "(No title)",
+        when: text(".block-task-due"),
+        notes: text(".block-task-notes"),
+        done: block.status === "completed",
+        overdue: found(".block-task-due.is-overdue"),
+      }
+      : {
+        title: text(".block-cal-title") || String(block.title || "").trim() || "(No title)",
+        when: text(".block-cal-when"),
+        month: text(".block-cal-month").toUpperCase(),
+        day: text(".block-cal-day"),
+      };
+    if (boardItemFaces.size > 200) boardItemFaces.clear();
+    boardItemFaces.set(key, face);
+    return face;
+  }
+
+  // Lines of `text` in `room` (the ctx's font), at most `max`, the last cut short with an ellipsis if it must be.
+  function boardItemLines(ctx, text, room, max) {
+    const words = String(text || "").split(/\s+/).filter(Boolean);
+    const lines = [];
+    let line = "";
+    for (let i = 0; i < words.length; i += 1) {
+      const next = line ? `${line} ${words[i]}` : words[i];
+      if (!line || ctx.measureText(next).width <= room) {
+        line = next;
+        continue;
+      }
+      if (lines.length === max - 1) {
+        lines.push(fitCardTitle(ctx, `${line} ${words.slice(i).join(" ")}`, room));
+        return lines;
+      }
+      lines.push(fitCardTitle(ctx, line, room));
+      line = words[i];
+    }
+    if (line) lines.push(fitCardTitle(ctx, line, room));
+    return lines;
+  }
+
+  function paintBoardItemBox(ctx, w, h, { fill, stroke, width = 1, dash = null, shadow = false }) {
+    ctx.save();
+    if (shadow) {
+      ctx.shadowColor = "rgba(28, 25, 23, 0.08)";
+      ctx.shadowBlur = 3;
+      ctx.shadowOffsetY = 1;
+    }
+    ctx.fillStyle = fill;
+    ctx.fillRect(0, 0, w, h);
+    ctx.restore();
+    ctx.save();
+    ctx.strokeStyle = stroke;
+    ctx.lineWidth = width;
+    if (dash) ctx.setLineDash(dash);
+    ctx.strokeRect(width / 2, width / 2, w - width, h - width);
+    ctx.restore();
+  }
+
+  // Rows of text, centred as a block on `middle`: { font, color, lines, lineHeight, gap, strike }.
+  function paintBoardItemText(ctx, x, middle, rows) {
+    const total = rows.reduce((sum, row, i) => sum + (i ? row.gap || 0 : 0) + row.lines.length * row.lineHeight, 0);
+    let y = middle - total / 2;
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    rows.forEach((row, i) => {
+      if (i) y += row.gap || 0;
+      ctx.font = row.font;
+      ctx.fillStyle = row.color;
+      row.lines.forEach((line) => {
+        const at = y + row.lineHeight / 2;
+        ctx.fillText(line, x, at);
+        if (row.strike) ctx.fillRect(x, at, ctx.measureText(line).width, 1);
+        y += row.lineHeight;
+      });
+    });
+  }
+
+  function paintGoogleFace(ctx, block, w, h) {
+    const face = boardItemFace(block);
+    const task = block.type === "task";
+    paintBoardItemBox(ctx, w, h, { fill: "#ffffff", stroke: "#e7e5e4", shadow: true });
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h);
+    ctx.clip();
+    const pad = 13;
+    const middle = h / 2;
+    let left;
+    if (task) {
+      const size = 18.4;
+      const bx = pad - 4 + (28 - size) / 2;
+      const by = middle - size / 2;
+      ctx.globalAlpha = block.deleted || !block.taskId ? 0.5 : 1;
+      if (face.done) {
+        ctx.fillStyle = "#1c1917";
+        ctx.fillRect(bx, by, size, size);
+        ctx.save();
+        ctx.translate(bx + (size - 12.8) / 2, by + (size - 12.8) / 2);
+        ctx.scale(0.8, 0.8);
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2.2;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.stroke(boardItemPath(BOARD_CHECK_PATH));
+        ctx.restore();
+      } else {
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(bx, by, size, size);
+        ctx.strokeStyle = "#a8a29e";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(bx + 0.75, by + 0.75, size - 1.5, size - 1.5);
+      }
+      ctx.globalAlpha = 1;
+      left = pad - 4 + 28 + 8;
+    } else {
+      const tile = 48;
+      const ty = middle - tile / 2;
+      ctx.fillStyle = "#fafaf9";
+      ctx.fillRect(pad, ty, tile, tile);
+      ctx.strokeStyle = "#e7e5e4";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(pad + 0.5, ty + 0.5, tile - 1, tile - 1);
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = "#8c8c8c";
+      ctx.font = boardItemFont(700, 9.6);
+      ctx.fillText(face.month, pad + tile / 2, middle - 10.8);
+      ctx.fillStyle = "#1c1917";
+      ctx.font = boardItemFont(600, 19.2);
+      ctx.fillText(face.day || "?", pad + tile / 2, middle + 6);
+      left = pad + tile + 12;
+    }
+    const room = Math.max(10, w - left - pad);
+    const rows = [];
+    ctx.font = boardItemFont(600, 13.6);
+    rows.push({
+      font: ctx.font,
+      color: face.done ? "#a8a29e" : "#1c1917",
+      lines: [fitCardTitle(ctx, face.title, room)],
+      lineHeight: 17,
+      strike: face.done,
+    });
+    if (face.when) {
+      ctx.font = boardItemFont(400, 11.52, block.deleted ? "italic" : "normal");
+      rows.push({
+        font: ctx.font,
+        color: face.overdue && !face.done ? "#be123c" : "#8c8c8c",
+        lines: boardItemLines(ctx, face.when, room, 2),
+        lineHeight: 15,
+        gap: 2.4,
+      });
+    }
+    if (face.notes) {
+      ctx.font = boardItemFont(400, 11.52);
+      rows.push({ font: ctx.font, color: "#a8a29e", lines: boardItemLines(ctx, face.notes, room, 2), lineHeight: 15, gap: 2.4 });
+    }
+    paintBoardItemText(ctx, left, middle, rows);
+    ctx.restore();
+  }
+
+  function paintRefFace(ctx, o, w, h) {
+    const target = findDot(o.targetDotId);
+    const border = getComputedStyle(document.documentElement).getPropertyValue("--border-color").trim() || "#a8a29e";
+    paintBoardItemBox(ctx, w, h, target
+      ? { fill: "#fafaf7", stroke: border, width: 1.5, dash: [4.5, 3] }
+      : { fill: "#fdf6f6", stroke: "#e8b4b4", width: 1.5, dash: [4.5, 3] });
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, 0, w, h);
+    ctx.clip();
+    const x0 = 13.5;
+    const x1 = w - 13.5;
+    const head = 11.5 + 12;
+    ctx.textBaseline = "middle";
+    // ⇢ badge
+    ctx.fillStyle = "#1c1917";
+    ctx.fillRect(x0, head - 11, 22, 22);
+    ctx.fillStyle = "#ffffff";
+    ctx.textAlign = "center";
+    ctx.font = boardItemFont(700, 13.6);
+    ctx.fillText(DOT_REF_GLYPH, x0 + 11, head + 0.5);
+    // ↗ Open
+    ctx.font = boardItemFont(600, 11.52);
+    const openW = 9 + 12.8 + 3 + ctx.measureText("Open").width + 9;
+    const openX = x1 - openW;
+    ctx.globalAlpha = target ? 1 : 0.5;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(openX, head - 12, openW, 24);
+    ctx.strokeStyle = "#e7e5e4";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(openX + 0.5, head - 11.5, openW - 1, 23);
+    ctx.save();
+    ctx.translate(openX + 9, head - 6.4);
+    ctx.scale(0.8, 0.8);
+    ctx.strokeStyle = "#44403c";
+    ctx.lineWidth = 1.6;
+    ctx.lineCap = "round";
+    ctx.lineJoin = "round";
+    ctx.stroke(boardItemPath(BOARD_OPEN_PATH));
+    ctx.restore();
+    ctx.fillStyle = "#44403c";
+    ctx.textAlign = "left";
+    ctx.fillText("Open", openX + 9 + 12.8 + 3, head + 0.5);
+    ctx.globalAlpha = 1;
+    // The dot's type
+    ctx.font = boardItemFont(600, 10.88);
+    const typeX = x0 + 22 + 6;
+    const label = target ? dotTypeBadge(target.type) : "Deleted";
+    const swatch = target ? 13 : 0;
+    const typeRoom = Math.max(0, openX - 6 - typeX - 14 - swatch);
+    const typeText = fitCardTitle(ctx, label, typeRoom);
+    const typeW = Math.min(openX - 6 - typeX, 14 + swatch + ctx.measureText(typeText).width);
+    if (typeW > 14) {
+      ctx.fillStyle = "#ffffff";
+      ctx.fillRect(typeX, head - 8.5, typeW, 17);
+      ctx.strokeStyle = "#e7e5e4";
+      ctx.strokeRect(typeX + 0.5, head - 8, typeW - 1, 16);
+      if (target) {
+        if (!boardSwatch) {
+          boardSwatch = getComputedStyle(cardProbeAs("space-child-swatch")).backgroundColor || "#a8a29e";
+        }
+        ctx.fillStyle = boardSwatch;
+        if (target.type === "hub") {
+          ctx.save();
+          ctx.translate(typeX + 7 - 2, head - 6);
+          ctx.fill(boardItemPath(BOARD_HUB_PATH));
+          ctx.restore();
+        } else {
+          ctx.beginPath();
+          ctx.arc(typeX + 7 + 4, head, 4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.fillStyle = target ? "#78716c" : "#b45a5a";
+      ctx.fillText(typeText, typeX + 7 + swatch, head + 0.5);
+    }
+    // The title
+    ctx.font = boardItemFont(600, 14.72);
+    ctx.fillStyle = target ? "#292524" : "#b45a5a";
+    ctx.textBaseline = "top";
+    const title = target ? target.title : `[${DOT_REF_GLYPH} ${DOT_REF_DELETED}]`;
+    const lineHeight = 19.1;
+    boardItemLines(ctx, title, Math.max(10, x1 - x0), 2).forEach((line, i) => {
+      ctx.fillText(line, x0, 11.5 + 24 + 6 + i * lineHeight + 2);
+    });
+    ctx.restore();
+  }
+
+  function drawBoardItem(b, ctx, o) {
+    const f = b._frame(o);
+    const k = f.w / boardItemWidth(o) || 1;
+    const w = f.w / k;
+    const h = f.h / k;
+    ctx.save();
+    ctx.translate(f.cx, f.cy);
+    ctx.rotate(f.rad);
+    ctx.scale(k, k);
+    ctx.translate(-w / 2, -h / 2);
+    if (o.type === DOT_REF_TYPE) paintRefFace(ctx, o, w, h);
+    else if (o.block) paintGoogleFace(ctx, o.block, w, h);
+    ctx.restore();
+  }
+
+  /* Interacting: a board dot's layer for the open card, and the board as the engine's "space-board" source. */
+  function mountBoardItems(view) {
     const layer = document.createElement("div");
-    layer.className = "board-google-layer";
+    layer.className = "board-item-layer";
     view.surface.append(layer);
     view.itemLayer = layer;
-    layer.addEventListener("pointerdown", (event) => onBoardElementDown(view, event));
-    layer.addEventListener("pointermove", (event) => onBoardElementMove(view, event));
-    layer.addEventListener("pointerup", (event) => onBoardElementUp(view, event));
-    layer.addEventListener("pointercancel", (event) => onBoardElementUp(view, event));
     layer.addEventListener("click", (event) => {
-      const remove = event.target.closest("[data-board-element-remove]");
-      if (remove && view.editing) removeBoardElement(view, remove.closest("[data-board-element]")?.dataset.boardElement);
       const open = event.target.closest("[data-dot-ref-open]");
       if (open) followDotRef(open.closest("[data-target-id]")?.dataset.targetId);
     });
     window.UniversalBlockEngine?.registerSource?.(BOARD_ITEM_SOURCE, {
-      getList: (ownerId) => (boardView && (!ownerId || ownerId === boardView.dotId) ? boardGoogleBlocks(boardView.elements) : null),
+      getList: (ownerId) => (boardView?.board && (!ownerId || ownerId === boardView.dotId) ? boardItemBlocks(boardView.board.objects) : null),
       refresh: () => {
-        if (boardView) renderBoardElements(boardView);
+        if (boardView) refreshBoardItems(boardView);
       },
+      // A tick is already on the open card; the face follows, and the board saves.
       persist: (_blocks, ownerId) => {
-        if (!boardView || (ownerId && ownerId !== boardView.dotId)) return false;
-        saveBoardElements(boardView);
+        const b = boardView?.board;
+        if (!b || (ownerId && ownerId !== boardView.dotId)) return false;
+        b._scheduleRedraw();
+        b.markDirty();
         return true;
       },
     });
-    renderBoardElements(view);
   }
 
-  function renderBoardElements(view) {
-    const engine = window.UniversalBlockEngine;
-    if (!view.itemLayer || typeof engine?.render !== "function") return;
-    endBoardElementDrag(view);
-    // References keep the current title of their dot (one deleted keeps its last).
-    let renamed = false;
-    for (const element of view.elements) {
-      const target = element.type === DOT_REF_TYPE ? findDot(element.targetDotId) : null;
-      if (target && element.title !== target.title) {
-        element.title = target.title;
-        renamed = true;
-      }
-    }
-    view.itemLayer.replaceChildren(...view.elements.map((element) => {
-      const node = boardElementNode(engine, element, BOARD_ITEM_SOURCE, view.dotId);
-      const ref = element.type === DOT_REF_TYPE;
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.className = "board-google-remove";
-      remove.dataset.boardElementRemove = "";
-      remove.textContent = "\u2715";
-      const label = ref ? DOT_REF_META.label : BOARD_ITEM_KINDS[element.block.type]?.label || "card";
-      remove.title = `Remove ${label.toLowerCase()} from the board`;
-      remove.setAttribute("aria-label", `Remove ${ref ? `reference to ${element.title || "a dot"}` : element.block.title || label} from the board`);
-      node.append(remove);
-      // Editing, a double-click or double tap on the card (not its buttons) follows it too.
-      if (ref) {
-        window.FicusInput?.onDoubleActivate(node, (event) => {
-          if (!event.target.closest?.(BOARD_ITEM_CONTROLS)) followDotRef(element.targetDotId);
-        });
-      }
-      return node;
-    }));
-    if (renamed) saveBoardElements(view);
+  function refreshBoardItems(view) {
+    view.board?._scheduleRedraw();
+    queueObjectPanel(view);
+    if (view.interact) fillBoardItem(view, view.interact);
   }
 
-  function boardElementNode(engine, element, source, ownerId, { readOnly = false } = {}) {
+  function openBoardItem(view, id) {
+    const b = view.board;
+    const o = b?.objects.find((item) => item.id === id);
+    if (!o || !isBoardItem(o) || isHiddenObject(o) || !view.itemLayer || view.interact?.id === id) return;
+    closeBoardItem(view, false);
     const node = document.createElement("div");
-    node.className = "board-google-element";
-    node.dataset.boardElement = element.id;
-    Object.assign(node.style, { left: `${element.x}px`, top: `${element.y}px`, width: `${element.width}px` });
-    if (element.type === DOT_REF_TYPE) {
-      node.classList.add("board-ref-element");
-      node.style.height = `${element.height}px`;
-      node.append(refCardNode(element, findDot(element.targetDotId), { readOnly }));
-      return node;
+    node.className = "board-item-live";
+    node.dataset.boardItem = id;
+    node.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      closeBoardItem(view);
+    });
+    view.interact = { id, node };
+    fillBoardItem(view, view.interact);
+    view.itemLayer.append(node);
+    placeBoardItem(view);
+    b._syncSelbar();
+  }
+
+  function fillBoardItem(view, live) {
+    const o = view.board?.objects.find((item) => item.id === live.id);
+    if (!o) return;
+    const engine = window.UniversalBlockEngine;
+    if (o.type === DOT_REF_TYPE) live.node.replaceChildren(refCardNode(o, findDot(o.targetDotId)));
+    else if (typeof engine?.render === "function") live.node.innerHTML = engine.render(o.block, { source: BOARD_ITEM_SOURCE, ownerId: view.dotId, hideTypeBadge: true });
+  }
+
+  // The open card over its face, following it as it's dragged, resized or turned; gone with it.
+  function placeBoardItem(view) {
+    const live = view.interact;
+    const b = view.board;
+    if (!live || !b) return;
+    const o = b.objects.find((item) => item.id === live.id);
+    if (!o || isHiddenObject(o)) {
+      closeBoardItem(view);
+      return;
     }
-    node.innerHTML = engine.render(element.block, { source, ownerId, hideTypeBadge: true });
-    return node;
+    const f = b._frame(o);
+    const g = b._gesture;
+    const moving = g?.kind === "move" && b.selection.has(o.id);
+    const k = f.w / boardItemWidth(o) || 1;
+    const w = f.w / k;
+    const h = f.h / k;
+    Object.assign(live.node.style, {
+      left: `${f.cx + (moving ? g.dx || 0 : 0) - w / 2}px`,
+      top: `${f.cy + (moving ? g.dy || 0 : 0) - h / 2}px`,
+      width: `${w}px`,
+      height: `${h}px`,
+      transform: `rotate(${f.rad}rad) scale(${k})`,
+    });
   }
 
-  // The calendar and task blocks of a board's elements (its references hold none).
-  function boardGoogleBlocks(elements) {
-    return elements.flatMap((element) => (element.block ? [element.block] : []));
+  function closeBoardItem(view, sync = true) {
+    const live = view?.interact;
+    if (!live) return;
+    view.interact = null;
+    live.node.remove();
+    if (sync) view.board?._syncSelbar();
   }
 
-  // Keeps the board's elements in its saved page, beside whatever the drawing last saved.
-  function saveBoardElements(view) {
-    const saved = readBoardState(view.dotId) || {};
-    const size = view.width && view.height ? { size: { width: view.width, height: view.height } } : {};
-    store()?.setPage("board", view.dotId, { ...saved, ...size, elements: view.elements }, view.dotId);
-    const dot = findDot(view.dotId);
-    if (dot) {
-      dot.updatedAt = new Date().toISOString();
-      scheduleSave();
-    }
+  // A board dot's engine opens its cards: Interact (Done once open) leads the selection bar of one card, and the
+  // open card follows every repaint.
+  function adaptBoardItems(b, view) {
+    const syncSelbar = b._syncSelbar;
+    b._syncSelbar = function (...args) {
+      const live = view.interact;
+      if (live && this.stage === "edit" && !(this.selection.size === 1 && this.selection.has(live.id))) closeBoardItem(view, false);
+      const result = syncSelbar.apply(this, args);
+      const item = this.selbar.hidden ? null : this._singleSelected();
+      if (isBoardItem(item)) {
+        const open = view.interact?.id === item.id;
+        const title = open ? "Done: lock the card again" : "Use the card's buttons";
+        this.selbar.insertAdjacentHTML("afterbegin", `<button type="button" class="sb-sel-text is-primary" data-sb-sel="interact" title="${title}" aria-pressed="${open}">${BOARD_INTERACT_ICON}<span>${open ? "Done" : "Interact"}</span></button><span class="sb-selsep" aria-hidden="true"></span>`);
+        this._positionSelbar();
+      }
+      return result;
+    };
+    const onSelectionAction = b._onSelectionAction;
+    b._onSelectionAction = function (action, ...args) {
+      if (action !== "interact") return onSelectionAction.call(this, action, ...args);
+      const item = this._singleSelected();
+      if (item && view.interact?.id === item.id) closeBoardItem(view);
+      else if (item) openBoardItem(view, item.id);
+      return undefined;
+    };
+    const redraw = b._redraw;
+    b._redraw = function (...args) {
+      const result = redraw.apply(this, args);
+      placeBoardItem(view);
+      return result;
+    };
   }
 
-  // 📅 Calendar Event / ✅ Google Task in the + menu: the sheet, then a card for the block in the middle of the
-  // board's visible room.
-  async function addBoardElement(kind) {
+  // 📅 Calendar Event / ✅ Google Task in the + menu: the sheet, then a card for the block.
+  async function addBoardItem(kind) {
     const view = boardView;
     const engine = window.UniversalBlockEngine;
     if (!view?.editing || !board || !has(BOARD_ITEM_KINDS, kind) || typeof engine?.pickGoogleBlock !== "function") return;
     board._closePopover();
     const block = await engine.pickGoogleBlock(kind);
-    if (!block || boardView !== view) return;
-    const width = BOARD_ITEM_WIDTH;
-    const room = boardRoom();
-    const x = view.width / 2 - view.x / view.zoom - width / 2;
-    const y = view.height / 2 + (room.cy - view.y) / view.zoom - 40;
-    view.elements.push({
-      id: newBoardObjectId(),
-      type: BOARD_ITEM_KINDS[kind].type,
-      x: Math.round(Math.min(Math.max(x, 8), Math.max(8, view.width - width - 8))),
-      y: Math.round(Math.min(Math.max(y, 8), Math.max(8, view.height - 96))),
-      width,
-      block,
-    });
-    renderBoardElements(view);
-    saveBoardElements(view);
+    if (!block || boardView !== view || !view.editing || !board) return;
+    const item = { id: newBoardObjectId(), type: BOARD_ITEM_KINDS[kind].type, x: 0, y: 0, w: BOARD_ITEM_WIDTH, h: 0, rotation: 0, block };
+    item.h = boardItemHeight(item);
+    placeBoardObject(item);
   }
 
-  // ⇢ Reference in the + menu: DotSearchModal, then a reference card for the dot picked in the middle of the board's
-  // visible room.
+  // ⇢ Reference in the + menu: DotSearchModal, then a reference card for the dot picked.
   function addBoardRef() {
     const view = boardView;
     if (!view?.editing || !board) return;
     board._closePopover();
     openDotSearchModal({
       onPick: ({ targetDotId, title }) => {
-        if (boardView !== view || !view.editing || !findDot(targetDotId)) return;
-        const width = DOT_REF_CARD_WIDTH;
-        const height = DOT_REF_CARD_HEIGHT;
-        const room = boardRoom();
-        const x = view.width / 2 - view.x / view.zoom - width / 2;
-        const y = view.height / 2 + (room.cy - view.y) / view.zoom - height / 2;
-        view.elements.push({
-          id: `ref_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
-          type: DOT_REF_TYPE,
-          targetDotId,
-          title,
-          x: Math.round(Math.min(Math.max(x, 8), Math.max(8, view.width - width - 8))),
-          y: Math.round(Math.min(Math.max(y, 8), Math.max(8, view.height - height - 8))),
-          width,
-          height,
+        if (boardView !== view || !view.editing || !board || !findDot(targetDotId)) return;
+        placeBoardObject({
+          id: newBoardObjectId(), type: DOT_REF_TYPE, targetDotId, title,
+          x: 0, y: 0, w: DOT_REF_CARD_WIDTH, h: DOT_REF_CARD_HEIGHT, rotation: 0,
         });
-        renderBoardElements(view);
-        saveBoardElements(view);
       },
     });
-  }
-
-  function removeBoardElement(view, id) {
-    const before = view.elements.length;
-    view.elements = view.elements.filter((element) => element.id !== id);
-    if (view.elements.length === before) return;
-    renderBoardElements(view);
-    saveBoardElements(view);
-  }
-
-  /* Dragging a card while editing. Every press on a card stops at the layer (the engine draws only from presses on
-     its canvas, and the viewport lets these through; see onBoardPointerDown). The card follows the pointer in board
-     pixels (the screen distance over the zoom), stays on the board, and is saved where it's let go. A second finger
-     (a pinch) drops the drag where it is. */
-  function onBoardElementDown(view, event) {
-    const node = event.target.closest("[data-board-element]");
-    if (!node) return;
-    event.stopPropagation();
-    if (!view.editing || event.button !== 0 || event.target.closest(BOARD_ITEM_CONTROLS) || view.itemDrag || view.pinch) return;
-    const element = view.elements.find((item) => item.id === node.dataset.boardElement);
-    if (!element) return;
-    event.preventDefault();
-    try { node.setPointerCapture(event.pointerId); } catch (_) {}
-    const at = getCoordinates(event);
-    view.itemDrag = { pointerId: event.pointerId, element, node, x: at.x, y: at.y, fromX: element.x, fromY: element.y, moved: false };
-    node.classList.add("is-dragging");
-  }
-
-  function onBoardElementMove(view, event) {
-    const drag = view.itemDrag;
-    if (!drag || drag.pointerId !== event.pointerId) return;
-    event.preventDefault();
-    const at = getCoordinates(event);
-    const dx = (at.x - drag.x) / view.zoom;
-    const dy = (at.y - drag.y) / view.zoom;
-    if (!drag.moved && Math.hypot(at.x - drag.x, at.y - drag.y) <= DRAG_THRESHOLD) return;
-    drag.moved = true;
-    const { element, node } = drag;
-    element.x = Math.round(Math.min(Math.max(drag.fromX + dx, 0), Math.max(0, view.width - node.offsetWidth)));
-    element.y = Math.round(Math.min(Math.max(drag.fromY + dy, 0), Math.max(0, view.height - node.offsetHeight)));
-    node.style.left = `${element.x}px`;
-    node.style.top = `${element.y}px`;
-  }
-
-  function onBoardElementUp(view, event) {
-    if (view.itemDrag?.pointerId === event.pointerId) endBoardElementDrag(view);
-  }
-
-  function endBoardElementDrag(view) {
-    const drag = view.itemDrag;
-    view.itemDrag = null;
-    if (!drag) return;
-    drag.node.classList.remove("is-dragging");
-    try { drag.node.releasePointerCapture(drag.pointerId); } catch (_) {}
-    if (drag.moved) saveBoardElements(view);
   }
 
   /* Editing, the selected card's dot is renamed in place: a sharp field with the card's size and look sits over it
@@ -8110,11 +8400,11 @@
   function adaptBoardEngine(b, view, owns) {
     adaptBoardPainting(b);
 
-    // Child dot cards are framed for resizing and rotating with square handles and a square rotate knob, at the
-    // engine's own handle positions.
+    // Child dot cards (and calendar, task and reference cards) are framed for resizing and rotating with square
+    // handles and a square rotate knob, at the engine's own handle positions.
     const drawTransformFrame = b._drawTransformFrame;
     b._drawTransformFrame = function (ctx, o, dx, dy) {
-      if (o.type !== DOT_CARD || this._cutTargetId) return drawTransformFrame.call(this, ctx, o, dx, dy);
+      if ((o.type !== DOT_CARD && !isBoardItem(o)) || this._cutTargetId) return drawTransformFrame.call(this, ctx, o, dx, dy);
       const f = this._frame(o);
       const { corners, rotate } = this._handlePositions({ cx: 0, cy: 0, w: f.w, h: f.h, rad: 0 });
       const [nw, , se] = corners;
@@ -8183,9 +8473,16 @@
       }
       return result;
     };
+    // Copies of calendar and task cards get blocks of their own, in the undo step that made them too.
     const duplicateSelection = b.duplicateSelection;
     b.duplicateSelection = function (...args) {
-      return holdsCard(this) ? undefined : duplicateSelection.apply(this, args);
+      if (holdsCard(this)) return undefined;
+      const result = duplicateSelection.apply(this, args);
+      const copies = this.objects.filter((o) => this.selection.has(o.id));
+      renewBoardItemBlocks(copies);
+      const snap = this._history[this._historyIndex];
+      if (snap) snap.objects = snap.objects.map((o) => (this.selection.has(o.id) ? Object.assign({}, this.objects.find((c) => c.id === o.id) || o) : o));
+      return result;
     };
 
     // The selection bar dodges the engine's top bar when it shares the sheet; here that bar sits in the bottom dock.
@@ -8211,14 +8508,16 @@
     document.addEventListener("pointerdown", b._onDocPointerDown, true);
   }
 
-  /* How every Space board is painted, editable or read-only: child dot cards are Space's own kind of object, drawn
-     from .board-child-card, and hidden objects (isVisible: false) keep their place in the stack but aren't painted. */
+  /* How every Space board is painted, editable or read-only: child dot cards and calendar, task and reference cards
+     are Space's own kinds of object, drawn from .board-child-card and as their cards' faces, and hidden objects
+     (isVisible: false) keep their place in the stack but aren't painted. */
   function adaptBoardPainting(b) {
     // saveNow() would otherwise repaint the whole board into a JPEG preview on every autosave; Space never shows it.
     b.getThumbnailDataUrl = () => null;
     const drawObject = b._drawObject;
     b._drawObject = function (ctx, o) {
       if (o.type === DOT_CARD) drawDotCard(this, ctx, o);
+      else if (isBoardItem(o)) drawBoardItem(this, ctx, o);
       else drawObject.call(this, ctx, o);
     };
     b._drawObjects = withVisibleObjects(b._drawObjects);
@@ -8391,28 +8690,29 @@
         return;
       }
     }
-    // A calendar or task card takes its own presses (onBoardElementDown): editing, anywhere on it; reading, on its
-    // controls, a press on the rest of it panning as it would on the sheet.
-    const element = event.target.closest?.(".board-google-element");
-    if (element && event.button === 0 && (view.editing || event.target.closest(BOARD_ITEM_CONTROLS))) {
+    // The open calendar, task or reference card takes its own presses (its controls answer). Reading, a press
+    // anywhere else closes it; editing, it closes with the selection.
+    if (view.interact?.node.contains(event.target)) {
       view.cardPress = null;
       view.renamePress = null;
+      view.itemPress = null;
       return;
     }
+    if (!view.editing) closeBoardItem(view);
     const onSheet = view.surface.contains(event.target);
-    // Reading, a press on a child dot card that comes up without dragging opens its dot; editing, the card is just
-    // an object for the engine to select and move.
-    const card = !element && !view.editing && event.button === 0 && boardCardAt(event);
-    // So does one on a reference card, whose dot it follows.
-    const ref = element && !view.editing && event.button === 0 ? element.querySelector(".dot-ref-card:not(.is-deleted)") : null;
-    view.cardPress = card ? { pointerId: event.pointerId, dotId: card.dotId, x: at.x, y: at.y }
-      : ref ? { pointerId: event.pointerId, dotId: ref.dataset.targetId, ref: true, x: at.x, y: at.y }
+    const hit = event.button === 0 && onSheet ? boardObjectAt(event) : null;
+    // Reading, a press on a child dot card or a reference that comes up without dragging opens its dot, and one on a
+    // calendar or task card opens the card; editing, they're objects for the engine to select and move.
+    const read = !view.editing && hit;
+    view.cardPress = read?.type === DOT_CARD ? { pointerId: event.pointerId, dotId: read.dotId, x: at.x, y: at.y }
+      : read?.type === DOT_REF_TYPE ? { pointerId: event.pointerId, dotId: read.targetDotId, ref: true, x: at.x, y: at.y }
       : null;
-    // Editing, a press on the one selected card that comes up without dragging renames its dot instead.
-    const named = view.editing && onSheet && event.button === 0 && board.tool === "lasso" && boardCardAt(event);
-    view.renamePress = named && board.selection.size === 1 && board.selection.has(named.id)
-      ? { pointerId: event.pointerId, cardId: named.id, x: at.x, y: at.y }
-      : null;
+    // Editing, a press on the one selected card that comes up without dragging renames a child dot card's dot, and
+    // opens a calendar, task or reference card.
+    const picked = view.editing && hit && board.tool === "lasso" && board.selection.size === 1 && board.selection.has(hit.id) ? hit : null;
+    view.renamePress = picked?.type === DOT_CARD ? { pointerId: event.pointerId, cardId: picked.id, x: at.x, y: at.y } : null;
+    const opens = (picked && isBoardItem(picked)) || (read && has(BOARD_ITEM_BLOCKS, read.type)) ? hit : null;
+    view.itemPress = opens ? { pointerId: event.pointerId, id: opens.id, x: at.x, y: at.y } : null;
     // While reading, the sheet is for looking at: any press pans and nothing reaches the engine (which would
     // otherwise switch itself back to editing).
     if (event.button === 1 || (event.button === 0 && (!onSheet || !view.editing))) {
@@ -8431,9 +8731,9 @@
 
   function startBoardPinch(view) {
     cancelBoardGesture(board);
-    endBoardElementDrag(view);
     view.cardPress = null;
     view.renamePress = null;
+    view.itemPress = null;
     view.pan = null;
     view.viewport.classList.remove("is-panning");
     const ids = [...view.touches.keys()];
@@ -8470,9 +8770,12 @@
     if (press?.pointerId === id && Math.hypot(at.x - press.x, at.y - press.y) > DRAG_THRESHOLD) view.cardPress = null;
     const named = view.renamePress;
     if (named?.pointerId === id && Math.hypot(at.x - named.x, at.y - named.y) > DRAG_THRESHOLD) view.renamePress = null;
+    const item = view.itemPress;
+    if (item?.pointerId === id && Math.hypot(at.x - item.x, at.y - item.y) > DRAG_THRESHOLD) view.itemPress = null;
     if (event.pointerType === "mouse" && !event.buttons) {
-      const card = !view.editing && boardCardAt(event);
-      view.viewport.classList.toggle("is-over-card", Boolean(card));
+      const hit = !view.editing && boardObjectAt(event);
+      const card = hit?.type === DOT_CARD ? hit : null;
+      view.viewport.classList.toggle("is-over-card", Boolean(card || isBoardItem(hit)));
       setBoardCardHover(card ? card.id : null);
     }
     const pinch = view.pinch;
@@ -8518,6 +8821,11 @@
     if (named?.pointerId === id) {
       view.renamePress = null;
       if (event.type === "pointerup") setTimeout(() => startBoardCardRename(named.cardId));
+    }
+    const item = view.itemPress;
+    if (item?.pointerId === id) {
+      view.itemPress = null;
+      if (event.type === "pointerup") setTimeout(() => openBoardItem(view, item.id));
     }
     if (view.pinch?.ids.includes(id)) view.pinch = null;
     if (view.swallow.delete(id)) {
@@ -8584,8 +8892,6 @@
       };
       board.objects.forEach(move);
       board._history.forEach((snap) => snap.objects.forEach(move));
-      view.elements.forEach(move);
-      renderBoardElements(view);
     }
     const z = view.zoom;
     const x = view.x + ((w - view.width) / 2 - shiftX) * z;
@@ -8745,6 +9051,8 @@
   function setBoardEditing(editing) {
     const view = boardView;
     if (!view || !board || view.editing === editing) return;
+    closeBoardItem(view);
+    view.itemPress = null;
     if (!editing) {
       closeSpacePopovers();
       settleBoardTools(board);
@@ -8791,10 +9099,14 @@
     if (o.type === "sticker") return typeof o.text === "string" && o.text && o.text.length <= 8 ? `Sticker ${o.text}` : "Sticker";
     if (o.type === "pad") return BOARD_PAD_NAMES[o.variant] || "Note";
     if (o.type === "group") return `Group (${(o.children || []).length})`;
-    if (o.type === DOT_CARD) {
-      const title = String(findDot(o.dotId)?.title || o.title || "").trim();
-      return title ? `Dot “${title.length > 28 ? `${title.slice(0, 27)}…` : title}”` : "Dot";
-    }
+    const named = (label, raw) => {
+      const title = String(raw || "").trim();
+      return title ? `${label} “${title.length > 28 ? `${title.slice(0, 27)}…` : title}”` : label;
+    };
+    if (o.type === DOT_CARD) return named("Dot", findDot(o.dotId)?.title || o.title);
+    if (o.type === DOT_REF_TYPE) return named("Reference", findDot(o.targetDotId)?.title || o.title);
+    if (o.type === "calendar_event") return named("Event", o.block?.title);
+    if (o.type === "google_task") return named("Task", o.block?.title);
     return "Object";
   }
 
@@ -9034,6 +9346,7 @@
     const view = boardView;
     if (view) {
       view.renaming?.finish(true);
+      closeBoardItem(view, false);
       view.observer?.disconnect();
       clearTimeout(view.sharpenTimer);
       cancelAnimationFrame(view.panelFrame);
@@ -12131,19 +12444,25 @@
       return { blocks: contentEmbedBlocks(dot.content), save: (changed) => patchTextEmbeds(dot, changed) };
     }
     if (dot?.type === "board") {
-      const view = boardView?.dotId === dotId ? boardView : null;
+      const view = boardView?.dotId === dotId && boardView.board ? boardView : null;
       if (view) {
         return {
-          blocks: boardGoogleBlocks(view.elements),
+          blocks: boardItemBlocks(view.board.objects),
           save: () => {
-            renderBoardElements(view);
-            saveBoardElements(view);
+            refreshBoardItems(view);
+            view.board.markDirty();
           },
         };
       }
       const state = readBoardState(dotId);
-      const elements = cleanBoardElements(state?.elements);
-      return { blocks: boardGoogleBlocks(elements), save: () => store()?.setPage("board", dotId, { ...state, elements }, dotId) };
+      const objects = readBoardObjects(state);
+      return {
+        blocks: boardItemBlocks(objects),
+        save: () => {
+          const { elements: _elements, ...rest } = state || {};
+          store()?.setPage("board", dotId, { ...rest, objects }, dotId);
+        },
+      };
     }
     return { blocks: [], save: () => {} };
   }
@@ -13537,7 +13856,6 @@
      object reaches (whichever is more), zoomed (--current-zoom, as in Space) to READ_BOARD_HEIGHT tall, never
      enlarged, its pixel density following that zoom; the viewport is the zoomed sheet's size. Presses don't reach it. */
   const READ_BOARD_HEIGHT = 400;
-  const READ_BOARD_ITEM_HEIGHT = 120;
 
   function readBoardPage(dot, page, cleanups, onOpenDot) {
     const frame = document.createElement("div");
@@ -13572,22 +13890,21 @@
       width = Math.max(width, Math.ceil(box.x + box.w + BOARD_GAP));
       height = Math.max(height, Math.ceil(box.y + box.h + BOARD_GAP));
     }
-    // Its calendar and task cards, locked, over the drawing (as tall as a card usually is, for its reach).
-    const engine = window.UniversalBlockEngine;
-    const elements = typeof engine?.render === "function" ? cleanBoardElements(saved?.elements) : [];
-    if (elements.length) {
-      const layer = document.createElement("div");
-      layer.className = "board-google-layer";
-      for (const element of elements) {
-        const node = boardElementNode(engine, element, READ_SOURCE, dot.id, { readOnly: true });
-        lockReadBlock(node);
-        if (element.type === DOT_REF_TYPE && findDot(element.targetDotId)) markReadLink(node, element.targetDotId, onOpenDot);
-        layer.append(node);
-        width = Math.max(width, Math.ceil(element.x + element.width + BOARD_GAP));
-        height = Math.max(height, Math.ceil(element.y + (element.height || READ_BOARD_ITEM_HEIGHT) + BOARD_GAP));
-      }
-      sheet.append(layer);
+    // Its references are links (the sheet itself takes no presses).
+    const links = document.createElement("div");
+    links.className = "board-item-layer";
+    for (const o of b.objects) {
+      const target = o.type === DOT_REF_TYPE && !isHiddenObject(o) ? findDot(o.targetDotId) : null;
+      if (!target || !onOpenDot) continue;
+      const box = b._aabb(o);
+      const spot = document.createElement("div");
+      spot.className = "board-ref-spot";
+      Object.assign(spot.style, { left: `${box.x}px`, top: `${box.y}px`, width: `${box.w}px`, height: `${box.h}px` });
+      spot.setAttribute("aria-label", `Open ${target.title}`);
+      markReadLink(spot, target.id, onOpenDot);
+      links.append(spot);
     }
+    if (links.childElementCount) sheet.append(links);
     width = Math.min(BOARD_SIDE_MAX, Math.max(BOARD_SIDE_MIN, width));
     height = Math.min(BOARD_SIDE_MAX, Math.max(BOARD_SIDE_MIN, height));
     zoom = Math.min(1, READ_BOARD_HEIGHT / height);

@@ -18,7 +18,7 @@
     <script src="canvas-editor.js?v=2"></script>
     <script src="scrapboard.js?v=26"></script>
     <script src="quick_line.js?v=2"></script>
-    <script src="space.js?v=88" defer></script>
+    <script src="space.js?v=89" defer></script>
     <script src="collection.js?v=19" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -2840,25 +2840,16 @@
         .text-embed-btn { width: 28px; height: 28px; opacity: 1; }
         .text-embed .text-embed-check { width: 28px; height: 28px; margin: 0 -0.15rem 0 -0.3rem; }
       }
-      /* A calendar event or Google Task on a board dot's sheet: the Block dot card itself, placed in board pixels on a
-         layer over the drawing, so it pans and zooms with the sheet. Editing, it drags by anything but its controls and
-         carries an ✕ (on hover or focus; always on touch screens); reading, only its controls answer and the rest of
-         it pans the board like the sheet. */
-      .board-google-layer { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
-      .board-google-element { position: absolute; box-sizing: border-box; pointer-events: auto; box-shadow: 0 1px 3px rgba(28, 25, 23, 0.08); }
-      .space-board:not(.is-reading) .board-google-element { cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
-      .board-google-element.is-dragging { z-index: 1; cursor: grabbing; box-shadow: 0 8px 20px rgba(28, 25, 23, 0.16); }
-      .board-google-remove {
-        position: absolute; top: -11px; right: -11px; display: none; width: 22px; height: 22px; align-items: center; justify-content: center;
-        padding: 0; border: 1px solid #e7e5e4; background: #fff; font-size: 0.7rem; line-height: 1; color: #57534e; cursor: pointer;
-      }
-      .board-google-remove:hover, .board-google-remove:focus-visible { background: #f5f5f4; color: #1c1917; outline: none; }
-      .space-board:not(.is-reading) .board-google-element:hover .board-google-remove,
-      .space-board:not(.is-reading) .board-google-element:focus-within .board-google-remove { display: inline-flex; }
-      .space-board.is-reading .board-google-element [data-ublock-open] { display: none; }
-      @media (hover: none), (pointer: coarse) {
-        .space-board:not(.is-reading) .board-google-remove { display: inline-flex; top: -14px; right: -14px; width: 28px; height: 28px; }
-      }
+      /* Calendar events, Google Tasks and dot references on a board dot's sheet are painted on its canvas (space.js).
+         The one open for interacting gets its real card on this layer, over its face and turned and scaled with it
+         (so it pans and zooms with the sheet); in a board read elsewhere, references are links laid over theirs. */
+      .board-item-layer { position: absolute; inset: 0; z-index: 3; pointer-events: none; }
+      .board-item-live { position: absolute; box-sizing: border-box; transform-origin: center; pointer-events: auto; box-shadow: 0 8px 20px rgba(28, 25, 23, 0.16); }
+      .board-item-live > * { box-sizing: border-box; height: 100%; overflow: hidden; }
+      .space-board.is-reading .board-item-live { outline: 2px solid #1c1917; outline-offset: 2px; }
+      .space-board.is-reading .board-item-live [data-ublock-open] { display: none; }
+      .board-ref-spot { position: absolute; pointer-events: auto; cursor: pointer; }
+      .board-ref-spot:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
       /* Dot references. DotSearchModal: the dot search in a dialog over a dimmed page, near the top so a phone's
          keyboard leaves it in view; 16px text so iPhone and iPad Safari don't zoom in on the field. */
       .dot-search-modal {
@@ -2928,8 +2919,7 @@
       }
       .dot-ref-card.is-deleted { border-color: #e8b4b4; background: #fdf6f6; }
       .dot-ref-card.is-deleted .dot-ref-card-title, .dot-ref-card.is-deleted .dot-ref-card-type { color: #b45a5a; }
-      .board-ref-element { background: transparent; }
-      .space-board.is-reading .board-ref-element, .dot-ref-block .dot-ref-card, .dot-read-content .dot-ref-card[data-read-dot] { cursor: pointer; }
+      .dot-ref-block .dot-ref-card, .dot-read-content .dot-ref-card[data-read-dot] { cursor: pointer; }
       /* On a block grid the widget's own card wears the dashed border. */
       .grid-widget-block.dot-ref-block > .grid-widget-card { border: 1.5px dashed var(--border-color, #a8a29e); background: #fafaf7; box-shadow: none; }
       .grid-widget-block.dot-ref-block:has(.dot-ref-card.is-deleted) > .grid-widget-card { border-color: #e8b4b4; background: #fdf6f6; }
