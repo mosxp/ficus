@@ -7257,15 +7257,21 @@
       this.popover.style.left = `${Math.min(Math.max(center, half + 12), Math.max(half + 12, box.width - half - 12))}px`;
     };
 
-    // The + menu leads with Add child dot, which turns the menu into a pick of dot types.
+    // The + menu leads with Add child dot, which turns the menu into a pick of dot types, and ends with the calendar
+    // event and task cards (board elements, not dots).
     const popoverHtml = b._popoverHtml;
     b._popoverHtml = function (kind) {
       if (kind === "childDots") return childDotsMenuHtml();
       if (kind === "linkDots") return linkDotsMenuHtml();
       const html = popoverHtml.call(this, kind);
       if (kind !== "insert") return html;
-      const row = `<button type="button" class="sb-menu-item" data-space-board-child>${CHILD_DOT_ICON.replace("<svg ", '<svg class="sb-icon" ')}<span>Add child dot</span><small>Text · Board · Block · Hub · Event · Task</small></button>`;
-      return html.replace('<div class="sb-menu" role="menu">', `<div class="sb-menu" role="menu">${row}`);
+      const row = `<button type="button" class="sb-menu-item" data-space-board-child>${CHILD_DOT_ICON.replace("<svg ", '<svg class="sb-icon" ')}<span>Add child dot</span><small>Text · Board · Block · Hub</small></button>`;
+      const google = Object.entries(BOARD_ITEM_KINDS).map(([item, { symbol, label, hint }]) => (
+        `<button type="button" class="sb-menu-item" data-space-board-google="${item}" aria-haspopup="dialog"><span class="space-board-child-glyph" aria-hidden="true">${symbol}</span><span>${label}</span><small>${hint}</small></button>`
+      )).join("");
+      return html
+        .replace('<div class="sb-menu" role="menu">', `<div class="sb-menu" role="menu">${row}`)
+        .replace(/<\/div>\s*$/, `${google}</div>`);
     };
     const inInsertFlow = b._inInsertFlow;
     b._inInsertFlow = function () {
@@ -7300,10 +7306,6 @@
       <button type="button" role="menuitem" class="sb-menu-item" data-space-board-link>${LINK_DOT_ICON.replace("<svg ", '<svg class="sb-icon" ')}<span>Link existing dot…</span></button>
       ${Object.entries(DOT_TYPES).map(([type, { label }]) => (
         `<button type="button" role="menuitem" class="sb-menu-item" data-space-board-child-type="${type}"><span class="space-board-child-glyph" aria-hidden="true"><span class="space-child-swatch" data-type="${type}"></span></span><span>${label}</span></button>`
-      )).join("")}
-      <div class="sb-menu-sep" role="separator"></div>
-      ${Object.entries(BOARD_ITEM_KINDS).map(([kind, { symbol, label }]) => (
-        `<button type="button" role="menuitem" class="sb-menu-item" data-space-board-google="${kind}" aria-haspopup="dialog"><span class="space-board-child-glyph" aria-hidden="true">${symbol}</span><span>${label}</span></button>`
       )).join("")}
     </div>`;
   }
@@ -7410,9 +7412,9 @@
     else showToast("That dot has been deleted from Space.");
   }
 
-  /* Calendar events and Google Tasks on a board dot's sheet. The + menu's Add child dot lists 📅 Calendar Event and
-     ✅ Google Task, which open the Block dot's Find / New sheets (through the block engine), and the block made there
-     goes on the board as one of the `elements` of its saved page:
+  /* Calendar events and Google Tasks on a board dot's sheet. The + menu ends with 📅 Calendar Event and ✅ Google Task
+     (below GIF, beside the other things put on the sheet), which open the Block dot's Find / New sheets (through the
+     block engine), and the block made there goes on the board as one of the `elements` of its saved page:
        { id, type: "calendar_event" | "google_task", x, y, width, block }
      x, y and width in board pixels, `block` being the calendar or task block a Block dot would hold (its eventId or
      taskId and tasklistId, title, times or tick). Each is drawn as that block's own card (engine.render) on a layer
@@ -7422,8 +7424,8 @@
      anything but its controls (mouse, pen or finger) and its ✕ takes it off the board; reading, its controls work
      and a press anywhere else on it pans the board. */
   const BOARD_ITEM_KINDS = {
-    calendar: { type: "calendar_event", symbol: "\u{1F4C5}", label: "Calendar Event" },
-    task: { type: "google_task", symbol: "\u2705", label: "Google Task" },
+    calendar: { type: "calendar_event", symbol: "\u{1F4C5}", label: "Calendar Event", hint: "Find · new event" },
+    task: { type: "google_task", symbol: "\u2705", label: "Google Task", hint: "Find · new task" },
   };
   const BOARD_ITEM_WIDTH = 280;
   const BOARD_ITEM_CONTROLS = "a, button, input, label, select, textarea";
