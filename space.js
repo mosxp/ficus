@@ -22,6 +22,9 @@
   const BOARD_KEEP_VISIBLE = 64;
   // The Universal Block Engine source name a block dot registers its list under.
   const BLOCK_SOURCE = "space-block";
+  // The Universal Block Engine sources for the calendar and task blocks in an open text dot's page and board dot's sheet.
+  const TEXT_EMBED_SOURCE = "space-text";
+  const BOARD_ITEM_SOURCE = "space-board";
   const BLOCK_AUTOSAVE_MS = 400;
   // index.html sets the cell size as --grid-size on .block-dot-container; this is only the fallback.
   const BLOCK_GRID_FALLBACK = 40;
@@ -1828,11 +1831,14 @@
       },
     });
     refreshInlineDots(editorRoot());
+    registerTextEmbedSource();
+    refreshTextEmbeds(editorRoot(), dot.id);
     enhanceToolbar(host);
     addSettingsDock(host);
     addTextModeSwitch(host);
     watchInlineDots(dot.id);
     applyPageLayout(pageLayoutOf(dot.id));
+    void syncGoogleBlocks(dot.id);
   }
 
   /* Editing and reading, as in board and block dots: a text dot opens for reading, its page locked (the editor and
@@ -2197,10 +2203,12 @@
     scheduleSave();
   }
 
-  // The cell-selection highlight is editing state, so it never reaches the saved HTML.
+  // The cell-selection highlight is editing state, so it never reaches the saved HTML; nor do the pills drawn in
+  // calendar and task embeds (each keeps its block and a plain label, and is drawn again when the page opens).
   function cleanEditorHtml(html) {
-    if (!html.includes(CELL_SELECTED)) return html;
-    return html.replace(/\sclass="([^"]*)"/g, (attr, names) => {
+    const text = stripEmbedPills(html);
+    if (!text.includes(CELL_SELECTED)) return text;
+    return text.replace(/\sclass="([^"]*)"/g, (attr, names) => {
       if (!names.includes(CELL_SELECTED)) return attr;
       const rest = names.split(/\s+/).filter((name) => name && name !== CELL_SELECTED).join(" ");
       return rest ? ` class="${rest}"` : "";
@@ -3662,6 +3670,11 @@
 
   // A tag for dot at the caret (restored by the caller).
   function placeInlineTag(dot) {
+    placeSolidAtCaret(inlineTag(dot));
+  }
+
+  // Puts a solid (contenteditable="false") piece at the caret and the caret after it, then saves the page.
+  function placeSolidAtCaret(piece) {
     const root = editorRoot();
     const sel = window.getSelection();
     const range = sel.getRangeAt(0);
@@ -3670,13 +3683,12 @@
     const solid = (range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer : range.startContainer.parentElement)
       ?.closest?.('[contenteditable="false"]');
     if (solid && solid !== root && root.contains(solid)) range.setStartAfter(solid);
-    const tag = inlineTag(dot);
-    range.insertNode(tag);
-    // The caret goes after the tag; a non-breaking space gives it somewhere to sit when nothing follows on the line.
-    let next = tag.nextSibling;
+    range.insertNode(piece);
+    // The caret goes after the piece; a non-breaking space gives it somewhere to sit when nothing follows on the line.
+    let next = piece.nextSibling;
     if (next?.nodeType !== Node.TEXT_NODE || !next.nodeValue) {
       next = document.createTextNode("\u00a0");
-      tag.after(next);
+      piece.after(next);
     }
     const after = document.createRange();
     after.setStart(next, next.nodeValue.startsWith("\u00a0") ? 1 : 0);
@@ -3812,6 +3824,162 @@
     parent.updatedAt = stamp;
     saveDots();
     render();
+  }
+
+  /* Calendar events and Google Tasks in a text dot's page: the toolbar's 📅 Event and ✅ Task open the Calendar Event
+     or Google Task sheet (the Block dot's own, through the block engine) and drop the block it makes at the caret as
+     a solid embed:
+       <span class="text-google-embed" contenteditable="false" data-google-block="{…the block's JSON…}">label</span>
+     The page registers as the engine's "space-text" source, so the pill drawn in each embed (a task's box and title,
+     an event's title and when, renderInline in index.html) ticks, refreshes and edits through the engine like a
+     Block dot's card, and what Google answers is written back into the embed. The saved HTML keeps the block and a
+     plain label only; the pill is drawn again whenever the page opens or is read. */
+  const TEXT_EMBED = "span.text-google-embed[data-google-block]";
+  const TEXT_EMBED_KINDS = {
+    calendar: { label: "\u{1F4C5} Event", title: "Insert a Google Calendar event", symbol: "\u{1F4C5}" },
+    task: { label: "\u2705 Task", title: "Insert a Google Task", symbol: "\u2610" },
+  };
+  // Each embed's block, read from its data-google-block once and then kept with the node, so the engine's changes to
+  // it last until they're written back.
+  const embedBlocks = new WeakMap();
+
+  function parseEmbedBlock(node) {
+    try {
+      const block = JSON.parse(node.getAttribute("data-google-block") || "null");
+      return block && has(TEXT_EMBED_KINDS, block.type) && block.id ? block : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function embedBlock(node) {
+    if (!embedBlocks.has(node)) embedBlocks.set(node, parseEmbedBlock(node));
+    return embedBlocks.get(node);
+  }
+
+  const embedLabel = (block) => `${TEXT_EMBED_KINDS[block.type]?.symbol || ""} ${String(block.title || "").trim() || "(No title)"}`.trim();
+
+  function stripEmbedPills(html) {
+    if (!String(html).includes("text-google-embed")) return html;
+    const box = document.createElement("template");
+    box.innerHTML = html;
+    box.content.querySelectorAll(TEXT_EMBED).forEach((node) => {
+      const block = parseEmbedBlock(node);
+      if (block) node.textContent = embedLabel(block);
+    });
+    return box.innerHTML;
+  }
+
+  // The open text dot's page, if it's dot `ownerId` (any open text dot without one).
+  function textEmbedRoot(ownerId = "") {
+    const dot = openDotId && findDot(openDotId);
+    if (dot?.type !== "text" || (ownerId && ownerId !== dot.id) || editingBlockNote()) return null;
+    return editorRoot();
+  }
+
+  const liveEmbedBlocks = (root) => [...root.querySelectorAll(TEXT_EMBED)].map(embedBlock).filter(Boolean);
+
+  function registerTextEmbedSource() {
+    window.UniversalBlockEngine?.registerSource?.(TEXT_EMBED_SOURCE, {
+      getList: (ownerId) => {
+        const root = textEmbedRoot(ownerId);
+        return root ? liveEmbedBlocks(root) : null;
+      },
+      refresh: () => {
+        const root = textEmbedRoot();
+        if (root) refreshTextEmbeds(root, openDotId);
+      },
+      persist: (_blocks, ownerId) => {
+        const root = textEmbedRoot(ownerId);
+        const dot = root && findDot(openDotId);
+        if (!dot) return false;
+        refreshEmbedData(root);
+        patchTextEmbeds(dot, liveEmbedBlocks(root));
+        return true;
+      },
+    });
+  }
+
+  // Writes each embed's block back into its data-google-block, for the page's next save.
+  function refreshEmbedData(root) {
+    root.querySelectorAll(TEXT_EMBED).forEach((node) => {
+      const block = embedBlock(node);
+      if (block) node.setAttribute("data-google-block", JSON.stringify(block));
+    });
+  }
+
+  /* Draws each embed's pill from its block. An embed copied within the page (so carrying a block id already used)
+     gets an id of its own. */
+  function refreshTextEmbeds(root, dotId) {
+    const engine = window.UniversalBlockEngine;
+    if (!root || typeof engine?.renderInline !== "function") return;
+    const seen = new Set();
+    root.querySelectorAll(TEXT_EMBED).forEach((node) => {
+      const block = embedBlock(node);
+      if (!block) return;
+      if (seen.has(String(block.id))) block.id = `blk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+      seen.add(String(block.id));
+      node.setAttribute("data-google-block", JSON.stringify(block));
+      node.innerHTML = engine.renderInline(block, { source: TEXT_EMBED_SOURCE, ownerId: dotId });
+    });
+  }
+
+  /* Writes `blocks` (matched by id) into the embeds of the text dot's saved HTML. The page itself can't be read back
+     for this: while it's being read its fields are locked, which mustn't reach the saved HTML. */
+  function patchTextEmbeds(dot, blocks) {
+    if (!blocks.length || !String(dot.content || "").includes("text-google-embed")) return false;
+    const byId = new Map(blocks.map((block) => [String(block.id), block]));
+    const box = document.createElement("template");
+    box.innerHTML = dot.content;
+    let changed = false;
+    box.content.querySelectorAll(TEXT_EMBED).forEach((node) => {
+      const block = byId.get(String(parseEmbedBlock(node)?.id));
+      const json = block && JSON.stringify(block);
+      if (!json || node.getAttribute("data-google-block") === json) return;
+      node.setAttribute("data-google-block", json);
+      node.textContent = embedLabel(block);
+      changed = true;
+    });
+    if (!changed) return false;
+    dot.content = box.innerHTML;
+    dot.updatedAt = new Date().toISOString();
+    saveDots();
+    return true;
+  }
+
+  // The blocks of the embeds in a text dot's saved HTML (fresh copies).
+  function contentEmbedBlocks(html) {
+    if (!String(html || "").includes("text-google-embed")) return [];
+    const box = document.createElement("template");
+    box.innerHTML = html;
+    return [...box.content.querySelectorAll(TEXT_EMBED)].map(parseEmbedBlock).filter(Boolean);
+  }
+
+  // The toolbar's 📅 Event / ✅ Task: the sheet, then the block it makes goes in at the caret where the sheet left it.
+  async function insertTextEmbed(kind, button) {
+    const dot = openDotId && findDot(openDotId);
+    const engine = window.UniversalBlockEngine;
+    if (dot?.type !== "text" || readingText() || typeof engine?.pickGoogleBlock !== "function") return;
+    if (button.getAttribute("aria-busy") === "true") return;
+    closeSpacePopovers();
+    const range = rangeInEditor(fmt.savedRange) ? fmt.savedRange.cloneRange() : null;
+    button.setAttribute("aria-busy", "true");
+    let block;
+    try {
+      block = await engine.pickGoogleBlock(kind);
+    } finally {
+      button.removeAttribute("aria-busy");
+    }
+    if (!block || openDotId !== dot.id || readingText() || !textEmbedRoot(dot.id)) return;
+    if (rangeInEditor(range)) fmt.savedRange = range;
+    if (!restoreSelection()) return;
+    const node = document.createElement("span");
+    node.className = "text-google-embed";
+    node.contentEditable = "false";
+    node.setAttribute("data-google-block", JSON.stringify(block));
+    embedBlocks.set(node, block);
+    node.innerHTML = engine.renderInline(block, { source: TEXT_EMBED_SOURCE, ownerId: dot.id });
+    placeSolidAtCaret(node);
   }
 
   /* "Link existing dot…" in every Add child dot menu: a search over the dots in Space by title (all but the open
@@ -6610,6 +6778,19 @@
       btn.addEventListener("click", () => openChildDotMenu(btn));
       fmt.linkBtn.after(btn);
       fmt.childBtn = btn;
+      // 📅 Event and ✅ Task: an event or task from its Find / New sheet, as a pill at the caret.
+      const embedBtns = Object.entries(TEXT_EMBED_KINDS).map(([kind, { label, title }]) => {
+        const embed = document.createElement("button");
+        embed.type = "button";
+        embed.className = `${btn.className.replace(/\bspace-child-btn\b/, "").trim()} space-embed-btn`;
+        embed.title = title;
+        embed.setAttribute("aria-haspopup", "dialog");
+        embed.textContent = label;
+        embed.addEventListener("mousedown", (event) => event.preventDefault());
+        embed.addEventListener("click", () => void insertTextEmbed(kind, embed));
+        return embed;
+      });
+      btn.after(...embedBtns);
     }
     const tableToggle = toolbar.querySelector("[data-note-table-toggle]");
     if (tableToggle) fmt.tableBtn = ownToolbarButton(tableToggle, "space-table-btn", "Insert table", openTablePopover);
@@ -6882,6 +7063,7 @@
       touches: new Map(), swallow: new Set(), pinch: null, pan: null, gestureZoom: null, sharpenTimer: null, observer: null,
       editing: false, draggingObject: null, panelFrame: 0, panelRows: "", panelSelection: "", cardPress: null,
       dotId: id, cardDots: null, renamePress: null, renaming: null,
+      elements: cleanBoardElements(saved?.elements), itemLayer: null, itemDrag: null,
     };
     if (Number.isFinite(saved?.size?.width) && Number.isFinite(saved?.size?.height)) {
       view.width = clampBoardSide(saved.size.width);
@@ -6895,7 +7077,12 @@
         autosaveMs: BOARD_AUTOSAVE_MS,
         state: { objects: refreshBoardCards(readBoardObjects(saved), view.width), background: saved?.background },
         onSave(payload) {
-          const state = { objects: payload.canvas.objects, background: payload.canvas.background, size: { width: view.width, height: view.height } };
+          const state = {
+            objects: payload.canvas.objects,
+            background: payload.canvas.background,
+            size: { width: view.width, height: view.height },
+            elements: view.elements,
+          };
           store()?.setPage("board", id, state, id);
           const savedDot = findDot(id);
           if (savedDot) {
@@ -6909,6 +7096,7 @@
       boardView = view;
       adaptBoard(board, view);
       renderObjectPanel(view);
+      mountBoardElements(view);
     } catch (err) {
       console.error("Space: the board couldn't start", err);
       board = null;
@@ -6925,6 +7113,7 @@
     } else {
       requestAnimationFrame(onBoardViewportResize);
     }
+    void syncGoogleBlocks(id);
   }
 
   function buildBoardDom(view) {
@@ -7075,7 +7264,7 @@
       if (kind === "linkDots") return linkDotsMenuHtml();
       const html = popoverHtml.call(this, kind);
       if (kind !== "insert") return html;
-      const row = `<button type="button" class="sb-menu-item" data-space-board-child>${CHILD_DOT_ICON.replace("<svg ", '<svg class="sb-icon" ')}<span>Add child dot</span><small>Text · Board · Block · Hub</small></button>`;
+      const row = `<button type="button" class="sb-menu-item" data-space-board-child>${CHILD_DOT_ICON.replace("<svg ", '<svg class="sb-icon" ')}<span>Add child dot</span><small>Text · Board · Block · Hub · Event · Task</small></button>`;
       return html.replace('<div class="sb-menu" role="menu">', `<div class="sb-menu" role="menu">${row}`);
     };
     const inInsertFlow = b._inInsertFlow;
@@ -7095,7 +7284,9 @@
       else if (event.target.closest("[data-space-board-link]")) b._openPopover("linkDots");
       else if (event.target.closest("[data-space-board-link-back]")) b._openPopover("childDots");
       else if (event.target.closest("[data-space-board-child-back]")) b._openPopover("insert");
-      else {
+      else if (event.target.closest("[data-space-board-google]")) {
+        void addBoardElement(event.target.closest("[data-space-board-google]").dataset.spaceBoardGoogle);
+      } else {
         const item = event.target.closest("[data-space-board-child-type]");
         if (item) addBoardChildDot(item.dataset.spaceBoardChildType);
       }
@@ -7109,6 +7300,10 @@
       <button type="button" role="menuitem" class="sb-menu-item" data-space-board-link>${LINK_DOT_ICON.replace("<svg ", '<svg class="sb-icon" ')}<span>Link existing dot…</span></button>
       ${Object.entries(DOT_TYPES).map(([type, { label }]) => (
         `<button type="button" role="menuitem" class="sb-menu-item" data-space-board-child-type="${type}"><span class="space-board-child-glyph" aria-hidden="true"><span class="space-child-swatch" data-type="${type}"></span></span><span>${label}</span></button>`
+      )).join("")}
+      <div class="sb-menu-sep" role="separator"></div>
+      ${Object.entries(BOARD_ITEM_KINDS).map(([kind, { symbol, label }]) => (
+        `<button type="button" role="menuitem" class="sb-menu-item" data-space-board-google="${kind}" aria-haspopup="dialog"><span class="space-board-child-glyph" aria-hidden="true">${symbol}</span><span>${label}</span></button>`
       )).join("")}
     </div>`;
   }
@@ -7213,6 +7408,192 @@
   function openBoardCard(dotId) {
     if (findDot(dotId)) openDot(dotId);
     else showToast("That dot has been deleted from Space.");
+  }
+
+  /* Calendar events and Google Tasks on a board dot's sheet. The + menu's Add child dot lists 📅 Calendar Event and
+     ✅ Google Task, which open the Block dot's Find / New sheets (through the block engine), and the block made there
+     goes on the board as one of the `elements` of its saved page:
+       { id, type: "calendar_event" | "google_task", x, y, width, block }
+     x, y and width in board pixels, `block` being the calendar or task block a Block dot would hold (its eventId or
+     taskId and tasklistId, title, times or tick). Each is drawn as that block's own card (engine.render) on a layer
+     over the drawing inside the sheet, so it pans and zooms with it, and the board registers as the engine's
+     "space-board" source, so a card ticks, refreshes and edits as it does in a Block dot. They aren't drawing
+     objects: the engine's undo, Objects panel and eraser leave them be. Editing, a card drags by
+     anything but its controls (mouse, pen or finger) and its ✕ takes it off the board; reading, its controls work
+     and a press anywhere else on it pans the board. */
+  const BOARD_ITEM_KINDS = {
+    calendar: { type: "calendar_event", symbol: "\u{1F4C5}", label: "Calendar Event" },
+    task: { type: "google_task", symbol: "\u2705", label: "Google Task" },
+  };
+  const BOARD_ITEM_WIDTH = 280;
+  const BOARD_ITEM_CONTROLS = "a, button, input, label, select, textarea";
+
+  function cleanBoardElements(raw) {
+    if (!Array.isArray(raw)) return [];
+    const kinds = new Map(Object.entries(BOARD_ITEM_KINDS).map(([kind, { type }]) => [type, kind]));
+    const seen = new Set();
+    return raw.flatMap((element) => {
+      const kind = kinds.get(element?.type);
+      const block = element?.block;
+      if (!kind || block?.type !== kind || !block.id || !element.id || seen.has(String(element.id))) return [];
+      seen.add(String(element.id));
+      const width = Number(element.width);
+      return [{
+        id: String(element.id),
+        type: element.type,
+        x: Number.isFinite(element.x) ? element.x : 0,
+        y: Number.isFinite(element.y) ? element.y : 0,
+        width: Number.isFinite(width) && width > 0 ? width : BOARD_ITEM_WIDTH,
+        block,
+      }];
+    });
+  }
+
+  function mountBoardElements(view) {
+    const layer = document.createElement("div");
+    layer.className = "board-google-layer";
+    view.surface.append(layer);
+    view.itemLayer = layer;
+    layer.addEventListener("pointerdown", (event) => onBoardElementDown(view, event));
+    layer.addEventListener("pointermove", (event) => onBoardElementMove(view, event));
+    layer.addEventListener("pointerup", (event) => onBoardElementUp(view, event));
+    layer.addEventListener("pointercancel", (event) => onBoardElementUp(view, event));
+    layer.addEventListener("click", (event) => {
+      const remove = event.target.closest("[data-board-element-remove]");
+      if (remove && view.editing) removeBoardElement(view, remove.closest("[data-board-element]")?.dataset.boardElement);
+    });
+    window.UniversalBlockEngine?.registerSource?.(BOARD_ITEM_SOURCE, {
+      getList: (ownerId) => (boardView && (!ownerId || ownerId === boardView.dotId) ? boardView.elements.map((element) => element.block) : null),
+      refresh: () => {
+        if (boardView) renderBoardElements(boardView);
+      },
+      persist: (_blocks, ownerId) => {
+        if (!boardView || (ownerId && ownerId !== boardView.dotId)) return false;
+        saveBoardElements(boardView);
+        return true;
+      },
+    });
+    renderBoardElements(view);
+  }
+
+  function renderBoardElements(view) {
+    const engine = window.UniversalBlockEngine;
+    if (!view.itemLayer || typeof engine?.render !== "function") return;
+    endBoardElementDrag(view);
+    view.itemLayer.replaceChildren(...view.elements.map((element) => {
+      const node = boardElementNode(engine, element, BOARD_ITEM_SOURCE, view.dotId);
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "board-google-remove";
+      remove.dataset.boardElementRemove = "";
+      remove.textContent = "\u2715";
+      const label = BOARD_ITEM_KINDS[element.block.type]?.label || "card";
+      remove.title = `Remove ${label.toLowerCase()} from the board`;
+      remove.setAttribute("aria-label", `Remove ${element.block.title || label} from the board`);
+      node.append(remove);
+      return node;
+    }));
+  }
+
+  function boardElementNode(engine, element, source, ownerId) {
+    const node = document.createElement("div");
+    node.className = "board-google-element";
+    node.dataset.boardElement = element.id;
+    Object.assign(node.style, { left: `${element.x}px`, top: `${element.y}px`, width: `${element.width}px` });
+    node.innerHTML = engine.render(element.block, { source, ownerId, hideTypeBadge: true });
+    return node;
+  }
+
+  // Keeps the board's elements in its saved page, beside whatever the drawing last saved.
+  function saveBoardElements(view) {
+    const saved = readBoardState(view.dotId) || {};
+    const size = view.width && view.height ? { size: { width: view.width, height: view.height } } : {};
+    store()?.setPage("board", view.dotId, { ...saved, ...size, elements: view.elements }, view.dotId);
+    const dot = findDot(view.dotId);
+    if (dot) {
+      dot.updatedAt = new Date().toISOString();
+      scheduleSave();
+    }
+  }
+
+  // 📅 Calendar Event / ✅ Google Task in the + menu: the sheet, then a card for the block in the middle of the
+  // board's visible room.
+  async function addBoardElement(kind) {
+    const view = boardView;
+    const engine = window.UniversalBlockEngine;
+    if (!view?.editing || !board || !has(BOARD_ITEM_KINDS, kind) || typeof engine?.pickGoogleBlock !== "function") return;
+    board._closePopover();
+    const block = await engine.pickGoogleBlock(kind);
+    if (!block || boardView !== view) return;
+    const width = BOARD_ITEM_WIDTH;
+    const room = boardRoom();
+    const x = view.width / 2 - view.x / view.zoom - width / 2;
+    const y = view.height / 2 + (room.cy - view.y) / view.zoom - 40;
+    view.elements.push({
+      id: newBoardObjectId(),
+      type: BOARD_ITEM_KINDS[kind].type,
+      x: Math.round(Math.min(Math.max(x, 8), Math.max(8, view.width - width - 8))),
+      y: Math.round(Math.min(Math.max(y, 8), Math.max(8, view.height - 96))),
+      width,
+      block,
+    });
+    renderBoardElements(view);
+    saveBoardElements(view);
+  }
+
+  function removeBoardElement(view, id) {
+    const before = view.elements.length;
+    view.elements = view.elements.filter((element) => element.id !== id);
+    if (view.elements.length === before) return;
+    renderBoardElements(view);
+    saveBoardElements(view);
+  }
+
+  /* Dragging a card while editing. Every press on a card stops at the layer (the engine draws only from presses on
+     its canvas, and the viewport lets these through; see onBoardPointerDown). The card follows the pointer in board
+     pixels (the screen distance over the zoom), stays on the board, and is saved where it's let go. A second finger
+     (a pinch) drops the drag where it is. */
+  function onBoardElementDown(view, event) {
+    const node = event.target.closest("[data-board-element]");
+    if (!node) return;
+    event.stopPropagation();
+    if (!view.editing || event.button !== 0 || event.target.closest(BOARD_ITEM_CONTROLS) || view.itemDrag || view.pinch) return;
+    const element = view.elements.find((item) => item.id === node.dataset.boardElement);
+    if (!element) return;
+    event.preventDefault();
+    try { node.setPointerCapture(event.pointerId); } catch (_) {}
+    const at = getCoordinates(event);
+    view.itemDrag = { pointerId: event.pointerId, element, node, x: at.x, y: at.y, fromX: element.x, fromY: element.y, moved: false };
+    node.classList.add("is-dragging");
+  }
+
+  function onBoardElementMove(view, event) {
+    const drag = view.itemDrag;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    const at = getCoordinates(event);
+    const dx = (at.x - drag.x) / view.zoom;
+    const dy = (at.y - drag.y) / view.zoom;
+    if (!drag.moved && Math.hypot(at.x - drag.x, at.y - drag.y) <= DRAG_THRESHOLD) return;
+    drag.moved = true;
+    const { element, node } = drag;
+    element.x = Math.round(Math.min(Math.max(drag.fromX + dx, 0), Math.max(0, view.width - node.offsetWidth)));
+    element.y = Math.round(Math.min(Math.max(drag.fromY + dy, 0), Math.max(0, view.height - node.offsetHeight)));
+    node.style.left = `${element.x}px`;
+    node.style.top = `${element.y}px`;
+  }
+
+  function onBoardElementUp(view, event) {
+    if (view.itemDrag?.pointerId === event.pointerId) endBoardElementDrag(view);
+  }
+
+  function endBoardElementDrag(view) {
+    const drag = view.itemDrag;
+    view.itemDrag = null;
+    if (!drag) return;
+    drag.node.classList.remove("is-dragging");
+    try { drag.node.releasePointerCapture(drag.pointerId); } catch (_) {}
+    if (drag.moved) saveBoardElements(view);
   }
 
   /* Editing, the selected card's dot is renamed in place: a sharp field with the card's size and look sits over it
@@ -7562,10 +7943,18 @@
         return;
       }
     }
+    // A calendar or task card takes its own presses (onBoardElementDown): editing, anywhere on it; reading, on its
+    // controls, a press on the rest of it panning as it would on the sheet.
+    const element = event.target.closest?.(".board-google-element");
+    if (element && event.button === 0 && (view.editing || event.target.closest(BOARD_ITEM_CONTROLS))) {
+      view.cardPress = null;
+      view.renamePress = null;
+      return;
+    }
     const onSheet = view.surface.contains(event.target);
     // Reading, a press on a child dot card that comes up without dragging opens its dot; editing, the card is just
     // an object for the engine to select and move.
-    const card = !view.editing && event.button === 0 && boardCardAt(event);
+    const card = !element && !view.editing && event.button === 0 && boardCardAt(event);
     view.cardPress = card ? { pointerId: event.pointerId, dotId: card.dotId, x: at.x, y: at.y } : null;
     // Editing, a press on the one selected card that comes up without dragging renames its dot instead.
     const named = view.editing && onSheet && event.button === 0 && board.tool === "lasso" && boardCardAt(event);
@@ -7590,6 +7979,7 @@
 
   function startBoardPinch(view) {
     cancelBoardGesture(board);
+    endBoardElementDrag(view);
     view.cardPress = null;
     view.renamePress = null;
     view.pan = null;
@@ -7742,6 +8132,8 @@
       };
       board.objects.forEach(move);
       board._history.forEach((snap) => snap.objects.forEach(move));
+      view.elements.forEach(move);
+      renderBoardElements(view);
     }
     const z = view.zoom;
     const x = view.x + ((w - view.width) / 2 - shiftX) * z;
@@ -11176,11 +11568,13 @@
     view.saveTimer = setTimeout(saveBlockDot, BLOCK_AUTOSAVE_MS);
   }
 
-  /* Calendar Event and Google Task blocks follow their events and tasks in Google. When Space opens (every block
-     dot's) and when a block dot opens (its own), each event or task not looked up in the last GOOGLE_CHECK_MS is
-     fetched again, a few at a time, and its blocks take on what changed there (a new title or time, a task ticked
-     off), or are marked deleted. Without a live token carrying Calendar (or Tasks) that kind quietly does nothing
-     (each card's refresh button asks Google for access). */
+  /* Calendar Event and Google Task blocks follow their events and tasks in Google, wherever they are: a Block dot's
+     blocks, a text dot's embeds, a board dot's cards. When Space opens (every such dot's) and when one of those dots
+     opens (its own), each event or task not looked up in the last GOOGLE_CHECK_MS is fetched again, a few at a
+     time, and its blocks take on what changed there (a new title or time, a task ticked off), or are marked
+     deleted. Without a live token carrying Calendar (or Tasks) that kind quietly does nothing (each card's refresh
+     button asks Google for access). */
+  const GOOGLE_DOT_TYPES = new Set(["block", "text", "board"]);
   const GOOGLE_CHECK_MS = 60 * 1000;
   const GOOGLE_FETCHES = 3;
   // Per block type: whether the token may ask, the key of what a block follows, how to fetch it, and how a block
@@ -11204,10 +11598,62 @@
     },
   };
 
+  /* Where dot `dotId` keeps its blocks, open or closed: `blocks` is what it holds now (the live ones while it's
+     open), and `save(changed)` keeps those of them that changed (redrawing them if it's open). A dot that's open
+     only has its cards redrawn, so a block, line of text or card being edited, dragged or drawn carries on. */
+  function googleHolder(dotId) {
+    const dot = findDot(dotId);
+    if (dot?.type === "block") {
+      const view = blockView?.dotId === dotId ? blockView : null;
+      if (view) return { blocks: view.blocks, save: (changed) => saveGoogleBlockCards(view, changed) };
+      const state = readBlockState(dotId);
+      return { blocks: (state?.blocks || []).map((item) => item?.block), save: () => store()?.setPage("block", dotId, state, dotId) };
+    }
+    if (dot?.type === "text") {
+      const root = textEmbedRoot(dotId);
+      if (root) {
+        return {
+          blocks: liveEmbedBlocks(root),
+          save: () => {
+            refreshTextEmbeds(root, dotId);
+            patchTextEmbeds(dot, liveEmbedBlocks(root));
+          },
+        };
+      }
+      return { blocks: contentEmbedBlocks(dot.content), save: (changed) => patchTextEmbeds(dot, changed) };
+    }
+    if (dot?.type === "board") {
+      const view = boardView?.dotId === dotId ? boardView : null;
+      if (view) {
+        return {
+          blocks: view.elements.map((element) => element.block),
+          save: () => {
+            renderBoardElements(view);
+            saveBoardElements(view);
+          },
+        };
+      }
+      const state = readBoardState(dotId);
+      const elements = cleanBoardElements(state?.elements);
+      return { blocks: elements.map((element) => element.block), save: () => store()?.setPage("board", dotId, { ...state, elements }, dotId) };
+    }
+    return { blocks: [], save: () => {} };
+  }
+
   function googleBlocksOf(dotId, type) {
     const kind = GOOGLE_BLOCKS[type];
-    const blocks = blockView?.dotId === dotId ? blockView.blocks : (readBlockState(dotId)?.blocks || []).map((item) => item?.block);
-    return blocks.filter((block) => block?.type === type && kind.key(block));
+    return googleHolder(dotId).blocks.filter((block) => block?.type === type && kind.key(block));
+  }
+
+  function saveGoogleBlockCards(view, changed) {
+    const engine = window.UniversalBlockEngine;
+    for (const block of changed) {
+      const body = widgetFor(view, block.id)?.querySelector(":scope > .grid-widget-card > .grid-widget-body");
+      if (!body) continue;
+      body.innerHTML = engine.render(block, { source: BLOCK_SOURCE, ownerId: view.dotId, index: view.blocks.indexOf(block), hideTypeBadge: true });
+      dropDisplayPencils(body);
+    }
+    saveBlockDot();
   }
 
   function syncGoogleBlocks(onlyDotId = null) {
@@ -11218,7 +11664,7 @@
     const drive = window.FicusDrive;
     const kind = GOOGLE_BLOCKS[type];
     if (!drive?.tokenLive || !kind.allowed(drive) || !window.UniversalBlockEngine) return;
-    const dotIds = onlyDotId ? [onlyDotId] : spaceDots.filter((dot) => dot.type === "block").map((dot) => dot.id);
+    const dotIds = onlyDotId ? [onlyDotId] : spaceDots.filter((dot) => GOOGLE_DOT_TYPES.has(dot.type)).map((dot) => dot.id);
     const now = Date.now();
     const due = new Map();
     for (const block of dotIds.flatMap((id) => googleBlocksOf(id, type))) {
@@ -11252,24 +11698,9 @@
     const kind = GOOGLE_BLOCKS[type];
     const update = (block) => latest.has(kind.key(block)) && kind.apply(engine, block, latest.get(kind.key(block)));
     for (const dotId of dotIds) {
-      if (!findDot(dotId)) continue;
-      const view = blockView?.dotId === dotId ? blockView : null;
-      if (view) {
-        const changed = googleBlocksOf(dotId, type).filter(update);
-        if (!changed.length) continue;
-        // Just the cards change, so a block being edited, dragged or drawn carries on undisturbed.
-        for (const block of changed) {
-          const body = widgetFor(view, block.id)?.querySelector(":scope > .grid-widget-card > .grid-widget-body");
-          if (!body) continue;
-          body.innerHTML = engine.render(block, { source: BLOCK_SOURCE, ownerId: view.dotId, index: view.blocks.indexOf(block), hideTypeBadge: true });
-          dropDisplayPencils(body);
-        }
-        saveBlockDot();
-      } else {
-        const state = readBlockState(dotId);
-        const changed = (state?.blocks || []).map((item) => item?.block).filter((block) => block?.type === type && kind.key(block) && update(block));
-        if (changed.length) store()?.setPage("block", dotId, state, dotId);
-      }
+      const holder = googleHolder(dotId);
+      const changed = holder.blocks.filter((block) => block?.type === type && kind.key(block) && update(block));
+      if (changed.length) holder.save(changed);
     }
   }
 
@@ -12406,11 +12837,19 @@
       if (child) label.textContent = child.title;
       markReadLink(tag, child?.id, onOpenDot, "button");
     });
+    // Calendar events and tasks in the text as their pills, without the tick, refresh or pencil working.
+    const engine = window.UniversalBlockEngine;
+    text.querySelectorAll(TEXT_EMBED).forEach((node) => {
+      const block = parseEmbedBlock(node);
+      if (!block || typeof engine?.renderInline !== "function") return;
+      node.innerHTML = engine.renderInline(block, { source: READ_SOURCE, ownerId: dot.id });
+      lockReadBlock(node);
+    });
     text.querySelectorAll("a[href]").forEach((link) => {
       link.target = "_blank";
       link.rel = "noopener noreferrer";
     });
-    if (!text.textContent.trim() && !text.querySelector("img, table, hr, .inline-child-dot")) {
+    if (!text.textContent.trim() && !text.querySelector("img, table, hr, .inline-child-dot, .text-google-embed")) {
       text.replaceChildren(readNote("Nothing written yet."));
     }
     body.append(text);
@@ -12578,6 +13017,7 @@
      object reaches (whichever is more), zoomed (--current-zoom, as in Space) to READ_BOARD_HEIGHT tall, never
      enlarged, its pixel density following that zoom; the viewport is the zoomed sheet's size. Presses don't reach it. */
   const READ_BOARD_HEIGHT = 400;
+  const READ_BOARD_ITEM_HEIGHT = 120;
 
   function readBoardPage(dot, page, cleanups) {
     const frame = document.createElement("div");
@@ -12611,6 +13051,21 @@
       const box = b._bounds(o);
       width = Math.max(width, Math.ceil(box.x + box.w + BOARD_GAP));
       height = Math.max(height, Math.ceil(box.y + box.h + BOARD_GAP));
+    }
+    // Its calendar and task cards, locked, over the drawing (as tall as a card usually is, for its reach).
+    const engine = window.UniversalBlockEngine;
+    const elements = typeof engine?.render === "function" ? cleanBoardElements(saved?.elements) : [];
+    if (elements.length) {
+      const layer = document.createElement("div");
+      layer.className = "board-google-layer";
+      for (const element of elements) {
+        const node = boardElementNode(engine, element, READ_SOURCE, dot.id);
+        lockReadBlock(node);
+        layer.append(node);
+        width = Math.max(width, Math.ceil(element.x + element.width + BOARD_GAP));
+        height = Math.max(height, Math.ceil(element.y + READ_BOARD_ITEM_HEIGHT + BOARD_GAP));
+      }
+      sheet.append(layer);
     }
     width = Math.min(BOARD_SIDE_MAX, Math.max(BOARD_SIDE_MIN, width));
     height = Math.min(BOARD_SIDE_MAX, Math.max(BOARD_SIDE_MIN, height));

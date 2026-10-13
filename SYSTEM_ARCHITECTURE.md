@@ -114,9 +114,9 @@ Appearance defaults to gray `#8C8C8C` at size 1, and the size slider runs from 0
 ### Reading views
 
 `renderDotContent(dotData, container, options = { isReadOnly: true })` (`window.renderDotContent`, also `FicusSpace.renderDotContent`) draws a dot's page into `container` for reading outside Space: the Collection's notebook cards and Tags preview. It uses the page's own markup and classes, so the page keeps its own size and whatever holds it wraps it. Read-only is its only mode; pages are edited in Space.
-- **Text:** the saved text, locked, with inline child dots showing their current titles. Text has no width of its own, so it runs as wide as its longest line, up to 45rem.
+- **Text:** the saved text, locked, with inline child dots showing their current titles, and calendar and task embeds drawn as their pills (locked like a read block: no tick, refresh or pencil). Text has no width of its own, so it runs as wide as its longest line, up to 45rem.
 - **Block:** the dot's grid (`.block-dot.is-reading > .block-dot-container > .block-dot-canvas`, with its saved grid and expand classes) and every block where it sits. The grid is as large as the blocks reach, with as much grid past their far edges as before their near ones. It is re-measured when a populated frame changes size. A frame holds its blocks in their saved order, and a child dot block is its portal. There are no grips, Edit or Delete buttons, or resize handles. The engine draws the blocks under the source `space-block-read`, which is never registered, so its document handlers find no block in them. On top of that, its settings, delete and replace hooks are removed, and fields and contenteditables are locked. A scrapboard block shows its own board, read-only.
-- **Board:** the dot's viewport and sheet (`.space-board.is-reading > .board-viewport > .board-surface`). The sheet is the board's set size, or further if its objects reach past that. It is zoomed (`--current-zoom`) to 400px tall (never enlarged), its canvas resolution following that zoom, and the viewport is the zoomed sheet's size. Presses don't reach it.
+- **Board:** the dot's viewport and sheet (`.space-board.is-reading > .board-viewport > .board-surface`). The sheet is the board's set size, or further if its objects (or its calendar and task cards, drawn locked over it) reach past that. It is zoomed (`--current-zoom`) to 400px tall (never enlarged), its canvas resolution following that zoom, and the viewport is the zoomed sheet's size. Presses don't reach it.
 - **Hub:** a 300px Local Orbit (at least 360px wide) with the hub held at the centre and its children spaced round it. It settles once and stays still: nothing drags or zooms it. Under it is the hub's page, its children's cards (`.space-hub.is-reading .hub-dot-list`, built by `hubCardNode` like Space's own), as links without a grip or ✕.
 - Links to other dots (inline child dots, child dot blocks, orbit dots, a hub's child cards) call `options.onOpenDot(id)`. The notebook passes its "own card, else Space" rule, and the Tags preview opens the dot in the preview.
 - It returns `{ destroy() }`, which stops the page's boards and the orbit's physics.
@@ -187,8 +187,8 @@ The block's Display state shows the event's date tile, title, when (a 0-minute e
 
 Changes made in Google Calendar come back to the block:
 
-- **When Space opens:** every block dot's calendar blocks are checked (`events.get`, a few at a time).
-- **When a block dot opens:** that dot's calendar blocks are checked.
+- **When Space opens:** every calendar block is checked (`events.get`, a few at a time): those in block dots, and those embedded in text dots and placed on board dots (see "Calendar events and tasks in text and board dots").
+- **When a block, text or board dot opens:** that dot's calendar blocks are checked.
 - **The refresh button:** checks one block on demand. If the sign-in has run out or Calendar isn't granted, it brings up Google's popup first.
 
 An event isn't looked up again within a minute of the last check. A block whose event was deleted in Google keeps its last details and is marked `deleted` ("No longer in your Google Calendar"). Its pencil then offers Find Event and New Event. Automatic checks need a live token that carries Calendar; otherwise they quietly do nothing.
@@ -202,7 +202,23 @@ The card shows a square checkbox, the title (struck through once done), the due 
 
 Ticking the box (by click, tap or keyboard; it's a real checkbox, its label a 28px hit area, 44px on touch screens) pushes the change at once: `tasks.patch` with `status`, clearing `completed` when un-ticking. The card shows the new tick straight away and holds the box still until Google answers. Then the block takes on Google's answer and is saved (the master file is written to Drive at once). If Google can't be reached, the tick goes back with a toast; if the task was deleted there, the block is marked `deleted`. If the sign-in has run out or Tasks isn't granted, the tick brings up Google's popup first, as the refresh button does.
 
-Changes made in Google Tasks (a task ticked off on a phone, say) come back the same way as calendar events: when Space opens, when a block dot opens and from the refresh button (`tasks.get`). `space.js` runs one sync for both kinds (`GOOGLE_BLOCKS` describes each), so a task isn't looked up again within a minute either. A pull skips a block whose tick is still on its way to Google.
+Changes made in Google Tasks (a task ticked off on a phone, say) come back the same way as calendar events: when Space opens, when a block, text or board dot opens and from the refresh button (`tasks.get`). `space.js` runs one sync for both kinds (`GOOGLE_BLOCKS` describes each), so a task isn't looked up again within a minute either. A pull skips a block whose tick is still on its way to Google.
+
+#### Calendar events and tasks in text and board dots
+
+The same two blocks live in text and board dots as well. Both add them through the Block dot's own sheets (`UniversalBlockEngine.pickGoogleBlock(kind)`, Find or New), and both register as a source of the block engine, so ticking, refreshing and the pencil work exactly as on a Block dot's card.
+
+- **Text:** the note toolbar's **📅 Event** and **✅ Task** (in text dots, not in block notes) put the block at the caret as a solid inline embed. The saved HTML (`content`) keeps the block's JSON and a plain label only: `<span class="text-google-embed" contenteditable="false" data-google-block="{…}">📅 Title</span>`. Whenever the page opens or is read, each embed is drawn as a pill (`UniversalBlockEngine.renderInline`, source `space-text`):
+  - an event shows the calendar icon, its title (a link to the event in Google Calendar) and when;
+  - a task shows its checkbox, its title (a link to Google Tasks) and its due day, struck through once done.
+  - Its refresh and pencil buttons show on hover or focus (always, at 28px, on touch screens). The pencil is hidden while reading.
+  - Google's answers are written back into the embed's JSON, in the page and in the saved `content` alike (`patchTextEmbeds`, which never reads back a page locked for reading). An embed copied within the page gets an id of its own.
+- **Board:** the + menu's **Add child dot** lists **📅 Calendar Event** and **✅ Google Task** under the dot types. The card goes in the middle of the visible part of the board. The board's page keeps them in `elements: [{ id, type: "calendar_event" | "google_task", x, y, width, block }]`, in board pixels, beside the drawing's `objects`.
+  - Each is the Block dot's own card (`.block-calendar-card`, `.block-task-card`, source `space-board`), on a layer (`.board-google-layer`) inside the sheet, so it pans and zooms with the drawing. When the board grows to the left or top, they shift with it.
+  - They aren't drawing objects: undo, the Objects panel and the eraser leave them alone.
+  - Editing, a card drags by anything but its controls, by mouse, pen or finger (pointer events, `getCoordinates`, `touch-action: none`, the distance divided by the zoom, kept on the board), and is saved where it's let go. A pinch drops the drag. Its ✕ (on hover or focus; always, at 28px, on touch screens) takes it off the board.
+  - Reading, its tick, refresh and link work, and a press anywhere else on it pans the board.
+- **Sync:** `googleHolder(dotId)` gives the sync each dot's blocks, wherever they are. While the dot is open, these are the live ones, and only their cards or pills are redrawn. A closed text dot's are read from its `content`, and a closed board's from its saved page; changed ones are written back there.
 
 In a block dot, a press on the empty grid (or the empty part of a frame) marks out a new block, by mouse, pen or finger. A finger draws through `touchstart` / `touchmove` / `touchend` (its `pointerdown` is ignored), and its `touchmove`s are cancelled (`preventDefault`, on a non-passive listener) so iOS Safari doesn't scroll the page instead. A second finger drops the block being drawn. A finger moves a block by its grip and resizes it by its handles the same way. The corner handle resizes width and height together, snapped to the grid. On touch screens (no hover, or a coarse pointer), each block's grip, type symbol, Delete and Edit controls always show while the dot is being edited, and the corner handle is larger (32px) with its mark always visible.
 
