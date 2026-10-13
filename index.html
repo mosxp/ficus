@@ -18,7 +18,7 @@
     <script src="canvas-editor.js?v=2"></script>
     <script src="scrapboard.js?v=26"></script>
     <script src="quick_line.js?v=2"></script>
-    <script src="space.js?v=89" defer></script>
+    <script src="space.js?v=90" defer></script>
     <script src="collection.js?v=19" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -2494,7 +2494,8 @@
         font-size: 0.85rem; color: #78716c;
       }
       /* Block dots: a scrolling grid fills the page below the title like a board does. space.js places each
-         .grid-widget-block in whole --grid-size cells; its card sits 4px inside them, so neighbours keep a gutter. */
+         .grid-widget-block on --grid-size cells (left, top and width in whole cells; height to the pixel); its card
+         sits 4px inside that box, so neighbours keep a gutter. */
       .space-doc.is-blocks .space-doc-scroll { display: flex; flex-direction: column; }
       .space-doc.is-blocks .space-doc-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
       .space-doc.is-blocks .space-doc-body {

@@ -31,6 +31,8 @@
   const BLOCK_DEFAULT_COLS = 6;
   const BLOCK_DEFAULT_ROWS = 4;
   const BLOCK_MIN_CELLS = 2;
+  // A block's height isn't held to the grid (it can wrap its content to the pixel), only kept to one cell at least.
+  const BLOCK_MIN_HEIGHT_CELLS = 1;
   // Empty cells kept past the furthest block in the direction the page grows, so there's always room to drag into.
   const BLOCK_SPARE_CELLS = 4;
   // Dragging within this many pixels of the growing edge scrolls the page, up to this many pixels a frame.
@@ -9468,19 +9470,20 @@
     const rects = new Map();
     const parents = new Map();
     const min = BLOCK_MIN_CELLS * grid;
+    const minHeight = BLOCK_MIN_HEIGHT_CELLS * grid;
     for (const item of Array.isArray(saved?.blocks) ? saved.blocks : []) {
       const block = item?.block && typeof item.block === "object" ? item.block : null;
       if (!block?.type) continue;
       block.id = String(block.id || item.id || newWidgetId());
       if (rects.has(block.id)) continue;
       blocks.push(block);
-      // A block in a frame may have been sized to fill it, off the grid.
-      const size = (value) => (item.parentId ? Math.round(Number(value)) : snapToGrid(value, grid));
+      // A block in a frame may have been sized to fill it, off the grid; heights are never held to it.
+      const width = item.parentId ? Math.round(Number(item.width)) : snapToGrid(item.width, grid);
       rects.set(block.id, {
         left: Math.max(0, snapToGrid(item.left, grid)),
         top: Math.max(0, snapToGrid(item.top, grid)),
-        width: Math.max(min, size(item.width) || BLOCK_DEFAULT_COLS * grid),
-        height: Math.max(min, size(item.height) || BLOCK_DEFAULT_ROWS * grid),
+        width: Math.max(min, width || BLOCK_DEFAULT_COLS * grid),
+        height: Math.max(minHeight, Math.round(Number(item.height)) || BLOCK_DEFAULT_ROWS * grid),
       });
       if (item.parentId) parents.set(block.id, String(item.parentId));
     }
@@ -9626,9 +9629,10 @@
 
   function fitBlockSize(view, rect) {
     const min = BLOCK_MIN_CELLS * view.grid;
+    const minHeight = BLOCK_MIN_HEIGHT_CELLS * view.grid;
     const room = blockLanes(view) * view.grid;
-    const fitted = { ...rect, width: Math.max(min, rect.width), height: Math.max(min, rect.height) };
-    if (view.expand === "right") fitted.height = Math.max(min, Math.min(fitted.height, room - fitted.top));
+    const fitted = { ...rect, width: Math.max(min, rect.width), height: Math.max(minHeight, rect.height) };
+    if (view.expand === "right") fitted.height = Math.max(minHeight, Math.min(fitted.height, room - fitted.top));
     else fitted.width = Math.max(min, Math.min(fitted.width, room - fitted.left));
     return fitted;
   }
@@ -11545,8 +11549,10 @@
     if (widget) view.canvas.append(widget);
   }
 
-  /* Dragging by the corner grip moves a block and the edge / corner handles resize it. Both snap live: the raw
-     position (or size) is rounded to the nearest whole cell on every move. A block in a frame leaves it once the
+  /* Dragging by the corner grip moves a block and the edge / corner handles resize it. A move snaps live: the raw
+     position is rounded to the nearest whole cell on every move, so blocks' tops line up on the rows. A resize snaps
+     only the width, to whole columns; the height follows the pointer to the pixel (no less than
+     BLOCK_MIN_HEIGHT_CELLS), so a block can wrap its content exactly. A block in a frame leaves it once the
      drag gets going (a press alone leaves it be) and is dropped into whichever frame holds its middle, if any. A
      populated frame can't be resized itself: resizing the blocks in it reshapes it. A move keeps a block's stored
      size (a populated frame's is its size for when it's empty again). A finger moves and resizes through the touch
@@ -11662,7 +11668,7 @@
       next = fitBlockSize(view, {
         ...start,
         width: Math.round(rawW / grid) * grid,
-        height: Math.round(rawH / grid) * grid,
+        height: Math.round(rawH),
       });
       if (gesture.parent) next = capToFrame(view, gesture.parent, next);
     }
@@ -11732,8 +11738,8 @@
         const target = frameAt(view, gesture.next);
         const rect = view.rects.get(gesture.id);
         if (target) putInFrame(view, gesture.id, target, frameSlotBefore(view, target, gesture.id, gesture.next));
-        // Sized to fill a frame, a block may be off the grid, which it goes back to on the open page.
-        else if (gesture.out) view.rects.set(gesture.id, fitBlockSize(view, { ...rect, width: snapToGrid(rect.width, view.grid), height: snapToGrid(rect.height, view.grid) }));
+        // Sized to fill a frame, a block's width may be off the grid, which it goes back to on the open page.
+        else if (gesture.out) view.rects.set(gesture.id, fitBlockSize(view, { ...rect, width: snapToGrid(rect.width, view.grid), height: Math.round(rect.height) }));
       } else if (!moved) {
         restackFrames(view);
       }
