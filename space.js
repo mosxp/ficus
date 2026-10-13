@@ -351,7 +351,9 @@
       el.detailTitle.textContent = title;
       el.docTabTitle.textContent = title;
     }
-    if (refreshInlineDots(editorRoot())) syncEditorContent();
+    const tagsChanged = refreshInlineDots(editorRoot());
+    if (refreshDotRefPills(editorRoot()) || tagsChanged) syncEditorContent();
+    refreshDotRefs(id);
     if (board && boardView && boardCardDots(board.objects).has(id)) {
       refreshBoardCards(board.objects, boardView.width);
       board._commit();
@@ -508,6 +510,7 @@
     syncSimulation();
     if (openDotId) {
       renderParentLinks();
+      renderRefBack();
       renderConnections();
     }
     if (hubView) renderHubChildren(hubView);
@@ -1831,6 +1834,7 @@
       },
     });
     refreshInlineDots(editorRoot());
+    refreshDotRefPills(editorRoot());
     registerTextEmbedSource();
     refreshTextEmbeds(editorRoot(), dot.id);
     enhanceToolbar(host);
@@ -2902,6 +2906,10 @@
       removeSelectedImage();
       return;
     }
+    if (event.key === "Backspace" && !event.ctrlKey && !event.metaKey && !event.altKey && removeRefPillBeforeCaret()) {
+      event.preventDefault();
+      return;
+    }
     if (event.key === "Tab" || event.key === "Backspace" || event.key === "Delete" || tableEdit.sel) {
       const sel = window.getSelection();
       const state = tableSelection(sel.rangeCount ? sel.getRangeAt(0) : null);
@@ -3530,6 +3538,13 @@
 
   // Device files open in the app's file preview; everything else in a new tab.
   function onEditorClick(event) {
+    const refPill = event.target.closest?.(DOT_REF_PILL);
+    if (refPill && editorRoot()?.contains(refPill)) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!refPill.classList.contains("is-deleted")) followDotRef(refPill.dataset.targetId);
+      return;
+    }
     const inlineDot = event.target.closest?.(INLINE_DOT);
     if (inlineDot && editorRoot()?.contains(inlineDot)) {
       event.preventDefault();
@@ -3983,8 +3998,9 @@
   }
 
   /* "Link existing dot…" in every Add child dot menu: a search over the dots in Space by title (all but the open
-     one), each with its type colour, the ones it already links marked. Picking one hands its id to onPick. */
-  function dotSearchPane(parentId, onPick) {
+     one), each with its type colour, the ones it already links marked (or, with badges, each with its type).
+     Picking one hands its id to onPick. */
+  function dotSearchPane(parentId, onPick, { badges = false } = {}) {
     const pane = document.createElement("div");
     pane.className = "space-dot-search";
     const input = document.createElement("input");
@@ -4024,7 +4040,12 @@
         title.textContent = dot.title;
         item.append(swatch, title);
         item.title = `${dot.title} · ${DOT_TYPES[dot.type]?.label || "Dot"}`;
-        if (parent?.children.includes(dot.id)) {
+        if (badges) {
+          const type = document.createElement("small");
+          type.className = "space-dot-search-type";
+          type.textContent = dotTypeBadge(dot.type);
+          item.append(type);
+        } else if (parent?.children.includes(dot.id)) {
           const linked = document.createElement("small");
           linked.textContent = "Linked";
           item.append(linked);
@@ -4056,6 +4077,340 @@
     });
     fill();
     return { pane, input };
+  }
+
+  /* ---------- Dot references ---------- */
+
+  /* A reference is a soft link to any dot in Space, without the parent → child arrow a child dot makes: a pill in a
+     text dot's writing, a card on a board's sheet or a block on a block dot's grid. Each keeps the dot's id and the
+     title it had, checked against Space whenever the page is drawn or a dot is renamed; a dot deleted since shows
+     as [⇢ Deleted Dot], in red, and opens nothing. Following one opens its dot in place of this one, with a way
+     back (see followDotRef).
+       text   <span class="dot-ref-pill" data-target-id contenteditable="false"><span class="ref-icon">⇢</span><span class="ref-title">title</span></span>
+       board  one of its page's elements: { id: "ref_…", type: "dot_reference", targetDotId, title, x, y, width, height }
+       block  { id, type: "dot_reference", targetDotId, title }, sized on the grid like any block */
+  const DOT_REF_TYPE = "dot_reference";
+  const DOT_REF_PILL = ".dot-ref-pill[data-target-id]";
+  const DOT_REF_GLYPH = "\u21E2";
+  const DOT_REF_DELETED = "Deleted Dot";
+  const DOT_REF_META = { symbol: DOT_REF_GLYPH, label: "Reference", menuLabel: "Reference", type: DOT_REF_TYPE };
+  // ↗, drawn rather than typed: some systems draw the character as an emoji tile.
+  const DOT_REF_OPEN_ICON = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 11 11 5M6 5h5v5" /></svg>';
+  const DOT_REF_CARD_WIDTH = 220;
+  const DOT_REF_CARD_HEIGHT = 90;
+  const isRefBlock = (block) => block?.type === DOT_REF_TYPE;
+  // A dot type's badge: "Text", "Board", "Block" or "Hub".
+  const dotTypeBadge = (type) => (DOT_TYPES[type]?.label || "Dot").replace(/ dot$/, "");
+  let dotSearchModal = null;
+
+  /* DotSearchModal: picks the dot a reference points to. A dialog over a dimmed page holding the dot search (its field
+     focused, every dot but excludeId, the open one, each with its type), closed by its ×, Escape, a tap on the dim
+     or a pick, which hands { targetDotId, title, dotType } to onPick. onClose(picked or null) runs once it's gone. */
+  function openDotSearchModal({ excludeId = openDotId, onPick, onClose } = {}) {
+    closeDotSearchModal();
+    const opener = document.activeElement;
+    let picked = null;
+    const backdrop = document.createElement("div");
+    backdrop.id = "dot-search-modal";
+    backdrop.className = "dot-search-modal";
+    const dialog = document.createElement("div");
+    dialog.className = "dot-search-dialog";
+    dialog.setAttribute("role", "dialog");
+    dialog.setAttribute("aria-modal", "true");
+    dialog.setAttribute("aria-labelledby", "dot-search-modal-title");
+    const head = document.createElement("div");
+    head.className = "dot-search-head";
+    const heading = document.createElement("h2");
+    heading.id = "dot-search-modal-title";
+    heading.className = "dot-search-heading";
+    heading.textContent = `${DOT_REF_GLYPH} Reference a dot`;
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "dot-search-close";
+    close.title = "Close";
+    close.setAttribute("aria-label", "Close");
+    close.textContent = "\u00d7";
+    head.append(heading, close);
+    const { pane, input } = dotSearchPane(excludeId, (id) => {
+      const dot = findDot(id);
+      if (!dot) return;
+      picked = { targetDotId: dot.id, title: dot.title, dotType: dot.type };
+      dismiss();
+    }, { badges: true });
+    dialog.append(head, pane);
+    backdrop.append(dialog);
+    // Ahead of Space's own Escape (which would close the dot), and Tab kept inside the dialog.
+    const onKey = (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        dismiss();
+      } else if (event.key === "Tab") {
+        const stops = [...dialog.querySelectorAll("button, input")].filter((node) => !node.disabled);
+        const at = stops.indexOf(document.activeElement);
+        const next = at < 0 ? 0 : (at + (event.shiftKey ? -1 : 1) + stops.length) % stops.length;
+        event.preventDefault();
+        stops[next]?.focus();
+      }
+    };
+    // A tap on the dim closes it only if it began there too (not a drag out of the field).
+    let pressedDim = false;
+    backdrop.addEventListener("pointerdown", (event) => { pressedDim = event.target === backdrop; });
+    backdrop.addEventListener("click", (event) => {
+      if (pressedDim && event.target === backdrop) dismiss();
+      pressedDim = false;
+    });
+    close.addEventListener("click", () => dismiss());
+    function dismiss() {
+      if (!backdrop.isConnected) return;
+      window.removeEventListener("keydown", onKey, true);
+      backdrop.remove();
+      if (dotSearchModal?.dismiss === dismiss) dotSearchModal = null;
+      if (picked) onPick?.(picked);
+      else if (opener?.isConnected) opener.focus({ preventScroll: true });
+      onClose?.(picked);
+    }
+    window.addEventListener("keydown", onKey, true);
+    document.body.append(backdrop);
+    dotSearchModal = { dismiss };
+    input.focus({ preventScroll: true });
+  }
+
+  function closeDotSearchModal() {
+    dotSearchModal?.dismiss();
+  }
+
+  // A pill for `dot` (its id and title), as it goes in at the caret.
+  function refPillNode(dot) {
+    const pill = document.createElement("span");
+    pill.className = "dot-ref-pill";
+    pill.dataset.targetId = dot.id;
+    pill.contentEditable = "false";
+    const icon = document.createElement("span");
+    icon.className = "ref-icon";
+    icon.textContent = DOT_REF_GLYPH;
+    const title = document.createElement("span");
+    title.className = "ref-title";
+    title.textContent = dot.title;
+    pill.append(icon, title);
+    paintRefPill(pill);
+    return pill;
+  }
+
+  // A pill shows its dot's current title, or [⇢ Deleted Dot] once the dot has gone. True if anything changed.
+  function paintRefPill(pill) {
+    const target = findDot(pill.dataset.targetId);
+    let changed = false;
+    let icon = pill.querySelector(":scope > .ref-icon");
+    let title = pill.querySelector(":scope > .ref-title");
+    if (!icon || !title) {
+      icon = document.createElement("span");
+      icon.className = "ref-icon";
+      icon.textContent = DOT_REF_GLYPH;
+      title = document.createElement("span");
+      title.className = "ref-title";
+      title.textContent = pill.textContent.replace(DOT_REF_GLYPH, "").trim();
+      pill.replaceChildren(icon, title);
+      changed = true;
+    }
+    const text = target ? target.title : DOT_REF_DELETED;
+    if (title.textContent !== text) {
+      title.textContent = text;
+      changed = true;
+    }
+    if (pill.classList.contains("is-deleted") === Boolean(target)) {
+      pill.classList.toggle("is-deleted", !target);
+      changed = true;
+    }
+    if (pill.getAttribute("contenteditable") !== "false") {
+      pill.contentEditable = "false";
+      changed = true;
+    }
+    const tip = target ? `Open ${target.title}` : "This dot has been deleted from Space";
+    if (pill.title !== tip) pill.title = tip;
+    return changed;
+  }
+
+  function refreshDotRefPills(root) {
+    let changed = false;
+    root?.querySelectorAll(DOT_REF_PILL).forEach((pill) => {
+      if (paintRefPill(pill)) changed = true;
+    });
+    return changed;
+  }
+
+  // ⇢ Reference in a text dot's toolbar: the modal, then a pill for the dot picked, at the caret.
+  function openTextRefModal() {
+    if (readingText() || findDot(openDotId)?.type !== "text") return;
+    closeSpacePopovers();
+    openDotSearchModal({ onPick: insertDotRefPill });
+  }
+
+  function insertDotRefPill({ targetDotId }) {
+    const target = findDot(targetDotId);
+    if (!target || readingText() || findDot(openDotId)?.type !== "text" || !restoreSelection()) return;
+    placeSolidAtCaret(refPillNode(target));
+  }
+
+  /* The pill just before the caret (or before the space put after it to hold the caret, when that's all there is)
+     goes whole with one Backspace, that space with it. True if it did. */
+  function removeRefPillBeforeCaret() {
+    const root = editorRoot();
+    const sel = window.getSelection();
+    if (!root || !sel?.rangeCount || !sel.isCollapsed || !root.contains(sel.anchorNode)) return false;
+    const node = sel.anchorNode;
+    let spacer = null;
+    let before;
+    if (node.nodeType === Node.TEXT_NODE) {
+      const text = node.nodeValue.slice(0, sel.anchorOffset);
+      if (text && text !== "\u00a0") return false;
+      if (text) spacer = node;
+      before = node.previousSibling;
+    } else {
+      before = node.childNodes[sel.anchorOffset - 1];
+      if (before?.nodeType === Node.TEXT_NODE && before.nodeValue === "\u00a0") {
+        spacer = before;
+        before = before.previousSibling;
+      }
+    }
+    if (!(before instanceof Element) || !before.matches(DOT_REF_PILL)) return false;
+    const caret = document.createRange();
+    caret.setStartBefore(before);
+    caret.collapse(true);
+    spacer?.deleteData(0, 1);
+    before.remove();
+    placeCaret(caret);
+    syncEditorContent();
+    return true;
+  }
+
+  // iPad and iPhone keyboards may send only beforeinput for Backspace.
+  function onEditorBeforeInput(event) {
+    if (event.inputType === "deleteContentBackward" && !readingText() && removeRefPillBeforeCaret()) event.preventDefault();
+  }
+
+  /* A reference's card on a board or a block dot's grid: a ⇢ badge and the dot's type over its title, and ↗ Open
+     (a plain label in read-only views, where the whole card is the link). A deleted dot's card says so. */
+  function refCardNode(ref, target, { readOnly = false } = {}) {
+    const card = document.createElement("div");
+    card.className = "dot-ref-card";
+    card.classList.toggle("is-deleted", !target);
+    card.dataset.targetId = ref.targetDotId || "";
+    const head = document.createElement("div");
+    head.className = "dot-ref-card-head";
+    const badge = document.createElement("span");
+    badge.className = "dot-ref-card-badge";
+    badge.title = "Reference";
+    badge.textContent = DOT_REF_GLYPH;
+    const type = document.createElement("span");
+    type.className = "dot-ref-card-type";
+    if (target) {
+      const swatch = document.createElement("span");
+      swatch.className = "space-child-swatch";
+      swatch.dataset.type = target.type;
+      swatch.setAttribute("aria-hidden", "true");
+      type.append(swatch, dotTypeBadge(target.type));
+    } else {
+      type.textContent = "Deleted";
+    }
+    const open = document.createElement(readOnly ? "span" : "button");
+    open.className = "dot-ref-card-open";
+    open.innerHTML = `${DOT_REF_OPEN_ICON}<span>Open</span>`;
+    if (!readOnly) {
+      open.type = "button";
+      open.dataset.dotRefOpen = "";
+      open.disabled = !target;
+    }
+    const name = target ? target.title : String(ref.title || "").trim() || "Untitled dot";
+    open.title = target ? `Open ${name}` : "This dot has been deleted from Space";
+    open.setAttribute("aria-label", target ? `Open ${name}` : `${name} (deleted from Space)`);
+    head.append(badge, type, open);
+    const title = document.createElement("div");
+    title.className = "dot-ref-card-title";
+    title.textContent = target ? target.title : `[${DOT_REF_GLYPH} ${DOT_REF_DELETED}]`;
+    card.append(head, title);
+    return card;
+  }
+
+  /* Following a reference opens its dot in place of the open one, which goes on refTrail: the "← Title" tag beside
+     the dot's tab leads back along it, as the browser's Back does (each step is its own #<dot id> history entry,
+     its state { ficusRef, trail } holding the trail up to it). Opening a dot any other way, or closing it, ends
+     the trail and drops the #. */
+  let refTrail = [];
+  let refEntry = null;
+  let followingRef = false;
+
+  function followDotRef(targetId) {
+    if (!targetId || targetId === openDotId) return;
+    if (!findDot(targetId)) {
+      showToast("That dot has been deleted from Space.");
+      return;
+    }
+    const from = openDotId;
+    closeDotSearchModal();
+    openRefDot(targetId);
+    if (openDotId !== targetId) return;
+    if (from) refTrail.push(from);
+    refEntry = { ficusRef: targetId, trail: [...refTrail] };
+    history.pushState(refEntry, "", `${location.pathname}${location.search}#${encodeURIComponent(targetId)}`);
+    renderRefBack();
+  }
+
+  function openRefDot(id) {
+    followingRef = true;
+    try {
+      openDot(id);
+    } finally {
+      followingRef = false;
+    }
+  }
+
+  function leaveRefTrail() {
+    refTrail = [];
+    refEntry = null;
+    if (history.state?.ficusRef) history.replaceState(null, "", location.pathname + location.search);
+  }
+
+  function goRefBack() {
+    if (!refTrail.length) return;
+    if (refEntry) {
+      history.back();
+      return;
+    }
+    openRefDot(refTrail.pop());
+    renderRefBack();
+  }
+
+  // Back (or Forward) to a reference's entry opens its dot with the trail it had; back past the first one, its source.
+  function onRefPopState(event) {
+    const left = refEntry;
+    const state = event.state?.ficusRef ? event.state : null;
+    refEntry = state;
+    const trail = state ? state.trail : left?.trail;
+    const target = state ? state.ficusRef : left?.trail?.[left.trail.length - 1];
+    if (!target || !active || !findDot(target)) return;
+    refTrail = (Array.isArray(trail) ? trail : []).filter((id) => typeof id === "string");
+    if (!state) refTrail.pop();
+    if (target !== openDotId) openRefDot(target);
+    renderRefBack();
+  }
+
+  function renderRefBack() {
+    const btn = el.refBack;
+    if (!btn) return;
+    const from = openDotId && refTrail.length ? findDot(refTrail[refTrail.length - 1]) : null;
+    btn.hidden = !from;
+    if (!from) return;
+    btn.querySelector(".space-type-dot").dataset.type = from.type;
+    btn.querySelector(".parent-link-title").textContent = from.title;
+    btn.title = `Back to ${from.title}`;
+    btn.setAttribute("aria-label", `Back to ${DOT_TYPES[from.type]?.label.toLowerCase() || "dot"} ${from.title}`);
+  }
+
+  // The open page's references to dot `id` (just renamed) show its new title.
+  function refreshDotRefs(id) {
+    if (boardView?.elements.some((element) => element.type === DOT_REF_TYPE && element.targetDotId === id)) renderBoardElements(boardView);
+    if (blockView?.blocks.some((block) => isRefBlock(block) && block.targetDotId === id)) renderBlockWidgets();
   }
 
   function filePopoverHtml() {
@@ -6790,7 +7145,17 @@
         embed.addEventListener("click", () => void insertTextEmbed(kind, embed));
         return embed;
       });
-      btn.after(...embedBtns);
+      // ⇢ Reference: a pill linking any dot, picked in DotSearchModal.
+      const refBtn = document.createElement("button");
+      refBtn.type = "button";
+      refBtn.className = `${btn.className.replace(/\bspace-child-btn\b/, "").trim()} space-ref-btn`;
+      refBtn.title = "Reference another dot here";
+      refBtn.setAttribute("aria-haspopup", "dialog");
+      refBtn.textContent = `${DOT_REF_GLYPH} Reference`;
+      refBtn.addEventListener("mousedown", (event) => event.preventDefault());
+      refBtn.addEventListener("click", openTextRefModal);
+      fmt.refBtn = refBtn;
+      btn.after(refBtn, ...embedBtns);
     }
     const tableToggle = toolbar.querySelector("[data-note-table-toggle]");
     if (tableToggle) fmt.tableBtn = ownToolbarButton(tableToggle, "space-table-btn", "Insert table", openTablePopover);
@@ -6840,6 +7205,7 @@
       root.addEventListener("focusin", clearSavedHighlight);
       root.addEventListener("mousedown", onEditorMouseDown);
       root.addEventListener("keydown", onEditorKeyDown);
+      root.addEventListener("beforeinput", onEditorBeforeInput);
       root.addEventListener("input", onEditorInput);
       root.addEventListener("click", onEditorClick);
       root.addEventListener("paste", onEditorPaste);
@@ -7265,7 +7631,8 @@
       if (kind === "linkDots") return linkDotsMenuHtml();
       const html = popoverHtml.call(this, kind);
       if (kind !== "insert") return html;
-      const row = `<button type="button" class="sb-menu-item" data-space-board-child>${CHILD_DOT_ICON.replace("<svg ", '<svg class="sb-icon" ')}<span>Add child dot</span><small>Text · Board · Block · Hub</small></button>`;
+      const row = `<button type="button" class="sb-menu-item" data-space-board-child>${CHILD_DOT_ICON.replace("<svg ", '<svg class="sb-icon" ')}<span>Add child dot</span><small>Text · Board · Block · Hub</small></button>`
+        + `<button type="button" class="sb-menu-item" data-space-board-ref aria-haspopup="dialog"><span class="space-board-child-glyph" aria-hidden="true">${DOT_REF_GLYPH}</span><span>Reference</span><small>Link any dot</small></button>`;
       const google = Object.entries(BOARD_ITEM_KINDS).map(([item, { symbol, label, hint }]) => (
         `<button type="button" class="sb-menu-item" data-space-board-google="${item}" aria-haspopup="dialog"><span class="space-board-child-glyph" aria-hidden="true">${symbol}</span><span>${label}</span><small>${hint}</small></button>`
       )).join("");
@@ -7287,6 +7654,7 @@
     }
     b.popover.addEventListener("click", (event) => {
       if (event.target.closest("[data-space-board-child]")) b._openPopover("childDots");
+      else if (event.target.closest("[data-space-board-ref]")) addBoardRef();
       else if (event.target.closest("[data-space-board-link]")) b._openPopover("linkDots");
       else if (event.target.closest("[data-space-board-link-back]")) b._openPopover("childDots");
       else if (event.target.closest("[data-space-board-child-back]")) b._openPopover("insert");
@@ -7422,7 +7790,9 @@
      "space-board" source, so a card ticks, refreshes and edits as it does in a Block dot. They aren't drawing
      objects: the engine's undo, Objects panel and eraser leave them be. Editing, a card drags by
      anything but its controls (mouse, pen or finger) and its ✕ takes it off the board; reading, its controls work
-     and a press anywhere else on it pans the board. */
+     and a press anywhere else on it pans the board. Dot references (⇢ Reference in the + menu) are elements too,
+     drawn as their cards (refCardNode) without a block: ↗ Open or a double tap follows one, and reading, so
+     does a tap that doesn't pan. */
   const BOARD_ITEM_KINDS = {
     calendar: { type: "calendar_event", symbol: "\u{1F4C5}", label: "Calendar Event", hint: "Find · new event" },
     task: { type: "google_task", symbol: "\u2705", label: "Google Task", hint: "Find · new task" },
@@ -7435,6 +7805,22 @@
     const kinds = new Map(Object.entries(BOARD_ITEM_KINDS).map(([kind, { type }]) => [type, kind]));
     const seen = new Set();
     return raw.flatMap((element) => {
+      if (element?.type === DOT_REF_TYPE) {
+        if (!element.id || !element.targetDotId || seen.has(String(element.id))) return [];
+        seen.add(String(element.id));
+        const width = Number(element.width);
+        const height = Number(element.height);
+        return [{
+          id: String(element.id),
+          type: DOT_REF_TYPE,
+          targetDotId: String(element.targetDotId),
+          title: String(element.title || ""),
+          x: Number.isFinite(element.x) ? element.x : 0,
+          y: Number.isFinite(element.y) ? element.y : 0,
+          width: Number.isFinite(width) && width > 0 ? width : DOT_REF_CARD_WIDTH,
+          height: Number.isFinite(height) && height > 0 ? height : DOT_REF_CARD_HEIGHT,
+        }];
+      }
       const kind = kinds.get(element?.type);
       const block = element?.block;
       if (!kind || block?.type !== kind || !block.id || !element.id || seen.has(String(element.id))) return [];
@@ -7463,9 +7849,11 @@
     layer.addEventListener("click", (event) => {
       const remove = event.target.closest("[data-board-element-remove]");
       if (remove && view.editing) removeBoardElement(view, remove.closest("[data-board-element]")?.dataset.boardElement);
+      const open = event.target.closest("[data-dot-ref-open]");
+      if (open) followDotRef(open.closest("[data-target-id]")?.dataset.targetId);
     });
     window.UniversalBlockEngine?.registerSource?.(BOARD_ITEM_SOURCE, {
-      getList: (ownerId) => (boardView && (!ownerId || ownerId === boardView.dotId) ? boardView.elements.map((element) => element.block) : null),
+      getList: (ownerId) => (boardView && (!ownerId || ownerId === boardView.dotId) ? boardGoogleBlocks(boardView.elements) : null),
       refresh: () => {
         if (boardView) renderBoardElements(boardView);
       },
@@ -7482,28 +7870,56 @@
     const engine = window.UniversalBlockEngine;
     if (!view.itemLayer || typeof engine?.render !== "function") return;
     endBoardElementDrag(view);
+    // References keep the current title of their dot (one deleted keeps its last).
+    let renamed = false;
+    for (const element of view.elements) {
+      const target = element.type === DOT_REF_TYPE ? findDot(element.targetDotId) : null;
+      if (target && element.title !== target.title) {
+        element.title = target.title;
+        renamed = true;
+      }
+    }
     view.itemLayer.replaceChildren(...view.elements.map((element) => {
       const node = boardElementNode(engine, element, BOARD_ITEM_SOURCE, view.dotId);
+      const ref = element.type === DOT_REF_TYPE;
       const remove = document.createElement("button");
       remove.type = "button";
       remove.className = "board-google-remove";
       remove.dataset.boardElementRemove = "";
       remove.textContent = "\u2715";
-      const label = BOARD_ITEM_KINDS[element.block.type]?.label || "card";
+      const label = ref ? DOT_REF_META.label : BOARD_ITEM_KINDS[element.block.type]?.label || "card";
       remove.title = `Remove ${label.toLowerCase()} from the board`;
-      remove.setAttribute("aria-label", `Remove ${element.block.title || label} from the board`);
+      remove.setAttribute("aria-label", `Remove ${ref ? `reference to ${element.title || "a dot"}` : element.block.title || label} from the board`);
       node.append(remove);
+      // Editing, a double-click or double tap on the card (not its buttons) follows it too.
+      if (ref) {
+        window.FicusInput?.onDoubleActivate(node, (event) => {
+          if (!event.target.closest?.(BOARD_ITEM_CONTROLS)) followDotRef(element.targetDotId);
+        });
+      }
       return node;
     }));
+    if (renamed) saveBoardElements(view);
   }
 
-  function boardElementNode(engine, element, source, ownerId) {
+  function boardElementNode(engine, element, source, ownerId, { readOnly = false } = {}) {
     const node = document.createElement("div");
     node.className = "board-google-element";
     node.dataset.boardElement = element.id;
     Object.assign(node.style, { left: `${element.x}px`, top: `${element.y}px`, width: `${element.width}px` });
+    if (element.type === DOT_REF_TYPE) {
+      node.classList.add("board-ref-element");
+      node.style.height = `${element.height}px`;
+      node.append(refCardNode(element, findDot(element.targetDotId), { readOnly }));
+      return node;
+    }
     node.innerHTML = engine.render(element.block, { source, ownerId, hideTypeBadge: true });
     return node;
+  }
+
+  // The calendar and task blocks of a board's elements (its references hold none).
+  function boardGoogleBlocks(elements) {
+    return elements.flatMap((element) => (element.block ? [element.block] : []));
   }
 
   // Keeps the board's elements in its saved page, beside whatever the drawing last saved.
@@ -7541,6 +7957,36 @@
     });
     renderBoardElements(view);
     saveBoardElements(view);
+  }
+
+  // ⇢ Reference in the + menu: DotSearchModal, then a reference card for the dot picked in the middle of the board's
+  // visible room.
+  function addBoardRef() {
+    const view = boardView;
+    if (!view?.editing || !board) return;
+    board._closePopover();
+    openDotSearchModal({
+      onPick: ({ targetDotId, title }) => {
+        if (boardView !== view || !view.editing || !findDot(targetDotId)) return;
+        const width = DOT_REF_CARD_WIDTH;
+        const height = DOT_REF_CARD_HEIGHT;
+        const room = boardRoom();
+        const x = view.width / 2 - view.x / view.zoom - width / 2;
+        const y = view.height / 2 + (room.cy - view.y) / view.zoom - height / 2;
+        view.elements.push({
+          id: `ref_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`,
+          type: DOT_REF_TYPE,
+          targetDotId,
+          title,
+          x: Math.round(Math.min(Math.max(x, 8), Math.max(8, view.width - width - 8))),
+          y: Math.round(Math.min(Math.max(y, 8), Math.max(8, view.height - height - 8))),
+          width,
+          height,
+        });
+        renderBoardElements(view);
+        saveBoardElements(view);
+      },
+    });
   }
 
   function removeBoardElement(view, id) {
@@ -7957,7 +8403,11 @@
     // Reading, a press on a child dot card that comes up without dragging opens its dot; editing, the card is just
     // an object for the engine to select and move.
     const card = !element && !view.editing && event.button === 0 && boardCardAt(event);
-    view.cardPress = card ? { pointerId: event.pointerId, dotId: card.dotId, x: at.x, y: at.y } : null;
+    // So does one on a reference card, whose dot it follows.
+    const ref = element && !view.editing && event.button === 0 ? element.querySelector(".dot-ref-card:not(.is-deleted)") : null;
+    view.cardPress = card ? { pointerId: event.pointerId, dotId: card.dotId, x: at.x, y: at.y }
+      : ref ? { pointerId: event.pointerId, dotId: ref.dataset.targetId, ref: true, x: at.x, y: at.y }
+      : null;
     // Editing, a press on the one selected card that comes up without dragging renames its dot instead.
     const named = view.editing && onSheet && event.button === 0 && board.tool === "lasso" && boardCardAt(event);
     view.renamePress = named && board.selection.size === 1 && board.selection.has(named.id)
@@ -8062,7 +8512,7 @@
     if (press?.pointerId === id) {
       view.cardPress = null;
       // After the engine has finished with the press (selected the card, or found nothing to move).
-      if (event.type === "pointerup") setTimeout(() => openBoardCard(press.dotId));
+      if (event.type === "pointerup") setTimeout(() => (press.ref ? followDotRef(press.dotId) : openBoardCard(press.dotId)));
     }
     const named = view.renamePress;
     if (named?.pointerId === id) {
@@ -8646,9 +9096,9 @@
     frame: { corner: "right", drop: 75, span: false, start: true },
   };
   // The grid's Add Block menu, in groups split by a rule: Add child dot (which turns the menu into a pick of dot
-  // types), frames and the two blocks you write or draw on, then the ones that hold a link, file, media, calendar
-  // event or Google task. (Checklists live inside rich notes.)
-  const BLOCK_ADD_MENU = [["childdot", "frame", "note", "scrapboard"], ["link", "file", "photo", "album", "video", "audio", "calendar", "task"]];
+  // types), Reference (DotSearchModal), frames and the two blocks you write or draw on, then the ones that hold a
+  // link, file, media, calendar event or Google task. (Checklists live inside rich notes.)
+  const BLOCK_ADD_MENU = [["childdot", DOT_REF_TYPE, "frame", "note", "scrapboard"], ["link", "file", "photo", "album", "video", "audio", "calendar", "task"]];
   const BLOCK_ADD_ICONS = {
     childdot: CHILD_DOT_ICON,
     frame: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="14" height="14" rx="2.5" /><path d="M3 7.5h14" /></svg>',
@@ -8817,7 +9267,9 @@
     }, { passive: true });
     container.addEventListener("click", (event) => {
       const remove = event.target.closest("[data-widget-remove]");
+      const ref = event.target.closest(".dot-ref-card:not(.is-deleted)");
       if (remove) removeBlockWidget(view, remove.closest(".grid-widget-block")?.dataset.widgetId);
+      else if (ref && (!view.editing || event.target.closest("[data-dot-ref-open]"))) followDotRef(ref.dataset.targetId);
       else if (!openChildPortal(view, event)) toggleBlockControls(view, event);
     });
     if ("ResizeObserver" in window) {
@@ -8931,6 +9383,7 @@
 
   function blockTypeMeta(type) {
     if (type === CHILD_BLOCK) return CHILD_BLOCK_META;
+    if (type === DOT_REF_TYPE) return DOT_REF_META;
     return type === "frame" ? FRAME_META : window.UniversalBlockEngine.typeMeta(type);
   }
 
@@ -9376,6 +9829,37 @@
     render();
   }
 
+  /* ---------- Reference blocks ---------- */
+
+  // A reference to the dot picked in DotSearchModal, where the grid was marked out (and in the frame there, if any).
+  function addBlockRef(view, { targetDotId, title }, rect, frameId) {
+    if (blockView !== view || !view.editing || !findDot(targetDotId)) return;
+    settleBlockEditing();
+    const frame = rect ? frameId || frameAt(view, rect) : null;
+    const block = { id: newWidgetId(), type: DOT_REF_TYPE, targetDotId, title };
+    view.blocks.push(block);
+    view.pendingRect = (frame && frameFillRect(view, frame)) || rect || null;
+    view.pendingParent = frame;
+    renderBlockWidgets();
+    saveBlockDot();
+    widgetFor(view, block.id)?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
+  }
+
+  /* Its card follows its dot's title. ↗ Open follows it (see the grid's click handler), as does a double-click or
+     double tap on the card and, reading, a tap anywhere on it; editing, a tap shows the block's controls instead. */
+  function buildRefBlockCard(view, block) {
+    const target = findDot(block.targetDotId);
+    if (target && block.title !== target.title) {
+      block.title = target.title;
+      queueBlockSave(view);
+    }
+    const card = refCardNode(block, target);
+    window.FicusInput?.onDoubleActivate(card, (event) => {
+      if (!event.target.closest?.("button")) followDotRef(block.targetDotId);
+    });
+    return card;
+  }
+
   /* A widget has no header: the block's own content fills the card. Two floating control groups, hidden until the
      block is hovered (or tapped, on touch), sit over it: the drag grip and type symbol top left, Delete and Edit
      top right. The engine draws its own pencil in a different spot per block type, so that one is taken out and
@@ -9401,12 +9885,13 @@
     widget.classList.toggle("edits-in-place", IN_PLACE_TYPES.has(block.type));
     widget.classList.toggle("controls-active", view.controlsId === id);
     widget.classList.toggle("child-dot-block", isChildBlock(block));
+    widget.classList.toggle("dot-ref-block", isRefBlock(block));
     const card = document.createElement("div");
     card.className = "grid-widget-card";
 
     const body = document.createElement("div");
     body.className = "grid-widget-body";
-    if (!isFrameBlock(block) && !isChildBlock(block)) body.innerHTML = engine.render(block, { source: BLOCK_SOURCE, ownerId: view.dotId, index, hideTypeBadge: true });
+    if (!isFrameBlock(block) && !isChildBlock(block) && !isRefBlock(block)) body.innerHTML = engine.render(block, { source: BLOCK_SOURCE, ownerId: view.dotId, index, hideTypeBadge: true });
     dropDisplayPencils(body);
     if (block.type === "note") stripNoteSettings(body, block);
     else if (block.type === "photo") stripPhotoSettings(body, block);
@@ -9418,6 +9903,7 @@
     else if (block.type === "scrapboard") dressBoardCard(view, body, block);
     else if (isFrameBlock(block)) body.append(buildFrameCard(view, block, index));
     else if (isChildBlock(block)) body.append(buildChildPortal(view, block));
+    else if (isRefBlock(block)) body.append(buildRefBlockCard(view, block));
 
     const actions = document.createElement("div");
     actions.className = "block-controls grid-widget-actions";
@@ -9442,6 +9928,10 @@
     if (isChildBlock(block)) {
       remove.title = "Remove child dot";
       remove.setAttribute("aria-label", "Remove this child dot from the block (the dot stays in Space)");
+      actions.append(remove);
+    } else if (isRefBlock(block)) {
+      remove.title = "Remove reference";
+      remove.setAttribute("aria-label", `Remove the reference to ${block.title || "a dot"} (the dot stays in Space)`);
       actions.append(remove);
     } else {
       actions.append(remove, edit);
@@ -11026,8 +11516,11 @@
 
   function removeBlockWidget(view, id) {
     if (!id || blockView !== view) return;
-    const child = isChildBlock(view.blocks.find((block) => String(block.id) === id));
-    if (!window.confirm(child ? "Remove this child dot from the block? The dot stays in Space; only its link to this block goes." : "Delete this block?")) return;
+    const found = view.blocks.find((block) => String(block.id) === id);
+    const question = isChildBlock(found) ? "Remove this child dot from the block? The dot stays in Space; only its link to this block goes."
+      : isRefBlock(found) ? "Remove this reference? The dot it points to stays in Space."
+      : "Delete this block?";
+    if (!window.confirm(question)) return;
     if (blockSettingsOpenFor(id)) window.UniversalBlockEngine.flushSettings(".block-dot");
     const index = view.blocks.findIndex((block) => String(block.id) === id);
     if (index < 0) return;
@@ -11334,6 +11827,19 @@
         placeChild((rect, frameId) => addBlockChildDot(view, child.dataset.spaceAddChild, rect, frameId));
         return;
       }
+      // Reference: the ghost stays marked out while DotSearchModal is open, and the block takes its place.
+      if (event.target.closest(`[data-space-add-block="${DOT_REF_TYPE}"]`)) {
+        view.sketch = null;
+        closeSpacePopovers();
+        openDotSearchModal({
+          onPick: (pick) => addBlockRef(view, pick, sketch.rect, sketch.frameId),
+          onClose: () => {
+            sketch.ghost.remove();
+            if (blockView === view) sizeBlockCanvas(view);
+          },
+        });
+        return;
+      }
       const item = event.target.closest("[data-space-add-block]");
       if (!item) return;
       // Taken off view first so closing the menu leaves the ghost standing until the block takes its place.
@@ -11628,7 +12134,7 @@
       const view = boardView?.dotId === dotId ? boardView : null;
       if (view) {
         return {
-          blocks: view.elements.map((element) => element.block),
+          blocks: boardGoogleBlocks(view.elements),
           save: () => {
             renderBoardElements(view);
             saveBoardElements(view);
@@ -11637,7 +12143,7 @@
       }
       const state = readBoardState(dotId);
       const elements = cleanBoardElements(state?.elements);
-      return { blocks: elements.map((element) => element.block), save: () => store()?.setPage("board", dotId, { ...state, elements }, dotId) };
+      return { blocks: boardGoogleBlocks(elements), save: () => store()?.setPage("board", dotId, { ...state, elements }, dotId) };
     }
     return { blocks: [], save: () => {} };
   }
@@ -12193,6 +12699,8 @@
     clearTimeout(closeTimer);
     closeTimer = null;
     closeDeletePrompt(false);
+    closeDotSearchModal();
+    if (!followingRef) leaveRefTrail();
     el.detailModal.classList.add("hidden");
     el.detailModal.classList.remove("is-closing", "is-horizontal", "is-board", "is-blocks");
     el.view.classList.remove("space-doc-open");
@@ -12765,7 +13273,7 @@
     try {
       if (dot?.type === "text") readTextPage(dot, page, onOpenDot);
       else if (dot?.type === "block") readBlockPage(dot, page, onOpenDot, cleanups);
-      else if (dot?.type === "board") readBoardPage(dot, page, cleanups);
+      else if (dot?.type === "board") readBoardPage(dot, page, cleanups, onOpenDot);
       else if (dot?.type === "hub") readHubPage(dot, page, onOpenDot, cleanups);
       else page.append(readNote("This dot couldn\u2019t be found."));
     } catch (err) {
@@ -12839,6 +13347,10 @@
       if (child) label.textContent = child.title;
       markReadLink(tag, child?.id, onOpenDot, "button");
     });
+    text.querySelectorAll(DOT_REF_PILL).forEach((pill) => {
+      paintRefPill(pill);
+      if (!pill.classList.contains("is-deleted")) markReadLink(pill, pill.dataset.targetId, onOpenDot, "button");
+    });
     // Calendar events and tasks in the text as their pills, without the tick, refresh or pencil working.
     const engine = window.UniversalBlockEngine;
     text.querySelectorAll(TEXT_EMBED).forEach((node) => {
@@ -12851,7 +13363,7 @@
       link.target = "_blank";
       link.rel = "noopener noreferrer";
     });
-    if (!text.textContent.trim() && !text.querySelector("img, table, hr, .inline-child-dot, .text-google-embed")) {
+    if (!text.textContent.trim() && !text.querySelector("img, table, hr, .inline-child-dot, .dot-ref-pill, .text-google-embed")) {
       text.replaceChildren(readNote("Nothing written yet."));
     }
     body.append(text);
@@ -12965,6 +13477,7 @@
     widget.dataset.widgetId = block.id;
     widget.dataset.widgetType = block.type;
     widget.classList.toggle("child-dot-block", isChildBlock(block));
+    widget.classList.toggle("dot-ref-block", isRefBlock(block));
     const card = document.createElement("div");
     card.className = "grid-widget-card";
     const body = document.createElement("div");
@@ -12977,6 +13490,11 @@
       markReadLink(portal, child?.id, onOpenDot);
       if (!portal.dataset.readDot) portal.removeAttribute("aria-label");
       body.append(portal);
+    } else if (isRefBlock(block)) {
+      const target = findDot(block.targetDotId);
+      const card = refCardNode(block, target, { readOnly: true });
+      markReadLink(card, target?.id, onOpenDot);
+      body.append(card);
     } else {
       body.innerHTML = engine.render(block, { source: READ_SOURCE, ownerId: dot.id, index, hideTypeBadge: true });
       if (block.type === "link") dressLinkCard(body, block);
@@ -13021,7 +13539,7 @@
   const READ_BOARD_HEIGHT = 400;
   const READ_BOARD_ITEM_HEIGHT = 120;
 
-  function readBoardPage(dot, page, cleanups) {
+  function readBoardPage(dot, page, cleanups, onOpenDot) {
     const frame = document.createElement("div");
     frame.className = "space-board is-reading dot-read-board";
     page.append(frame);
@@ -13061,11 +13579,12 @@
       const layer = document.createElement("div");
       layer.className = "board-google-layer";
       for (const element of elements) {
-        const node = boardElementNode(engine, element, READ_SOURCE, dot.id);
+        const node = boardElementNode(engine, element, READ_SOURCE, dot.id, { readOnly: true });
         lockReadBlock(node);
+        if (element.type === DOT_REF_TYPE && findDot(element.targetDotId)) markReadLink(node, element.targetDotId, onOpenDot);
         layer.append(node);
         width = Math.max(width, Math.ceil(element.x + element.width + BOARD_GAP));
-        height = Math.max(height, Math.ceil(element.y + READ_BOARD_ITEM_HEIGHT + BOARD_GAP));
+        height = Math.max(height, Math.ceil(element.y + (element.height || READ_BOARD_ITEM_HEIGHT) + BOARD_GAP));
       }
       sheet.append(layer);
     }
@@ -14216,6 +14735,7 @@
     closeMenus();
     closeDeletePrompt(false);
     closeTagManager(false);
+    if (!followingRef) leaveRefTrail();
     openDotId = id;
     el.detailKicker.textContent = DOT_TYPES[dot.type].label;
     el.detailTypeDot.dataset.type = dot.type;
@@ -14224,6 +14744,7 @@
     el.docTabTitle.textContent = dot.title;
     el.detailProperty.textContent = PROPERTY_LABELS[dot.property] || PROPERTY_LABELS[DEFAULT_PROPERTY];
     renderParentLinks();
+    renderRefBack();
     el.detailBody.replaceChildren();
     el.detailModal.classList.toggle("is-board", dot.type === "board");
     el.detailModal.classList.toggle("is-blocks", dot.type === "block");
@@ -14251,6 +14772,7 @@
 
   // Saves the open dot's page and takes it down, leaving the page window (and its tab) as they are.
   function unmountOpenDot() {
+    closeDotSearchModal();
     deselectImage(true);
     hideTableChrome();
     commitTitle();
@@ -14516,7 +15038,7 @@
       titleInput: "space-title-input", titleCancel: "space-title-cancel",
       detailModal: "space-detail-modal", detailKicker: "space-detail-kicker", detailTitle: "space-detail-title",
       detailProperty: "space-detail-property", detailClose: "space-detail-close", detailBody: "space-detail-body",
-      detailTypeDot: "space-detail-type-dot", detailParents: "space-detail-parents", detailTags: "space-detail-tags", docHome: "space-doc-home", docTabTitle: "space-doc-tab-title",
+      detailTypeDot: "space-detail-type-dot", detailParents: "space-detail-parents", refBack: "space-ref-back", detailTags: "space-detail-tags", docHome: "space-doc-home", docTabTitle: "space-doc-tab-title",
       docTabDot: "space-doc-tab-dot", docScroll: "space-doc-scroll",
       detailDelete: "space-detail-delete", deleteModal: "space-delete-modal", deleteHeading: "space-delete-heading",
       deleteNote: "space-delete-note", deleteSingle: "space-delete-single", deleteSingleNote: "space-delete-single-note",
@@ -14672,6 +15194,7 @@
       if (event.target === el.detailModal) board?.refresh();
     });
     el.docHome.addEventListener("click", () => closeDetail());
+    el.refBack?.addEventListener("click", goRefBack);
     if (el.detailTitle.contentEditable !== "plaintext-only") el.detailTitle.contentEditable = "true";
     el.detailTitle.addEventListener("input", onTitleInput);
     el.detailTitle.addEventListener("keydown", onTitleKeyDown);
@@ -14774,12 +15297,14 @@
 
   window.addEventListener("hashchange", () => {
     const id = linkedDotId();
-    if (!id || !ready) return;
+    // A reference's own entry (Back / Forward along a trail) is opened by onRefPopState, and keeps its #.
+    if (!id || !ready || history.state?.ficusRef === id) return;
     loadDots();
     if (!findDot(id)) return;
     if (active) openLinkedDot();
     else window.showView?.("space");
   });
+  window.addEventListener("popstate", onRefPopState);
 
   window.renderDotContent = renderDotContent;
   window.FicusSpace = {
