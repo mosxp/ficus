@@ -18,7 +18,7 @@
     <script src="canvas-editor.js?v=2"></script>
     <script src="scrapboard.js?v=26"></script>
     <script src="quick_line.js?v=2"></script>
-    <script src="space.js?v=90" defer></script>
+    <script src="space.js?v=91" defer></script>
     <script src="collection.js?v=19" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -2494,7 +2494,7 @@
         font-size: 0.85rem; color: #78716c;
       }
       /* Block dots: a scrolling grid fills the page below the title like a board does. space.js places each
-         .grid-widget-block on --grid-size cells (left, top and width in whole cells; height to the pixel); its card
+         .grid-widget-block on --grid-size columns (left and width in whole cells; top and height to the pixel); its card
          sits 4px inside that box, so neighbours keep a gutter. */
       .space-doc.is-blocks .space-doc-scroll { display: flex; flex-direction: column; }
       .space-doc.is-blocks .space-doc-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
@@ -3140,6 +3140,17 @@
       .grid-widget-block.is-lifted > .grid-widget-card {
         box-shadow: 0 18px 40px rgba(28, 25, 23, 0.16), 0 2px 6px rgba(28, 25, 23, 0.08); transform: scale(1.01);
       }
+      /* Moving, a block's top follows the pointer as it goes; stacked under the block above (.is-stacked, see
+         blockStackTop in space.js) it eases into place, and a seam marks the edge it's stacked against. */
+      :root[data-block-gesture="move"] .grid-widget-block.is-lifted { transition: left 90ms ease; }
+      :root[data-block-gesture="move"] .grid-widget-block.is-lifted.is-stacked {
+        transition: left 90ms ease, top 160ms cubic-bezier(0.34, 1.56, 0.64, 1);
+      }
+      .grid-widget-block.is-stacked::before {
+        content: ""; position: absolute; left: 4px; right: 4px; top: -1px; z-index: 1; height: 2px;
+        background: #1c1917; pointer-events: none; animation: block-stack-seam 180ms ease-out;
+      }
+      @keyframes block-stack-seam { from { opacity: 0; transform: scaleX(0.6); } }
       /* An open block (its settings) sits above its neighbours and grows to fit them, except a rich note, photo, link,
          file, album, audio, video, scrapboard or frame block (.edits-in-place): those stay exactly their display size, the card showing just what it does on
          display, while their other controls float outside it (.block-edit-chrome). */
@@ -3375,6 +3386,9 @@
       :root[data-block-gesture="resize-se"], :root[data-block-gesture="resize-se"] * { cursor: nwse-resize !important; }
       @media (prefers-reduced-motion: reduce) {
         .grid-widget-block, .grid-widget-card, .ghost-block-selection { transition: none; }
+        :root[data-block-gesture="move"] .grid-widget-block.is-lifted,
+        :root[data-block-gesture="move"] .grid-widget-block.is-lifted.is-stacked { transition: none; }
+        .grid-widget-block.is-stacked::before { animation: none; }
       }
       @media (max-width: 767px) {
         #view-space { --space-cx: 50%; --space-cy: calc(50% - 3rem); --space-floor: calc(6.75rem + env(safe-area-inset-bottom)); }

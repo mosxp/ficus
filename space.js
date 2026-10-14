@@ -33,6 +33,12 @@
   const BLOCK_MIN_CELLS = 2;
   // A block's height isn't held to the grid (it can wrap its content to the pixel), only kept to one cell at least.
   const BLOCK_MIN_HEIGHT_CELLS = 1;
+  // A block dragged with its top within this many pixels of the bottom of a block above it (one it shares columns
+  // with), or of the top of the page when none is, snaps there.
+  const BLOCK_STACK_SNAP = 30;
+  // Between a stacked block's box and the one above it. Each card sits 4px inside its box (CSS), so boxes that touch
+  // already show the same 8px gutter as blocks in neighbouring columns.
+  const BLOCK_STACK_GAP = 0;
   // Empty cells kept past the furthest block in the direction the page grows, so there's always room to drag into.
   const BLOCK_SPARE_CELLS = 4;
   // Dragging within this many pixels of the growing edge scrolls the page, up to this many pixels a frame.
@@ -9481,7 +9487,7 @@
       const width = item.parentId ? Math.round(Number(item.width)) : snapToGrid(item.width, grid);
       rects.set(block.id, {
         left: Math.max(0, snapToGrid(item.left, grid)),
-        top: Math.max(0, snapToGrid(item.top, grid)),
+        top: Math.max(0, Math.round(Number(item.top) || 0)),
         width: Math.max(min, width || BLOCK_DEFAULT_COLS * grid),
         height: Math.max(minHeight, Math.round(Number(item.height)) || BLOCK_DEFAULT_ROWS * grid),
       });
@@ -9625,6 +9631,26 @@
 
   function fitBlockMove(view, rect) {
     return shownRect(view, { ...rect, left: Math.max(0, rect.left), top: Math.max(0, rect.top) });
+  }
+
+  // The top block `id` stacks to when dragged to `rect`: flush under the nearest block above it that it shares columns
+  // with (the top of the page if there's none), when that's within BLOCK_STACK_SNAP; otherwise null.
+  function blockStackTop(view, id, rect) {
+    let best = null;
+    let above = false;
+    const consider = (line) => {
+      const off = Math.abs(rect.top - line);
+      if (off <= BLOCK_STACK_SNAP && (best === null || off < Math.abs(rect.top - best))) best = line;
+    };
+    for (const other of view.rects.keys()) {
+      if (other === id || view.parents.has(other)) continue;
+      const box = shownRect(view, liveRect(view, other));
+      if (box.top >= rect.top || box.left >= rect.left + rect.width || box.left + box.width <= rect.left) continue;
+      above = true;
+      consider(box.top + box.height + BLOCK_STACK_GAP);
+    }
+    if (!above) consider(0);
+    return best;
   }
 
   function fitBlockSize(view, rect) {
@@ -9965,7 +9991,7 @@
       const rect = view.rects.get(id);
       if (widget && rect) {
         const box = canvasBox(view, widget);
-        view.rects.set(id, fitBlockMove(view, { ...rect, left: snapToGrid(box.left, view.grid), top: snapToGrid(box.top, view.grid) }));
+        view.rects.set(id, fitBlockMove(view, { ...rect, left: snapToGrid(box.left, view.grid), top: Math.round(box.top) }));
       }
       view.parents.delete(id);
     }
@@ -11549,8 +11575,9 @@
     if (widget) view.canvas.append(widget);
   }
 
-  /* Dragging by the corner grip moves a block and the edge / corner handles resize it. A move snaps live: the raw
-     position is rounded to the nearest whole cell on every move, so blocks' tops line up on the rows. A resize snaps
+  /* Dragging by the corner grip moves a block and the edge / corner handles resize it. A move snaps its left edge
+     live to the nearest whole column; its top follows the pointer, except that near the bottom of a block above it
+     in those columns (or the top of the page) it stacks there (blockStackTop), shown by .is-stacked. A resize snaps
      only the width, to whole columns; the height follows the pointer to the pixel (no less than
      BLOCK_MIN_HEIGHT_CELLS), so a block can wrap its content exactly. A block in a frame leaves it once the
      drag gets going (a press alone leaves it be) and is dropped into whichever frame holds its middle, if any. A
@@ -11657,11 +11684,10 @@
     if (gesture.kind === "move") {
       const rawX = start.left + dx;
       const rawY = start.top + dy;
-      next = fitBlockMove(view, {
-        ...start,
-        left: Math.round(rawX / grid) * grid,
-        top: Math.round(rawY / grid) * grid,
-      });
+      next = fitBlockMove(view, { ...start, left: Math.round(rawX / grid) * grid, top: Math.round(rawY) });
+      const stack = blockStackTop(view, gesture.id, next);
+      if (stack !== null) next = fitBlockMove(view, { ...next, top: stack });
+      gesture.widget.classList.toggle("is-stacked", stack !== null && next.top === stack);
     } else {
       const rawW = start.width + (gesture.dir.includes("e") ? dx : 0);
       const rawH = start.height + (gesture.dir.includes("s") ? dy : 0);
@@ -11724,7 +11750,7 @@
     const gesture = view.gesture;
     cancelAnimationFrame(gesture.frame);
     view.gesture = null;
-    gesture.widget.classList.remove("is-lifted");
+    gesture.widget.classList.remove("is-lifted", "is-stacked");
     delete document.documentElement.dataset.blockGesture;
     markDropFrame(view, null);
     const saved = view.rects.get(gesture.id);
