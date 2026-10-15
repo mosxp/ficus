@@ -7,16 +7,20 @@
  * `icon` is either up to two characters (an emoji or letters; "" shows the name's first letter) or an image
  * URL / data:image from the sticker picker, shown on a tile of `color`. `groupId` is a group's id, or "" for none.
  * `mode` is one of:
- *   "standard"  logged by hand: `inputType` (currency, numeric, tally, boolean, timer, compound or rating), and for
- *               numeric and currency a `unit` ("kg", "$", "hours"; may be "")
+ *   "standard"  logged by hand: `inputType` (currency, numeric, tally, boolean, timer, compound or rating), plus
+ *               type-specific options. Numeric, currency and tally keep `unit` ("kg", "$", "hours"; may be "").
+ *               Other options: `tallyConfig: { step }`, `booleanConfig: { trueLabel, falseLabel }`,
+ *               `timerConfig: { mode: "manual"|"stopwatch" }`, `compoundConfig: { fieldALabel, fieldAUnit,
+ *               fieldBLabel, fieldBUnit }`, `ratingConfig: { max: 5|10, lowLabel, highLabel }`.
  *   "rollup"    one value made from other loggers': `rollupConfig: { math: "sum" | "average" | "max" | "min" |
  *               "ratio", targetLoggers: [logger id, ...] }`. For ratio, `targetLoggers` is [numerator, denominator]
  *               (either may be "" until chosen).
  * `kind` follows the mode: "input" for standard (an Input Logger, the only kind a dot can record values into) and
  * "metric" for roll-ups (a Calculated Metric: read-only, worked out from its sources). A metric may be saved before
  * its sources are connected; until then its value is null, shown as "—".
- * Only the active mode's fields are kept. A roll-up can't use itself, directly or through other loggers.
- * A saved logger with the old "formula" mode is read as a ratio roll-up (A / B from its variables).
+ * Only the active mode's fields (and the active inputType's config) are kept. A roll-up can't use itself, directly
+ * or through other loggers. A saved logger with the old "formula" mode is read as a ratio roll-up (A / B from its
+ * variables).
  */
 (function () {
   "use strict";
@@ -29,9 +33,11 @@
     ["currency", "Currency"], ["numeric", "Numeric"], ["tally", "Tally"], ["boolean", "Boolean"],
     ["timer", "Timer"], ["compound", "Compound"], ["rating", "Rating"],
   ];
-  const UNIT_TYPES = new Set(["numeric", "currency"]);
+  const UNIT_TYPES = new Set(["numeric", "currency", "tally"]);
   const unitPlaceholder = (inputType) => (inputType === "currency" ? "e.g. $, AUD, \u20ac" : "e.g. kg, hours, km");
   const ROLLUP_MATH = [["sum", "Sum"], ["average", "Average"], ["max", "Max"], ["min", "Min"], ["ratio", "Ratio"]];
+  const TIMER_MODES = [["manual", "Manual Entry"], ["stopwatch", "Active Stopwatch"]];
+  const RATING_SCALES = [["5", "1\u20135"], ["10", "1\u201310"]];
   const COLORS = [
     ["Sage", "#8BA888"], ["Mint", "#A3C4BC"], ["Dusty Blue", "#7D98A1"], ["Navy", "#5B6C7E"],
     ["Terracotta", "#CC8B65"], ["Ochre", "#D4A373"], ["Warm Pink", "#D49A89"], ["Plum", "#9D7A8C"],
@@ -41,6 +47,8 @@
   const NAME_MAX = 80;
   const GROUP_MAX = 60;
   const UNIT_MAX = 24;
+  const LABEL_MAX = 32;
+  const STANDARD_CONFIG_KEYS = ["tallyConfig", "booleanConfig", "timerConfig", "compoundConfig", "ratingConfig"];
   const ICON_IMAGE_RE = /^(data:image\/|https?:\/\/|\/)/i;
   const ICON_IMAGE_MAX = 400000;
   const ICON_IMAGE_PX = 96;
@@ -115,11 +123,65 @@
     return [slot(list[0]), slot(list[1])];
   }
 
+  const cleanTallyConfig = (raw) => {
+    const step = Number(isObject(raw) ? raw.step : 1);
+    return { step: Number.isFinite(step) && step > 0 ? step : 1 };
+  };
+  const cleanBooleanConfig = (raw) => {
+    const src = isObject(raw) ? raw : {};
+    return {
+      trueLabel: clip(src.trueLabel, LABEL_MAX) || "Yes",
+      falseLabel: clip(src.falseLabel, LABEL_MAX) || "No",
+    };
+  };
+  const cleanTimerConfig = (raw) => ({
+    mode: isObject(raw) && raw.mode === "stopwatch" ? "stopwatch" : "manual",
+  });
+  const cleanCompoundConfig = (raw) => {
+    const src = isObject(raw) ? raw : {};
+    return {
+      fieldALabel: clip(src.fieldALabel, LABEL_MAX),
+      fieldAUnit: clip(src.fieldAUnit, UNIT_MAX),
+      fieldBLabel: clip(src.fieldBLabel, LABEL_MAX),
+      fieldBUnit: clip(src.fieldBUnit, UNIT_MAX),
+    };
+  };
+  const cleanRatingConfig = (raw) => {
+    const src = isObject(raw) ? raw : {};
+    return {
+      max: Number(src.max) === 10 ? 10 : 5,
+      lowLabel: clip(src.lowLabel, LABEL_MAX),
+      highLabel: clip(src.highLabel, LABEL_MAX),
+    };
+  };
+
+  const defaultStandardConfigs = () => ({
+    tallyConfig: { step: 1 },
+    booleanConfig: { trueLabel: "Yes", falseLabel: "No" },
+    timerConfig: { mode: "manual" },
+    compoundConfig: { fieldALabel: "", fieldAUnit: "", fieldBLabel: "", fieldBUnit: "" },
+    ratingConfig: { max: 5, lowLabel: "", highLabel: "" },
+  });
+
+  // Attach only the config that belongs to `inputType`; drop the others so a type switch can't leak.
+  function applyStandardConfig(logger, inputType, sources = {}) {
+    if (inputType === "tally") logger.tallyConfig = cleanTallyConfig(sources.tallyConfig);
+    else if (inputType === "boolean") logger.booleanConfig = cleanBooleanConfig(sources.booleanConfig);
+    else if (inputType === "timer") logger.timerConfig = cleanTimerConfig(sources.timerConfig);
+    else if (inputType === "compound") logger.compoundConfig = cleanCompoundConfig(sources.compoundConfig);
+    else if (inputType === "rating") logger.ratingConfig = cleanRatingConfig(sources.ratingConfig);
+  }
+
   // A logger in the shape the header describes; fields it doesn't know are kept as they are.
   // An old "formula" logger is read as a ratio roll-up (its A and B variables become the two targets).
   function cleanLogger(raw) {
     if (!isObject(raw) || raw.id == null || raw.id === "") return null;
-    const { inputType, unit, rollupConfig, formulaConfig, ...rest } = raw;
+    const {
+      inputType, unit, rollupConfig, formulaConfig,
+      tallyConfig, booleanConfig, timerConfig, compoundConfig, ratingConfig,
+      ...rest
+    } = raw;
+    for (const key of STANDARD_CONFIG_KEYS) delete rest[key];
     let mode = known(MODES, raw.mode) ? raw.mode : "standard";
     let math = "sum";
     let targets = [];
@@ -147,6 +209,9 @@
     if (mode === "standard") {
       logger.inputType = known(INPUT_TYPES, inputType) ? inputType : "numeric";
       if (UNIT_TYPES.has(logger.inputType)) logger.unit = clip(unit, UNIT_MAX);
+      applyStandardConfig(logger, logger.inputType, {
+        tallyConfig, booleanConfig, timerConfig, compoundConfig, ratingConfig,
+      });
     } else {
       logger.rollupConfig = {
         math,
@@ -500,6 +565,7 @@
   function blankDraft(groupId = "") {
     return {
       name: "", icon: "", color: DEFAULT_COLOR, groupId, mode: "standard", inputType: "numeric", unit: "",
+      ...defaultStandardConfigs(),
       math: "sum", targets: [],
     };
   }
@@ -507,9 +573,26 @@
   function draftOf(logger) {
     const draft = blankDraft(logger.groupId);
     Object.assign(draft, { name: logger.name, icon: logger.icon, color: logger.color, mode: logger.mode });
-    if (logger.mode === "standard") Object.assign(draft, { inputType: logger.inputType, unit: logger.unit || "" });
+    if (logger.mode === "standard") {
+      Object.assign(draft, {
+        inputType: logger.inputType,
+        unit: logger.unit || "",
+        tallyConfig: cleanTallyConfig(logger.tallyConfig),
+        booleanConfig: cleanBooleanConfig(logger.booleanConfig),
+        timerConfig: cleanTimerConfig(logger.timerConfig),
+        compoundConfig: cleanCompoundConfig(logger.compoundConfig),
+        ratingConfig: cleanRatingConfig(logger.ratingConfig),
+      });
+    }
     if (logger.mode === "rollup") Object.assign(draft, { math: logger.rollupConfig.math, targets: [...logger.rollupConfig.targetLoggers] });
     return draft;
+  }
+
+  // Drop configs that don't belong to the new input type so they can't be saved by accident.
+  function switchInputType(draft, nextType) {
+    draft.inputType = nextType;
+    Object.assign(draft, defaultStandardConfigs());
+    if (!UNIT_TYPES.has(nextType)) draft.unit = "";
   }
 
   function h(tag, attrs = {}, ...children) {
@@ -1499,21 +1582,95 @@
 
     let modePanel;
     if (draft.mode === "standard") {
-      const unit = h("input", {
-        type: "text", class: "logger-input", name: "unit", maxlength: UNIT_MAX, autocomplete: "off",
-        placeholder: unitPlaceholder(draft.inputType),
-        oninput: (event) => { draft.unit = event.target.value; changed(); },
-      });
-      unit.value = draft.unit;
-      const unitField = field("Unit Label", unit);
-      unitField.hidden = !UNIT_TYPES.has(draft.inputType);
       const type = selectBox("inputType", INPUT_TYPES, draft.inputType, (event) => {
-        draft.inputType = event.target.value;
-        unitField.hidden = !UNIT_TYPES.has(draft.inputType);
-        unit.placeholder = unitPlaceholder(draft.inputType);
+        switchInputType(draft, event.target.value);
         changed();
+        renderInPlace("[name='inputType']");
       });
-      modePanel = [h("div", { class: "logger-pair" }, field("Input Type", type), unitField)];
+      const unitInput = () => {
+        const unit = h("input", {
+          type: "text", class: "logger-input", name: "unit", maxlength: UNIT_MAX, autocomplete: "off",
+          placeholder: unitPlaceholder(draft.inputType),
+          oninput: (event) => { draft.unit = event.target.value; changed(); },
+        });
+        unit.value = draft.unit || "";
+        return unit;
+      };
+      const textInput = (name, value, max, oninput, placeholder = "") => {
+        const input = h("input", {
+          type: "text", class: "logger-input", name, maxlength: max, autocomplete: "off", placeholder,
+          oninput: (event) => oninput(event.target.value),
+        });
+        input.value = value;
+        return input;
+      };
+      let settings;
+      if (draft.inputType === "numeric" || draft.inputType === "currency") {
+        settings = h("div", { class: "logger-pair" }, field("Unit Label", unitInput()));
+      } else if (draft.inputType === "tally") {
+        const step = h("input", {
+          type: "number", class: "logger-input", name: "tally-step", min: "0.01", step: "any", inputmode: "decimal",
+          oninput: (event) => {
+            const n = Number(event.target.value);
+            draft.tallyConfig.step = Number.isFinite(n) && n > 0 ? n : draft.tallyConfig.step;
+            changed();
+          },
+        });
+        step.value = String(draft.tallyConfig.step ?? 1);
+        settings = h("div", { class: "logger-pair" },
+          field("Step Size", step),
+          field("Unit Label", unitInput()));
+      } else if (draft.inputType === "boolean") {
+        settings = h("div", { class: "logger-pair" },
+          field("True Label", textInput("bool-true", draft.booleanConfig.trueLabel, LABEL_MAX, (v) => {
+            draft.booleanConfig.trueLabel = v; changed();
+          }, "Yes")),
+          field("False Label", textInput("bool-false", draft.booleanConfig.falseLabel, LABEL_MAX, (v) => {
+            draft.booleanConfig.falseLabel = v; changed();
+          }, "No")));
+      } else if (draft.inputType === "timer") {
+        const mode = selectBox("timer-mode", TIMER_MODES, draft.timerConfig.mode, (event) => {
+          draft.timerConfig.mode = event.target.value === "stopwatch" ? "stopwatch" : "manual";
+          changed();
+        });
+        settings = field("Tracking Mode", mode);
+      } else if (draft.inputType === "compound") {
+        settings = [
+          h("div", { class: "logger-pair" },
+            field("Field A Name", textInput("compound-a-name", draft.compoundConfig.fieldALabel, LABEL_MAX, (v) => {
+              draft.compoundConfig.fieldALabel = v; changed();
+            }, "e.g. Sets")),
+            field("Field A Unit", textInput("compound-a-unit", draft.compoundConfig.fieldAUnit, UNIT_MAX, (v) => {
+              draft.compoundConfig.fieldAUnit = v; changed();
+            }))),
+          h("div", { class: "logger-pair" },
+            field("Field B Name", textInput("compound-b-name", draft.compoundConfig.fieldBLabel, LABEL_MAX, (v) => {
+              draft.compoundConfig.fieldBLabel = v; changed();
+            }, "e.g. Reps")),
+            field("Field B Unit", textInput("compound-b-unit", draft.compoundConfig.fieldBUnit, UNIT_MAX, (v) => {
+              draft.compoundConfig.fieldBUnit = v; changed();
+            }))),
+        ];
+      } else if (draft.inputType === "rating") {
+        const scale = selectBox("rating-max", RATING_SCALES, String(draft.ratingConfig.max), (event) => {
+          draft.ratingConfig.max = event.target.value === "10" ? 10 : 5;
+          changed();
+        });
+        settings = [
+          field("Scale", scale),
+          h("div", { class: "logger-pair" },
+            field("Low Label", textInput("rating-low", draft.ratingConfig.lowLabel, LABEL_MAX, (v) => {
+              draft.ratingConfig.lowLabel = v; changed();
+            }, "optional")),
+            field("High Label", textInput("rating-high", draft.ratingConfig.highLabel, LABEL_MAX, (v) => {
+              draft.ratingConfig.highLabel = v; changed();
+            }, "optional"))),
+        ];
+      }
+      modePanel = [
+        field("Input Type", type),
+        settings && h("div", { class: "logger-type-settings" }, ...(Array.isArray(settings) ? settings : [settings])),
+      ].filter(Boolean);
     } else {
       if (draft.math === "ratio" && draft.targets.length < 2) draft.targets = [draft.targets[0] || "", draft.targets[1] || ""];
       const math = selectBox("math", ROLLUP_MATH, draft.math, (event) => {
@@ -1644,7 +1801,15 @@
       name = existing?.name || "New logger";
     }
     const raw = { ...(existing || {}), id, name, icon: normalizeIcon(draft.icon), color: draft.color, groupId: draft.groupId, mode: draft.mode };
-    if (draft.mode === "standard") Object.assign(raw, { inputType: draft.inputType, unit: draft.unit });
+    for (const key of STANDARD_CONFIG_KEYS) delete raw[key];
+    delete raw.unit;
+    delete raw.inputType;
+    delete raw.rollupConfig;
+    if (draft.mode === "standard") {
+      Object.assign(raw, { inputType: draft.inputType });
+      if (UNIT_TYPES.has(draft.inputType)) raw.unit = draft.unit;
+      applyStandardConfig(raw, draft.inputType, draft);
+    }
     // A metric saves before its sources are connected (pending), showing — until they are.
     if (draft.mode === "rollup") {
       if (draft.math === "ratio") {

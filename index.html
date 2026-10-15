@@ -19,7 +19,7 @@
     <script src="scrapboard.js?v=26"></script>
     <script src="quick_line.js?v=2"></script>
     <script src="space.js?v=92" defer></script>
-    <script src="ficus_loggers.js?v=6" defer></script>
+    <script src="ficus_loggers.js?v=7" defer></script>
     <script src="collection.js?v=19" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -1856,7 +1856,10 @@
       .logger-editor-head { display: flex; align-items: center; gap: 0.4rem; padding: 0.65rem 0.55rem 0.35rem 0.9rem; }
       .logger-editor-title { flex: 1; min-width: 0; margin: 0; overflow: hidden; font-size: 0.84rem; font-weight: 700; color: #1c1917; text-overflow: ellipsis; white-space: nowrap; outline: none; }
       .logger-editor-body { flex: 1; min-height: 0; padding: 0.15rem 0.9rem 0.55rem; overflow-y: auto; overscroll-behavior: contain; }
-      .logger-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0 0.55rem; }
+      .logger-pair { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 0.55rem; }
+      .logger-type-settings { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.15rem; }
+      .logger-type-settings > .logger-field { margin-bottom: 0; }
+      .logger-type-settings .logger-pair .logger-field { margin-bottom: 0; }
       .logger-name-look { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: start; }
       .logger-used-by { display: flex; flex-wrap: wrap; gap: 0.3rem; }
       .logger-chip {
