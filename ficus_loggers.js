@@ -15,6 +15,9 @@
  *   "rollup"    one value made from other loggers': `rollupConfig: { math: "sum" | "average" | "max" | "min" |
  *               "ratio", targetLoggers: [logger id, ...] }`. For ratio, `targetLoggers` is [numerator, denominator]
  *               (either may be "" until chosen).
+ * Every logger may also have `goalConfig` (optional target): numeric shape `{ enabled, operator, targetValue }` for
+ * numeric/currency/tally/rating/timer and roll-ups; boolean `{ enabled, operator: "=", targetValue: boolean }`;
+ * compound `{ enabled, fieldA: { enabled, operator, targetValue }, fieldB: { ... } }`.
  * `kind` follows the mode: "input" for standard (an Input Logger, the only kind a dot can record values into) and
  * "metric" for roll-ups (a Calculated Metric: read-only, worked out from its sources). A metric may be saved before
  * its sources are connected; until then its value is null, shown as "—".
@@ -38,6 +41,9 @@
   const ROLLUP_MATH = [["sum", "Sum"], ["average", "Average"], ["max", "Max"], ["min", "Min"], ["ratio", "Ratio"]];
   const TIMER_MODES = [["manual", "Manual Entry"], ["stopwatch", "Active Stopwatch"]];
   const RATING_SCALES = [["5", "1\u20135"], ["10", "1\u201310"]];
+  const GOAL_OPS = [[">", ">"], [">=", "\u2265"], ["=", "="], ["<=", "\u2264"], ["<", "<"]];
+  const GOAL_OP_SET = new Set(GOAL_OPS.map(([id]) => id));
+  const GOAL_ENABLE = [["off", "No Goal"], ["on", "Set Target"]];
   const COLORS = [
     ["Sage", "#8BA888"], ["Mint", "#A3C4BC"], ["Dusty Blue", "#7D98A1"], ["Navy", "#5B6C7E"],
     ["Terracotta", "#CC8B65"], ["Ochre", "#D4A373"], ["Warm Pink", "#D49A89"], ["Plum", "#9D7A8C"],
@@ -172,16 +178,97 @@
     else if (inputType === "rating") logger.ratingConfig = cleanRatingConfig(sources.ratingConfig);
   }
 
+  // Goal shape follows mode/inputType: numeric (incl. roll-ups), boolean, or compound (per-field targets).
+  const goalKindOf = (mode, inputType) => {
+    if (mode === "rollup") return "numeric";
+    if (inputType === "boolean") return "boolean";
+    if (inputType === "compound") return "compound";
+    return "numeric";
+  };
+
+  function cleanNumericGoalSlot(raw) {
+    const src = isObject(raw) ? raw : {};
+    const n = Number(src.targetValue);
+    return {
+      enabled: Boolean(src.enabled),
+      operator: GOAL_OP_SET.has(src.operator) ? src.operator : ">=",
+      targetValue: Number.isFinite(n) ? n : 0,
+    };
+  }
+
+  function cleanGoalConfig(raw, kind) {
+    if (kind === "boolean") {
+      const src = isObject(raw) ? raw : {};
+      return {
+        enabled: Boolean(src.enabled),
+        operator: "=",
+        targetValue: src.targetValue === false || src.targetValue === "false" ? false : true,
+      };
+    }
+    if (kind === "compound") {
+      const src = isObject(raw) ? raw : {};
+      const field = (slot) => {
+        const cleaned = cleanNumericGoalSlot(slot);
+        return { enabled: cleaned.enabled, operator: cleaned.operator, targetValue: cleaned.targetValue };
+      };
+      return { enabled: Boolean(src.enabled), fieldA: field(src.fieldA), fieldB: field(src.fieldB) };
+    }
+    const cleaned = cleanNumericGoalSlot(raw);
+    return { enabled: cleaned.enabled, operator: cleaned.operator, targetValue: cleaned.targetValue };
+  }
+
+  const defaultGoalConfig = (kind) => cleanGoalConfig(null, kind);
+
+  // Keep enabled/target where the shapes overlap; otherwise start a fresh shape for the new type.
+  function adaptGoalConfig(prev, nextKind) {
+    const src = isObject(prev) ? prev : {};
+    if (nextKind === "boolean") {
+      return cleanGoalConfig({
+        enabled: src.enabled,
+        operator: "=",
+        targetValue: typeof src.targetValue === "boolean" ? src.targetValue : true,
+      }, "boolean");
+    }
+    if (nextKind === "compound") {
+      if (isObject(src.fieldA) || isObject(src.fieldB)) return cleanGoalConfig(src, "compound");
+      const slot = cleanNumericGoalSlot(src);
+      return cleanGoalConfig({
+        enabled: slot.enabled,
+        fieldA: { enabled: slot.enabled, operator: slot.operator, targetValue: slot.targetValue },
+        fieldB: { enabled: false, operator: ">=", targetValue: 0 },
+      }, "compound");
+    }
+    if (isObject(src.fieldA)) {
+      const slot = cleanNumericGoalSlot(src.fieldA);
+      return cleanGoalConfig({
+        enabled: Boolean(src.enabled && slot.enabled),
+        operator: slot.operator,
+        targetValue: slot.targetValue,
+      }, "numeric");
+    }
+    return cleanGoalConfig(src, "numeric");
+  }
+
+  const hasActiveGoal = (logger) => {
+    const goal = logger?.goalConfig;
+    if (!goal?.enabled) return false;
+    if (logger.mode === "standard" && logger.inputType === "compound") {
+      return Boolean(goal.fieldA?.enabled || goal.fieldB?.enabled);
+    }
+    return true;
+  };
+
   // A logger in the shape the header describes; fields it doesn't know are kept as they are.
   // An old "formula" logger is read as a ratio roll-up (its A and B variables become the two targets).
   function cleanLogger(raw) {
     if (!isObject(raw) || raw.id == null || raw.id === "") return null;
     const {
-      inputType, unit, rollupConfig, formulaConfig,
+      inputType, unit, rollupConfig, formulaConfig, goalConfig,
       tallyConfig, booleanConfig, timerConfig, compoundConfig, ratingConfig,
       ...rest
     } = raw;
     for (const key of STANDARD_CONFIG_KEYS) delete rest[key];
+    delete rest.goalConfig;
     let mode = known(MODES, raw.mode) ? raw.mode : "standard";
     let math = "sum";
     let targets = [];
@@ -220,6 +307,7 @@
           : [...new Set(targets.filter((id) => id != null && id !== "").map(String))].filter((id) => id !== logger.id),
       };
     }
+    logger.goalConfig = adaptGoalConfig(goalConfig, goalKindOf(logger.mode, logger.inputType));
     return logger;
   }
 
@@ -566,6 +654,7 @@
     return {
       name: "", icon: "", color: DEFAULT_COLOR, groupId, mode: "standard", inputType: "numeric", unit: "",
       ...defaultStandardConfigs(),
+      goalConfig: defaultGoalConfig("numeric"),
       math: "sum", targets: [],
     };
   }
@@ -585,14 +674,20 @@
       });
     }
     if (logger.mode === "rollup") Object.assign(draft, { math: logger.rollupConfig.math, targets: [...logger.rollupConfig.targetLoggers] });
+    draft.goalConfig = cleanGoalConfig(logger.goalConfig, goalKindOf(draft.mode, draft.inputType));
     return draft;
   }
 
   // Drop configs that don't belong to the new input type so they can't be saved by accident.
   function switchInputType(draft, nextType) {
+    const prevKind = goalKindOf(draft.mode, draft.inputType);
     draft.inputType = nextType;
     Object.assign(draft, defaultStandardConfigs());
     if (!UNIT_TYPES.has(nextType)) draft.unit = "";
+    const nextKind = goalKindOf(draft.mode, nextType);
+    draft.goalConfig = prevKind === nextKind
+      ? cleanGoalConfig(draft.goalConfig, nextKind)
+      : adaptGoalConfig(draft.goalConfig, nextKind);
   }
 
   function h(tag, attrs = {}, ...children) {
@@ -623,6 +718,7 @@
     close: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
     tally: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M5.2 4.5v11M8.4 4.5v11M11.6 4.5v11M14.8 4.5v11M3 13.6 17 6.4"/></svg>',
     face: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M5.8 9.4c.9 1 2.5 1 3.4 0"/><path d="M6 6.4h.01M10 6.4h.01" stroke-width="2"/></svg>',
+    target: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><circle cx="8" cy="8" r="2.4"/><path d="M8 1.5v2.2M8 12.3v2.2M1.5 8h2.2M12.3 8h2.2" stroke-linecap="round"/></svg>',
   };
   const icon = (name) => {
     const span = h("span", { class: "logger-svg", "aria-hidden": "true" });
@@ -1250,11 +1346,12 @@
       : node.away ? `In ${home}`
         : metric ? (logger.rollupConfig.math === "ratio" ? `${unitOfId(loggers, logger.rollupConfig.targetLoggers[0])} / ${unitOfId(loggers, logger.rollupConfig.targetLoggers[1])}` : `from ${sources} logger${sources === 1 ? "" : "s"}`)
           : logger.unit || typeLabel(logger);
-    const label = [rowLabel(logger), value === "\u2014" ? "no value yet" : `value ${value}`, node.away && `in ${home}`, isNew && "not created yet"]
+    const withGoal = hasActiveGoal(logger);
+    const label = [rowLabel(logger), value === "\u2014" ? "no value yet" : `value ${value}`, node.away && `in ${home}`, isNew && "not created yet", withGoal && "has a goal"]
       .filter(Boolean).join(", ");
     return h("button", {
       type: "button",
-      class: `logger-node is-${logger.mode}${logger.mode === "rollup" && logger.rollupConfig.math === "ratio" ? " is-ratio" : ""}${selected ? " is-selected" : ""}${node.away ? " is-away" : ""}${isNew ? " is-new" : ""}`,
+      class: `logger-node is-${logger.mode}${logger.mode === "rollup" && logger.rollupConfig.math === "ratio" ? " is-ratio" : ""}${selected ? " is-selected" : ""}${node.away ? " is-away" : ""}${isNew ? " is-new" : ""}${withGoal ? " has-goal" : ""}`,
       style: `left:${node.x}px;top:${node.y}px;width:${NODE_W}px;height:${NODE_H}px;--logger-color:${logger.color}`,
       "data-node-id": logger.id, "aria-current": selected ? "true" : null, "aria-label": label,
       onclick: () => {
@@ -1264,6 +1361,7 @@
       },
     },
     h("span", { class: `logger-node-op${mark.word ? " is-word" : ""}`, title: mark.label, "aria-hidden": "true" }, mark.content),
+    withGoal && h("span", { class: "logger-node-goal", title: "Has a goal", "aria-hidden": "true" }, icon("target")),
     tile(logger, false, false),
     h("span", { class: "logger-node-text" },
       h("span", { class: "logger-node-name", text: logger.name }),
@@ -1569,7 +1667,11 @@
         "aria-description": labelOf(KINDS, kindOf(id)),
         onclick: () => {
           if (draft.mode === id) return;
+          const prevKind = goalKindOf(draft.mode, draft.inputType);
           draft.mode = id;
+          const nextKind = goalKindOf(draft.mode, draft.inputType);
+          if (prevKind !== nextKind) draft.goalConfig = adaptGoalConfig(draft.goalConfig, nextKind);
+          else draft.goalConfig = cleanGoalConfig(draft.goalConfig, nextKind);
           setStatus("");
           changed();
           renderInPlace(`[data-mode="${id}"]`);
@@ -1746,6 +1848,103 @@
       }
     }
 
+    const goalKind = goalKindOf(draft.mode, draft.inputType);
+    draft.goalConfig = cleanGoalConfig(draft.goalConfig, goalKind);
+
+    const goalEnable = h("div", { class: "logger-modes logger-goal-toggle", role: "radiogroup", "aria-label": "Goal" },
+      h("div", { class: "logger-mode-row" }, GOAL_ENABLE.map(([id, text]) => h("button", {
+        type: "button", class: "logger-mode", role: "radio",
+        "aria-checked": String(Boolean(draft.goalConfig.enabled) === (id === "on")),
+        "data-goal-enable": id, text,
+        onclick: () => {
+          const on = id === "on";
+          if (draft.goalConfig.enabled === on) return;
+          draft.goalConfig.enabled = on;
+          if (on && goalKind === "compound") {
+            if (!draft.goalConfig.fieldA.enabled && !draft.goalConfig.fieldB.enabled) {
+              draft.goalConfig.fieldA.enabled = true;
+            }
+          }
+          changed();
+          renderInPlace(`[data-goal-enable="${id}"]`);
+        },
+      }))));
+
+    const numberTarget = (slot, name) => {
+      const input = h("input", {
+        type: "number", class: "logger-input", name, step: "any", inputmode: "decimal",
+        oninput: (event) => {
+          const n = Number(event.target.value);
+          if (Number.isFinite(n)) slot.targetValue = n;
+          changed();
+        },
+      });
+      input.value = String(slot.targetValue ?? 0);
+      return input;
+    };
+    const opSelect = (slot, name, disabled = false) => {
+      const box = selectBox(name, GOAL_OPS, slot.operator, (event) => {
+        slot.operator = GOAL_OP_SET.has(event.target.value) ? event.target.value : ">=";
+        changed();
+      });
+      if (disabled) box.disabled = true;
+      return box;
+    };
+
+    let goalBody = null;
+    if (draft.goalConfig.enabled) {
+      if (goalKind === "boolean") {
+        const truth = selectBox("goal-bool", [
+          ["true", draft.booleanConfig.trueLabel || "Yes"],
+          ["false", draft.booleanConfig.falseLabel || "No"],
+        ], draft.goalConfig.targetValue ? "true" : "false", (event) => {
+          draft.goalConfig.targetValue = event.target.value !== "false";
+          changed();
+        });
+        goalBody = h("div", { class: "logger-pair logger-goal-fields" },
+          field("Operator", opSelect(draft.goalConfig, "goal-op", true)),
+          field("Target", truth));
+      } else if (goalKind === "compound") {
+        const compoundRow = (key, label) => {
+          const slot = draft.goalConfig[key];
+          const toggle = h("div", { class: "logger-modes logger-goal-toggle is-mini", role: "radiogroup", "aria-label": `${label} goal` },
+            h("div", { class: "logger-mode-row" }, GOAL_ENABLE.map(([id, text]) => h("button", {
+              type: "button", class: "logger-mode", role: "radio",
+              "aria-checked": String(Boolean(slot.enabled) === (id === "on")),
+              "data-goal-field": key, "data-goal-enable": id, text,
+              onclick: () => {
+                const on = id === "on";
+                if (slot.enabled === on) return;
+                slot.enabled = on;
+                changed();
+                renderInPlace(`[data-goal-field="${key}"][data-goal-enable="${id}"]`);
+              },
+            }))));
+          return h("div", { class: "logger-goal-compound" },
+            h("div", { class: "logger-goal-compound-head" },
+              h("span", { class: "logger-label", text: label }),
+              toggle),
+            slot.enabled && h("div", { class: "logger-pair logger-goal-fields" },
+              field("Operator", opSelect(slot, `goal-${key}-op`)),
+              field("Target", numberTarget(slot, `goal-${key}-value`))));
+        };
+        const aLabel = clip(draft.compoundConfig.fieldALabel, LABEL_MAX) || "Field A";
+        const bLabel = clip(draft.compoundConfig.fieldBLabel, LABEL_MAX) || "Field B";
+        goalBody = h("div", { class: "logger-type-settings" },
+          compoundRow("fieldA", aLabel),
+          compoundRow("fieldB", bLabel));
+      } else {
+        goalBody = h("div", { class: "logger-pair logger-goal-fields" },
+          field("Operator", opSelect(draft.goalConfig, "goal-op")),
+          field("Target", numberTarget(draft.goalConfig, "goal-value")));
+      }
+    }
+
+    const goalSection = h("div", { class: "logger-goal" },
+      h("span", { class: "logger-label", text: "Goal (optional)" }),
+      goalEnable,
+      goalBody);
+
     let foot;
     if (editing && ui.confirmDelete) {
       const names = users.map((user) => `"${user.name}"`);
@@ -1784,7 +1983,8 @@
             type: "button", class: "logger-chip", "aria-label": `Open ${user.name}`, onclick: () => select(user.id),
           }, tile(user), h("span", { class: "logger-row-name", text: user.name }))))),
         h("div", { class: "logger-field logger-mode-field" }, h("span", { class: "logger-label", text: "Mode" }), modes, kindNote),
-        h("div", { class: "logger-mode-panel" }, modePanel)),
+        h("div", { class: "logger-mode-panel" }, modePanel),
+        goalSection),
       foot);
   }
 
@@ -1805,11 +2005,13 @@
     delete raw.unit;
     delete raw.inputType;
     delete raw.rollupConfig;
+    delete raw.goalConfig;
     if (draft.mode === "standard") {
       Object.assign(raw, { inputType: draft.inputType });
       if (UNIT_TYPES.has(draft.inputType)) raw.unit = draft.unit;
       applyStandardConfig(raw, draft.inputType, draft);
     }
+    raw.goalConfig = cleanGoalConfig(draft.goalConfig, goalKindOf(draft.mode, draft.inputType));
     // A metric saves before its sources are connected (pending), showing — until they are.
     if (draft.mode === "rollup") {
       if (draft.math === "ratio") {

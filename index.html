@@ -19,7 +19,7 @@
     <script src="scrapboard.js?v=26"></script>
     <script src="quick_line.js?v=2"></script>
     <script src="space.js?v=92" defer></script>
-    <script src="ficus_loggers.js?v=7" defer></script>
+    <script src="ficus_loggers.js?v=8" defer></script>
     <script src="collection.js?v=19" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -1811,6 +1811,11 @@
         align-items: center; justify-content: center; padding: 0 0.3rem; border: 1px solid #d6d3d1; background: #fff;
         font-family: Georgia, "Times New Roman", serif; font-size: 0.85rem; font-weight: 700; line-height: 1; color: #44403c;
       }
+      .logger-node-goal {
+        position: absolute; top: -0.65rem; left: 0.45rem; display: inline-flex; width: 1.2rem; height: 1.2rem; align-items: center;
+        justify-content: center; border: 1px solid #d6d3d1; background: #fffbeb; color: #b45309;
+      }
+      .logger-node-goal .logger-svg { width: 0.75rem; height: 0.75rem; display: block; }
       .logger-node-op .logger-svg { width: 0.95rem; height: 0.95rem; }
       .logger-node-op.is-word { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.66rem; }
       .logger-node.is-rollup .logger-node-op { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; }
@@ -1860,6 +1865,18 @@
       .logger-type-settings { display: flex; flex-direction: column; gap: 0.5rem; margin-top: 0.15rem; }
       .logger-type-settings > .logger-field { margin-bottom: 0; }
       .logger-type-settings .logger-pair .logger-field { margin-bottom: 0; }
+      .logger-goal {
+        margin-top: 0.55rem; padding-top: 0.55rem; border-top: 1px solid #f0efed;
+        display: flex; flex-direction: column; gap: 0.4rem;
+      }
+      .logger-goal > .logger-label { margin: 0; }
+      .logger-goal-toggle { max-width: 16rem; }
+      .logger-goal-toggle.is-mini { max-width: 14rem; }
+      .logger-goal-fields { margin: 0; }
+      .logger-goal-fields .logger-field { margin-bottom: 0; }
+      .logger-goal-compound { display: flex; flex-direction: column; gap: 0.35rem; }
+      .logger-goal-compound-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.35rem; }
+      .logger-goal-compound-head .logger-label { margin: 0; }
       .logger-name-look { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: start; }
       .logger-used-by { display: flex; flex-wrap: wrap; gap: 0.3rem; }
       .logger-chip {
