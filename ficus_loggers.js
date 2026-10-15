@@ -8,22 +8,21 @@
  * `groupId` is a group's id, or "" for none. `mode` is one of:
  *   "standard"  logged by hand: `inputType` (currency, numeric, tally, boolean, timer, compound or rating), and for
  *               numeric and currency a `unit` ("kg", "$", "hours"; may be "")
- *   "rollup"    one value made from other loggers': `rollupConfig: { math: "sum" | "average" | "max" | "min",
- *               targetLoggers: [logger id, ...] }`
- *   "formula"   `formulaConfig: { expression: "A / B", variables: { A: logger id, B: logger id } }`; the expression
- *               may use numbers, the capital letters A to Z, + - * / and brackets (parseFormula). A variable without
- *               a logger yet is "".
+ *   "rollup"    one value made from other loggers': `rollupConfig: { math: "sum" | "average" | "max" | "min" |
+ *               "ratio", targetLoggers: [logger id, ...] }`. For ratio, `targetLoggers` is [numerator, denominator]
+ *               (either may be "" until chosen).
  * `kind` follows the mode: "input" for standard (an Input Logger, the only kind a dot can record values into) and
- * "metric" for roll-ups and formulas (a Calculated Metric: read-only, worked out from its sources). A metric may be
- * saved before its sources are connected; until then its value is null, shown as "—".
- * Only the active mode's fields are kept. A roll-up or formula can't use itself, directly or through other loggers.
+ * "metric" for roll-ups (a Calculated Metric: read-only, worked out from its sources). A metric may be saved before
+ * its sources are connected; until then its value is null, shown as "—".
+ * Only the active mode's fields are kept. A roll-up can't use itself, directly or through other loggers.
+ * A saved logger with the old "formula" mode is read as a ratio roll-up (A / B from its variables).
  */
 (function () {
   "use strict";
 
-  const MODES = [["standard", "Standard Input"], ["rollup", "Roll-up"], ["formula", "Formula"]];
+  const MODES = [["standard", "Standard Input"], ["rollup", "Calculated Roll-up"]];
   const KINDS = [["input", "Input Logger"], ["metric", "Calculated Metric"]];
-  const kindOf = (mode) => (mode === "rollup" || mode === "formula" ? "metric" : "input");
+  const kindOf = (mode) => (mode === "rollup" ? "metric" : "input");
   const FX = "\u0192";
   const INPUT_TYPES = [
     ["currency", "Currency"], ["numeric", "Numeric"], ["tally", "Tally"], ["boolean", "Boolean"],
@@ -31,7 +30,7 @@
   ];
   const UNIT_TYPES = new Set(["numeric", "currency"]);
   const unitPlaceholder = (inputType) => (inputType === "currency" ? "e.g. $, AUD, \u20ac" : "e.g. kg, hours, km");
-  const ROLLUP_MATH = [["sum", "Sum"], ["average", "Average"], ["max", "Max"], ["min", "Min"]];
+  const ROLLUP_MATH = [["sum", "Sum"], ["average", "Average"], ["max", "Max"], ["min", "Min"], ["ratio", "Ratio"]];
   const COLORS = [
     ["Blue", "#2563EB"], ["Sky", "#0EA5E9"], ["Teal", "#0D9488"], ["Green", "#16A34A"], ["Amber", "#D97706"],
     ["Orange", "#EA580C"], ["Red", "#DC2626"], ["Pink", "#DB2777"], ["Violet", "#7C3AED"], ["Slate", "#475569"],
@@ -40,7 +39,6 @@
   const NAME_MAX = 80;
   const GROUP_MAX = 60;
   const UNIT_MAX = 24;
-  const EXPRESSION_MAX = 200;
 
   const store = () => window.FicusStore;
   const isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -66,11 +64,36 @@
     return { ...raw, id: String(raw.id), name: clip(raw.name, GROUP_MAX) || "Untitled group" };
   }
 
+  // A ratio's two slots [numerator, denominator]; missing or self-referencing ids become "".
+  function ratioTargets(targets, selfId) {
+    const list = Array.isArray(targets) ? targets : [];
+    const slot = (value) => {
+      if (value == null || value === "") return "";
+      const id = String(value);
+      return id === selfId ? "" : id;
+    };
+    return [slot(list[0]), slot(list[1])];
+  }
+
   // A logger in the shape the header describes; fields it doesn't know are kept as they are.
+  // An old "formula" logger is read as a ratio roll-up (its A and B variables become the two targets).
   function cleanLogger(raw) {
     if (!isObject(raw) || raw.id == null || raw.id === "") return null;
     const { inputType, unit, rollupConfig, formulaConfig, ...rest } = raw;
-    const mode = known(MODES, raw.mode) ? raw.mode : "standard";
+    let mode = known(MODES, raw.mode) ? raw.mode : "standard";
+    let math = "sum";
+    let targets = [];
+    if (raw.mode === "formula") {
+      mode = "rollup";
+      math = "ratio";
+      const config = isObject(formulaConfig) ? formulaConfig : {};
+      const variables = isObject(config.variables) ? config.variables : {};
+      targets = [variables.A, variables.B];
+    } else if (mode === "rollup") {
+      const config = isObject(rollupConfig) ? rollupConfig : {};
+      math = known(ROLLUP_MATH, config.math) ? config.math : "sum";
+      targets = Array.isArray(config.targetLoggers) ? config.targetLoggers : [];
+    }
     const logger = {
       ...rest,
       id: String(raw.id),
@@ -84,20 +107,13 @@
     if (mode === "standard") {
       logger.inputType = known(INPUT_TYPES, inputType) ? inputType : "numeric";
       if (UNIT_TYPES.has(logger.inputType)) logger.unit = clip(unit, UNIT_MAX);
-    } else if (mode === "rollup") {
-      const config = isObject(rollupConfig) ? rollupConfig : {};
-      const targets = Array.isArray(config.targetLoggers) ? config.targetLoggers : [];
-      logger.rollupConfig = {
-        math: known(ROLLUP_MATH, config.math) ? config.math : "sum",
-        targetLoggers: [...new Set(targets.filter((id) => id != null && id !== "").map(String))].filter((id) => id !== logger.id),
-      };
     } else {
-      const config = isObject(formulaConfig) ? formulaConfig : {};
-      const variables = {};
-      for (const [name, id] of Object.entries(isObject(config.variables) ? config.variables : {})) {
-        if (/^[A-Z]$/.test(name)) variables[name] = id == null || id === logger.id ? "" : String(id);
-      }
-      logger.formulaConfig = { expression: clip(config.expression, EXPRESSION_MAX), variables };
+      logger.rollupConfig = {
+        math,
+        targetLoggers: math === "ratio"
+          ? ratioTargets(targets, logger.id)
+          : [...new Set(targets.filter((id) => id != null && id !== "").map(String))].filter((id) => id !== logger.id),
+      };
     }
     return logger;
   }
@@ -125,11 +141,10 @@
     return { loggers, groups };
   }
 
-  // The loggers a roll-up or formula reads from.
+  // The loggers a roll-up reads from (empty slots in a ratio are skipped).
   function sourcesOf(logger) {
-    if (logger.mode === "rollup") return logger.rollupConfig.targetLoggers;
-    if (logger.mode === "formula") return Object.values(logger.formulaConfig.variables).filter(Boolean);
-    return [];
+    if (logger.mode !== "rollup") return [];
+    return logger.rollupConfig.targetLoggers.filter(Boolean);
   }
 
   // Whether the logger `fromId` reads from `targetId`, directly or through the loggers it reads from.
@@ -151,95 +166,13 @@
     return false;
   }
 
-  /* An expression as a tree, with the variables it uses (sorted), or { error } saying what's wrong with it. Numbers,
-     the capital letters A to Z, + - * / (× ÷ − too) and brackets; a leading - or + signs what follows. */
-  function parseFormula(expression) {
-    const src = String(expression ?? "");
-    const tokens = [];
-    const ops = { "+": "+", "-": "-", "\u2212": "-", "*": "*", "\u00d7": "*", "/": "/", "\u00f7": "/", "(": "(", ")": ")" };
-    for (let i = 0; i < src.length;) {
-      const rest = src.slice(i);
-      const space = /^\s+/.exec(rest);
-      const number = /^(\d+(\.\d*)?|\.\d+)/.exec(rest);
-      const word = /^[A-Za-z_]+/.exec(rest);
-      if (space) {
-        i += space[0].length;
-      } else if (number) {
-        tokens.push({ num: Number(number[0]) });
-        i += number[0].length;
-      } else if (word) {
-        if (!/^[A-Z]$/.test(word[0])) return { error: `"${word[0]}" isn't a variable: use single capital letters (A, B, C…).` };
-        tokens.push({ v: word[0] });
-        i += 1;
-      } else if (ops[src[i]]) {
-        tokens.push({ op: ops[src[i]] });
-        i += 1;
-      } else {
-        return { error: `"${src[i]}" can't be used: only A to Z, numbers, + - * / and brackets.` };
-      }
-    }
-    if (!tokens.length) return { error: "Write an expression, e.g. A / B." };
-    let at = 0;
-    const next = () => tokens[at];
-    const expr = () => {
-      let node = term();
-      while (next()?.op === "+" || next()?.op === "-") node = { op: tokens[at++].op, a: node, b: term() };
-      return node;
-    };
-    const term = () => {
-      let node = factor();
-      while (next()?.op === "*" || next()?.op === "/") node = { op: tokens[at++].op, a: node, b: factor() };
-      return node;
-    };
-    const factor = () => {
-      const token = tokens[at++];
-      if (!token) throw new SyntaxError("The expression stops too soon.");
-      if (token.op === "-") return { neg: factor() };
-      if (token.op === "+") return factor();
-      if ("num" in token) return { num: token.num };
-      if (token.v) return { v: token.v };
-      if (token.op === "(") {
-        const node = expr();
-        if (next()?.op !== ")") throw new SyntaxError("A bracket isn't closed.");
-        at += 1;
-        return node;
-      }
-      throw new SyntaxError(`"${token.op}" is out of place.`);
-    };
-    try {
-      const tree = expr();
-      if (at < tokens.length) {
-        throw new SyntaxError(next().op === ")" ? "A closing bracket has no opening one." : "Two values need a + - * or / between them.");
-      }
-      return { tree, variables: [...new Set(tokens.filter((token) => token.v).map((token) => token.v))].sort() };
-    } catch (err) {
-      return { error: err.message };
-    }
-  }
-
-  // The expression's value for `values` ({ A: 3, B: 4 }), or null if it can't be worked out (a variable without a
-  // number, or a division by zero).
-  function evaluateFormula(expression, values = {}) {
-    const parsed = parseFormula(expression);
-    if (parsed.error) return null;
-    const run = (node) => {
-      if ("num" in node) return node.num;
-      if (node.v) return node.v in values ? Number(values[node.v]) : NaN;
-      if (node.neg) return -run(node.neg);
-      const a = run(node.a);
-      const b = run(node.b);
-      if (node.op === "+") return a + b;
-      if (node.op === "-") return a - b;
-      if (node.op === "*") return a * b;
-      return b === 0 ? NaN : a / b;
-    };
-    const result = run(parsed.tree);
-    return Number.isFinite(result) ? result : null;
-  }
-
-  // A roll-up's value from its sources' numbers, or null with none to go on.
+  // A roll-up's value from its sources' numbers, or null with none to go on (ratio needs both, and a non-zero B).
   function rollUp(math, numbers) {
     const list = (numbers || []).map(Number).filter(Number.isFinite);
+    if (math === "ratio") {
+      if (list.length < 2 || list[1] === 0) return null;
+      return list[0] / list[1];
+    }
     if (!list.length) return null;
     if (math === "average") return list.reduce((sum, n) => sum + n, 0) / list.length;
     if (math === "max") return Math.max(...list);
@@ -247,12 +180,17 @@
     return list.reduce((sum, n) => sum + n, 0);
   }
 
-  // What a metric still lacks: ["sources"] for a roll-up with none, else the formula's letters without a logger.
+  // What a metric still lacks: ["sources"] for a multi-source roll-up with none, else "A" and/or "B" for a ratio.
   function pendingOf(logger) {
-    if (logger.mode === "rollup") return logger.rollupConfig.targetLoggers.length ? [] : ["sources"];
-    if (logger.mode !== "formula") return [];
-    const parsed = parseFormula(logger.formulaConfig.expression);
-    return parsed.error ? [] : parsed.variables.filter((letter) => !logger.formulaConfig.variables[letter]);
+    if (logger.mode !== "rollup") return [];
+    const { math, targetLoggers } = logger.rollupConfig;
+    if (math === "ratio") {
+      const missing = [];
+      if (!targetLoggers[0]) missing.push("A");
+      if (!targetLoggers[1]) missing.push("B");
+      return missing;
+    }
+    return targetLoggers.length ? [] : ["sources"];
   }
 
   /* A logger's value: an input logger's from `values` ({ [logger id]: number }), a metric's worked out from its
@@ -269,16 +207,14 @@
         return Number.isFinite(number) ? number : null;
       }
       working.add(key);
+      const { math, targetLoggers } = logger.rollupConfig;
       let result;
-      if (logger.mode === "rollup") {
-        result = rollUp(logger.rollupConfig.math, logger.rollupConfig.targetLoggers.map(run).filter((n) => n != null));
+      if (math === "ratio") {
+        const a = targetLoggers[0] ? run(targetLoggers[0]) : null;
+        const b = targetLoggers[1] ? run(targetLoggers[1]) : null;
+        result = rollUp("ratio", [a, b].filter((n) => n != null).length === 2 ? [a, b] : []);
       } else {
-        const vars = {};
-        for (const [letter, source] of Object.entries(logger.formulaConfig.variables)) {
-          const number = source ? run(source) : null;
-          if (number != null) vars[letter] = number;
-        }
-        result = evaluateFormula(logger.formulaConfig.expression, vars);
+        result = rollUp(math, targetLoggers.map(run).filter((n) => n != null));
       }
       working.delete(key);
       return result;
@@ -293,8 +229,22 @@
   // How a logger is filled in: its input type, or how it's worked out.
   function typeLabel(logger) {
     if (logger.mode === "rollup") return `Roll-up \u00b7 ${labelOf(ROLLUP_MATH, logger.rollupConfig.math)}`;
-    if (logger.mode === "formula") return "Formula";
     return labelOf(INPUT_TYPES, logger.inputType);
+  }
+
+  // Unit text for a source id from `loggers`, used by the ratio's "Output Unit" line.
+  function unitOfId(loggers, id) {
+    const logger = loggers.find((row) => row.id === id);
+    if (!logger) return "\u2014";
+    if (logger.mode === "standard") {
+      if (UNIT_TYPES.has(logger.inputType) && logger.unit) return logger.unit;
+      return labelOf(INPUT_TYPES, logger.inputType).toLowerCase() || "\u2014";
+    }
+    if (logger.mode === "rollup" && logger.rollupConfig.math === "ratio") {
+      const [a, b] = logger.rollupConfig.targetLoggers;
+      return `${unitOfId(loggers, a)} / ${unitOfId(loggers, b)}`;
+    }
+    return labelOf(ROLLUP_MATH, logger.rollupConfig.math).toLowerCase();
   }
 
   // The badge text: "Input · Numeric", or "ƒ Roll-up · Sum" for a calculated metric.
@@ -315,7 +265,8 @@
   /* Group `key`'s loggers laid out as a family tree in a canvas `viewWidth` wide: each metric a row above the loggers
      it reads from, joined by lines (a source in another group shows too, as `away`), and the input loggers nothing
      here reads from in rows of their own at the bottom (`loose`). A metric still missing sources gets a dashed stub
-     for each: "sources" for a roll-up, the letter for a formula. Rows are ordered to keep lines from crossing. */
+     for each: "sources" for a multi-source roll-up, or "A"/"B" for a ratio. Rows are ordered to keep lines from
+     crossing. */
   function layoutTree(loggers, key, viewWidth = 0) {
     const byId = new Map(loggers.map((logger) => [logger.id, logger]));
     const members = loggers.filter((logger) => logger.groupId === key);
@@ -334,13 +285,14 @@
 
     const edges = [];
     for (const logger of members) {
-      if (logger.mode === "rollup") {
-        for (const to of logger.rollupConfig.targetLoggers) if (shown.has(to)) edges.push({ from: logger.id, to, letter: "", away: away.has(to) });
-      } else if (logger.mode === "formula") {
-        for (const letter of Object.keys(logger.formulaConfig.variables).sort()) {
-          const to = logger.formulaConfig.variables[letter];
+      if (logger.mode !== "rollup") continue;
+      const { math, targetLoggers } = logger.rollupConfig;
+      if (math === "ratio") {
+        [["A", targetLoggers[0]], ["B", targetLoggers[1]]].forEach(([letter, to]) => {
           if (to && shown.has(to)) edges.push({ from: logger.id, to, letter, away: away.has(to) });
-        }
+        });
+      } else {
+        for (const to of targetLoggers) if (shown.has(to)) edges.push({ from: logger.id, to, letter: "", away: away.has(to) });
       }
     }
     const parents = new Map(nodes.map((logger) => [logger.id, []]));
@@ -464,18 +416,20 @@
   /* ---------- Manage Loggers ---------- */
 
   /* Three parts: the groups down the left (a strip along the top on a phone); the open group's loggers as a tree
-     (layoutTree) on the right; and under the tree, the drawer with the selected node's form. A saved logger saves
-     as it's edited and its node follows each change; a new one is a dashed node until Create Logger.
+     (layoutTree) on the right; and under the tree, a collapsible sheet with the selected node's form. A saved logger
+     saves as it's edited and its node follows each change; a new one is a dashed node until Create Logger.
      `groupKey` is the open group's id ("" for No group). `draft` is the drawer's form, null when no node is
      selected, kept across mode switches so flipping between modes loses nothing; `selectedId` is its logger's id,
-     null while it's new. `quick` is the small form that makes an input logger from inside a roll-up's sources or
-     beside a formula's letter ({ mode, letter, name, inputType, unit, groupId, error }). */
+     null while it's new. `sheetCollapsed` shrinks the sheet to the name and "Tap to edit". `quick` is the small form
+     that makes an input logger from inside a roll-up's sources or beside a ratio's A/B
+     ({ mode, letter, name, inputType, unit, groupId, error }). */
   const NEW_ID = "__new_logger__";
   const SAVE_PAUSE = 900;
   const ui = {
     groupKey: null,
     selectedId: null,
     draft: null,
+    sheetCollapsed: false,
     groupEdit: null,
     groupConfirm: null,
     confirmDelete: false,
@@ -486,6 +440,7 @@
   };
   let el = null;
   let pan = null;
+  let sheetDrag = null;
 
   // Logging values isn't built yet, so no input logger has a latest value and every node shows "—".
   const latestValues = () => ({});
@@ -493,7 +448,7 @@
   function blankDraft(groupId = "") {
     return {
       name: "", icon: "", color: DEFAULT_COLOR, groupId, mode: "standard", inputType: "numeric", unit: "",
-      math: "sum", targets: [], expression: "A / B", variables: {},
+      math: "sum", targets: [],
     };
   }
 
@@ -502,7 +457,6 @@
     Object.assign(draft, { name: logger.name, icon: logger.icon, color: logger.color, mode: logger.mode });
     if (logger.mode === "standard") Object.assign(draft, { inputType: logger.inputType, unit: logger.unit || "" });
     if (logger.mode === "rollup") Object.assign(draft, { math: logger.rollupConfig.math, targets: [...logger.rollupConfig.targetLoggers] });
-    if (logger.mode === "formula") Object.assign(draft, { expression: logger.formulaConfig.expression, variables: { ...logger.formulaConfig.variables } });
     return draft;
   }
 
@@ -552,7 +506,7 @@
   function badge(logger, override) {
     const metric = kindOf(logger.mode) === "metric";
     return h("span", {
-      class: `logger-badge is-${logger.mode}`,
+      class: `logger-badge is-${logger.mode}${logger.mode === "rollup" && logger.rollupConfig.math === "ratio" ? " is-ratio" : ""}`,
       title: override ? null : metric ? "Calculated metric: worked out from other loggers, read-only" : "Input logger: its values are recorded in dots",
     }, override || badgeText(logger));
   }
@@ -563,20 +517,15 @@
     return `${logger.name}, ${kind}, ${typeLabel(logger).toLowerCase()}${pendingOf(logger).length ? ", sources pending" : ""}`;
   }
 
-  // The operator on a node's corner: a tally for an input logger, Σ x̄ max min for a roll-up, ƒ for a formula (A:B
-  // for a plain ratio of two loggers).
+  // The operator on a node's corner: a tally for an input logger, Σ x̄ max min for a roll-up, A:B for a ratio.
   function opMark(logger) {
     if (logger.mode === "standard") return { content: icon("tally"), label: "Input logger" };
-    if (logger.mode === "rollup") {
-      const math = logger.rollupConfig.math;
-      return {
-        content: { sum: "\u03a3", average: "x\u0304", max: "max", min: "min" }[math],
-        label: `${labelOf(ROLLUP_MATH, math)} roll-up`, word: math === "max" || math === "min",
-      };
-    }
-    const tree = parseFormula(logger.formulaConfig.expression).tree;
-    if (tree?.op === "/" && tree.a.v && tree.b.v) return { content: `${tree.a.v}:${tree.b.v}`, label: "Ratio formula", word: true };
-    return { content: FX, label: "Formula" };
+    const math = logger.rollupConfig.math;
+    if (math === "ratio") return { content: "A:B", label: "Ratio roll-up", word: true };
+    return {
+      content: { sum: "\u03a3", average: "x\u0304", max: "max", min: "min" }[math],
+      label: `${labelOf(ROLLUP_MATH, math)} roll-up`, word: math === "max" || math === "min",
+    };
   }
 
   const groupName = (groups, key) => (key ? groups.find((group) => group.id === key)?.name || "No group" : "No group");
@@ -655,10 +604,70 @@
     el.canvas.addEventListener("pointercancel", end);
   }
 
+  // Dragging the sheet's handle down collapses it; dragging up expands it. A tap (or keyboard click) toggles.
+  function bindSheetHandle(handle) {
+    const coords = (event) => window.FicusInput.getCoordinates(event);
+    let skipClick = false;
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button != null && event.button !== 0) return;
+      const at = coords(event);
+      sheetDrag = { id: event.pointerId, y: at.y, moved: false };
+      handle.setPointerCapture(event.pointerId);
+      event.preventDefault();
+    });
+    handle.addEventListener("pointermove", (event) => {
+      if (!sheetDrag || sheetDrag.id !== event.pointerId) return;
+      const at = coords(event);
+      if (Math.abs(at.y - sheetDrag.y) > 8) sheetDrag.moved = true;
+    });
+    const end = (event) => {
+      if (!sheetDrag || sheetDrag.id !== event.pointerId) return;
+      const at = coords(event);
+      const dy = at.y - sheetDrag.y;
+      const moved = sheetDrag.moved;
+      sheetDrag = null;
+      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
+      if (!moved) return;
+      skipClick = true;
+      if (dy > 28 && !ui.sheetCollapsed) setSheetCollapsed(true);
+      else if (dy < -28 && ui.sheetCollapsed) setSheetCollapsed(false);
+    };
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+    handle.addEventListener("click", () => {
+      if (skipClick) {
+        skipClick = false;
+        return;
+      }
+      setSheetCollapsed(!ui.sheetCollapsed);
+    });
+  }
+
+  function setSheetCollapsed(collapsed) {
+    if (ui.sheetCollapsed === collapsed) return;
+    ui.sheetCollapsed = collapsed;
+    const { loggers, groups } = readAll();
+    renderDrawer(loggers, groups);
+    syncStage();
+    // The canvas grows or shrinks with the sheet; re-lay the tree and keep the selected node in view.
+    requestAnimationFrame(() => {
+      renderTree(loggers, groups);
+      const id = ui.selectedId || (ui.draft ? NEW_ID : null);
+      if (id) focusNode(id, false);
+    });
+  }
+
+  function syncStage() {
+    el.stage.classList.toggle("is-idle", !ui.draft);
+    el.stage.classList.toggle("is-collapsed", Boolean(ui.draft && ui.sheetCollapsed));
+    el.editor.classList.toggle("is-collapsed", Boolean(ui.draft && ui.sheetCollapsed));
+  }
+
   function open() {
     if (!init()) return;
     Object.assign(ui, {
-      selectedId: null, draft: null, groupEdit: null, groupConfirm: null, confirmDelete: false, quick: null, status: { text: "", error: false },
+      selectedId: null, draft: null, sheetCollapsed: false, groupEdit: null, groupConfirm: null, confirmDelete: false,
+      quick: null, status: { text: "", error: false },
     });
     const { loggers, groups } = readAll();
     if (!groupKeys(loggers, groups).includes(ui.groupKey)) {
@@ -682,7 +691,10 @@
   // A new logger in the open group: a dashed node, and its form in the drawer.
   function startNew() {
     settle();
-    Object.assign(ui, { selectedId: null, draft: blankDraft(ui.groupKey), confirmDelete: false, quick: null, status: { text: "", error: false } });
+    Object.assign(ui, {
+      selectedId: null, draft: blankDraft(ui.groupKey), sheetCollapsed: false, confirmDelete: false, quick: null,
+      status: { text: "", error: false },
+    });
     render(() => {
       focusNode(NEW_ID, false);
       const name = el.editor.querySelector("[name='name']");
@@ -696,8 +708,8 @@
     if (!logger) return;
     settle();
     Object.assign(ui, {
-      groupKey: logger.groupId, selectedId: id, draft: draftOf(logger), confirmDelete: false, quick: null, groupConfirm: null,
-      status: { text: "", error: false },
+      groupKey: logger.groupId, selectedId: id, draft: draftOf(logger), sheetCollapsed: false, confirmDelete: false,
+      quick: null, groupConfirm: null, status: { text: "", error: false },
     });
     render(() => focusNode(id));
   }
@@ -705,7 +717,7 @@
   function deselect() {
     const id = ui.selectedId;
     settle();
-    Object.assign(ui, { selectedId: null, draft: null, confirmDelete: false, quick: null, status: { text: "", error: false } });
+    Object.assign(ui, { selectedId: null, draft: null, sheetCollapsed: false, confirmDelete: false, quick: null, status: { text: "", error: false } });
     render(() => (id && focusNode(id)) || el.addNode.focus({ preventScroll: true }));
   }
 
@@ -727,7 +739,9 @@
   }
 
   function settleState(loggers, groups) {
-    if (ui.selectedId && !loggers.some((logger) => logger.id === ui.selectedId)) Object.assign(ui, { selectedId: null, draft: null, confirmDelete: false });
+    if (ui.selectedId && !loggers.some((logger) => logger.id === ui.selectedId)) {
+      Object.assign(ui, { selectedId: null, draft: null, sheetCollapsed: false, confirmDelete: false });
+    }
     if (ui.quick && ui.quick.mode !== ui.draft?.mode) ui.quick = null;
     const keys = groupKeys(loggers, groups);
     if (!keys.includes(ui.groupKey)) ui.groupKey = keys[0];
@@ -736,7 +750,7 @@
   function render(then) {
     const { loggers, groups } = readAll();
     settleState(loggers, groups);
-    el.stage.classList.toggle("is-idle", !ui.draft);
+    syncStage();
     renderGroups(loggers, groups);
     renderTree(loggers, groups);
     renderDrawer(loggers, groups);
@@ -747,6 +761,7 @@
   function refresh() {
     const { loggers, groups } = readAll();
     settleState(loggers, groups);
+    syncStage();
     renderGroups(loggers, groups);
     renderTree(loggers, groups);
   }
@@ -816,7 +831,7 @@
     settle();
     Object.assign(ui, { groupKey: key, groupConfirm: null });
     if (ui.draft && !ui.selectedId) ui.draft.groupId = key;
-    else Object.assign(ui, { selectedId: null, draft: null, confirmDelete: false, quick: null, status: { text: "", error: false } });
+    else Object.assign(ui, { selectedId: null, draft: null, sheetCollapsed: false, confirmDelete: false, quick: null, status: { text: "", error: false } });
   }
 
   function openGroup(key) {
@@ -960,18 +975,19 @@
     const sources = new Set(sourcesOf(logger)).size;
     const note = isNew ? "Not created yet"
       : node.away ? `In ${home}`
-        : metric ? `from ${sources} logger${sources === 1 ? "" : "s"}`
+        : metric ? (logger.rollupConfig.math === "ratio" ? `${unitOfId(loggers, logger.rollupConfig.targetLoggers[0])} / ${unitOfId(loggers, logger.rollupConfig.targetLoggers[1])}` : `from ${sources} logger${sources === 1 ? "" : "s"}`)
           : logger.unit || typeLabel(logger);
     const label = [rowLabel(logger), value === "\u2014" ? "no value yet" : `value ${value}`, node.away && `in ${home}`, isNew && "not created yet"]
       .filter(Boolean).join(", ");
     return h("button", {
       type: "button",
-      class: `logger-node is-${logger.mode}${selected ? " is-selected" : ""}${node.away ? " is-away" : ""}${isNew ? " is-new" : ""}`,
+      class: `logger-node is-${logger.mode}${logger.mode === "rollup" && logger.rollupConfig.math === "ratio" ? " is-ratio" : ""}${selected ? " is-selected" : ""}${node.away ? " is-away" : ""}${isNew ? " is-new" : ""}`,
       style: `left:${node.x}px;top:${node.y}px;width:${NODE_W}px;height:${NODE_H}px;--logger-color:${logger.color}`,
       "data-node-id": logger.id, "aria-current": selected ? "true" : null, "aria-label": label,
       onclick: () => {
         if (isNew) el.editor.querySelector("[name='name']")?.focus();
         else if (!selected) select(logger.id);
+        else if (ui.sheetCollapsed) setSheetCollapsed(false);
       },
     },
     h("span", { class: `logger-node-op${mark.word ? " is-word" : ""}`, title: mark.label, "aria-hidden": "true" }, mark.content),
@@ -984,7 +1000,7 @@
           : h("span", { class: "logger-node-note", text: note }))));
   }
 
-  /* ---------- The drawer ---------- */
+  /* ---------- The drawer (collapsible bottom sheet) ---------- */
 
   function field(labelText, control, hint) {
     const id = control.id || (control.id = `logger-field-${Math.random().toString(36).slice(2, 8)}`);
@@ -1008,11 +1024,36 @@
         statusLine()));
       return;
     }
+
     const editing = ui.selectedId ? loggers.find((logger) => logger.id === ui.selectedId) : null;
+    const titleText = editing
+      ? (clip(draft.name, NAME_MAX) || editing.name)
+      : (clip(draft.name, NAME_MAX) || `New logger in ${groupName(groups, draft.groupId)}`);
+
+    const handle = h("button", {
+      type: "button", class: "logger-sheet-handle", "aria-label": ui.sheetCollapsed ? "Expand details" : "Collapse details",
+      "aria-expanded": String(!ui.sheetCollapsed), title: ui.sheetCollapsed ? "Tap to edit" : "Drag down or tap to collapse",
+    }, h("span", { class: "logger-sheet-pill", "aria-hidden": "true" }));
+    bindSheetHandle(handle);
+
+    if (ui.sheetCollapsed) {
+      el.editor.replaceChildren(
+        handle,
+        h("button", {
+          type: "button", class: "logger-sheet-summary", "aria-label": `Expand details for ${titleText}`,
+          onclick: () => setSheetCollapsed(false),
+        },
+        h("span", { class: "logger-sheet-summary-name", text: titleText }),
+        h("span", { class: "logger-sheet-summary-hint", text: "Tap to edit" })),
+        statusLine());
+      return;
+    }
+
     const others = loggers.filter((logger) => logger.id !== ui.selectedId);
     // Loggers this one can't read from: those that already read from it (a loop).
     const loops = new Set(editing ? others.filter((logger) => readsFrom(loggers, logger.id, editing.id)).map((logger) => logger.id) : []);
     const users = editing ? others.filter((logger) => sourcesOf(logger).includes(editing.id)) : [];
+    const pickOptions = [["", "Choose a logger\u2026"], ...others.filter((logger) => !loops.has(logger.id)).map((logger) => [logger.id, `${logger.name} (${badgeText(logger)})`])];
 
     const heading = h("h3", {
       class: "logger-editor-title", tabindex: "-1", "data-logger-heading": "",
@@ -1057,25 +1098,19 @@
 
     const group = selectBox("group", [["", "No group"], ...groups.map((row) => [row.id, row.name])], draft.groupId, (event) => { draft.groupId = event.target.value; changed(); });
 
-    // Standard Input under "Input Logger"; Roll-up and Formula under "ƒ Calculated Metric".
-    const modeButton = ([id, text]) => h("button", {
-      type: "button", class: "logger-mode", role: "radio", "aria-checked": String(draft.mode === id), "data-mode": id, text,
-      "aria-description": labelOf(KINDS, kindOf(id)),
-      onclick: () => {
-        if (draft.mode === id) return;
-        draft.mode = id;
-        setStatus("");
-        changed();
-        renderInPlace(`[data-mode="${id}"]`);
-      },
-    });
+    // Standard Input | Calculated Roll-up.
     const modes = h("div", { class: "logger-modes", role: "radiogroup", "aria-label": "Mode" },
-      h("div", { class: "logger-mode-set is-input" },
-        h("span", { class: "logger-mode-kind", text: labelOf(KINDS, "input") }),
-        h("div", { class: "logger-mode-row" }, modeButton(MODES[0]))),
-      h("div", { class: "logger-mode-set is-metric" },
-        h("span", { class: "logger-mode-kind" }, h("span", { class: "logger-fx", "aria-hidden": "true", text: FX }), ` ${labelOf(KINDS, "metric")}`),
-        h("div", { class: "logger-mode-row" }, MODES.slice(1).map(modeButton))));
+      h("div", { class: "logger-mode-row" }, MODES.map(([id, text]) => h("button", {
+        type: "button", class: "logger-mode", role: "radio", "aria-checked": String(draft.mode === id), "data-mode": id, text,
+        "aria-description": labelOf(KINDS, kindOf(id)),
+        onclick: () => {
+          if (draft.mode === id) return;
+          draft.mode = id;
+          setStatus("");
+          changed();
+          renderInPlace(`[data-mode="${id}"]`);
+        },
+      }))));
     const kindNote = kindOf(draft.mode) === "metric"
       ? h("p", { class: "logger-kind-note is-metric" }, h("span", { class: "logger-fx", "aria-hidden": "true", text: FX }), " ",
         h("strong", { text: "Calculated metric." }), " Read-only: Ficus works it out from its sources, and it shows \u2014 until they're connected.")
@@ -1098,75 +1133,79 @@
         changed();
       });
       modePanel = [h("div", { class: "logger-pair" }, field("Input Type", type), unitField)];
-    } else if (draft.mode === "rollup") {
-      const math = selectBox("math", ROLLUP_MATH, draft.math, (event) => { draft.math = event.target.value; changed(); });
-      const checks = others.map((logger) => {
-        const blocked = loops.has(logger.id);
-        const box = h("input", {
-          type: "checkbox", value: logger.id, disabled: blocked,
-          onchange: (event) => {
-            const set = new Set(draft.targets);
-            if (event.target.checked) set.add(logger.id);
-            else set.delete(logger.id);
-            draft.targets = others.map((row) => row.id).filter((id) => set.has(id));
-            changed();
-          },
-        });
-        box.checked = draft.targets.includes(logger.id) && !blocked;
-        return h("label", { class: `logger-check${blocked ? " is-blocked" : ""}`, title: blocked ? "It already uses this logger" : null },
-          box, tile(logger), h("span", { class: "logger-row-name", text: logger.name }), badge(logger, blocked ? "Uses this one" : null));
-      });
-      modePanel = [
-        field("Math Operation", math),
-        h("fieldset", { class: "logger-field logger-sources" }, h("legend", { class: "logger-label", text: "Data Sources" }),
-          checks.length
-            ? h("div", { class: "logger-checks" }, checks)
-            : h("p", { class: "logger-hint", text: "No loggers to combine yet. Add one here, or keep this roll-up and connect its sources later." }),
-          ui.quick?.mode === "rollup"
-            ? quickForm(groups)
-            : h("button", { type: "button", class: "logger-add-source", "data-quick-open": "rollup", "aria-expanded": "false", text: "+ Add Source", onclick: () => openQuick("") })),
-      ];
     } else {
-      const vars = h("div", { class: "logger-vars" });
-      const problem = h("p", { class: "logger-hint is-error", role: "status" });
-      const options = [["", "Choose a logger…"], ...others.filter((logger) => !loops.has(logger.id)).map((logger) => [logger.id, `${logger.name} (${badgeText(logger)})`])];
-      const paintVars = () => {
-        const parsed = parseFormula(draft.expression);
-        problem.textContent = parsed.error || "";
-        problem.hidden = !parsed.error;
-        if (parsed.error) return;
-        if (ui.quick?.letter && !parsed.variables.includes(ui.quick.letter)) ui.quick = null;
-        vars.replaceChildren(...parsed.variables.flatMap((letter) => {
-          const pick = selectBox(`var-${letter}`, options, draft.variables[letter] || "", (event) => { draft.variables[letter] = event.target.value; changed(); });
-          if (pick.value !== (draft.variables[letter] || "")) {
+      if (draft.math === "ratio" && draft.targets.length < 2) draft.targets = [draft.targets[0] || "", draft.targets[1] || ""];
+      const math = selectBox("math", ROLLUP_MATH, draft.math, (event) => {
+        draft.math = event.target.value;
+        if (draft.math === "ratio") draft.targets = [draft.targets[0] || "", draft.targets[1] || ""];
+        else draft.targets = draft.targets.filter(Boolean);
+        changed();
+        renderInPlace("[name='math']");
+      });
+      if (draft.math === "ratio") {
+        const setSlot = (index, value) => {
+          draft.targets = ratioTargets([index === 0 ? value : draft.targets[0], index === 1 ? value : draft.targets[1]], ui.selectedId || "");
+          changed();
+        };
+        const slotRow = (letter, index) => {
+          const making = ui.quick?.mode === "rollup" && ui.quick.letter === letter;
+          const pick = selectBox(`ratio-${letter}`, pickOptions, draft.targets[index] || "", (event) => setSlot(index, event.target.value));
+          if (pick.value !== (draft.targets[index] || "")) {
             pick.value = "";
-            draft.variables[letter] = "";
+            draft.targets[index] = "";
           }
-          pick.setAttribute("aria-label", `Logger for ${letter}`);
-          const making = ui.quick?.mode === "formula" && ui.quick.letter === letter;
-          const row = h("div", { class: "logger-var" }, h("span", { class: "logger-var-letter", "aria-hidden": "true", text: letter }), pick,
+          pick.setAttribute("aria-label", letter === "A" ? "Numerator (A)" : "Denominator (B)");
+          const row = h("div", { class: "logger-var" },
+            h("span", { class: "logger-var-letter", "aria-hidden": "true", text: letter }),
+            pick,
             h("button", {
               type: "button", class: "logger-text-btn logger-var-new", "data-quick-open": letter, "aria-expanded": String(making),
               "aria-label": `Add a source logger for ${letter}`, title: `Add a source logger for ${letter}`, text: "+ Add Source",
               onclick: () => (making ? closeQuick() : openQuick(letter)),
             }));
           return making ? [row, quickForm(groups)] : [row];
-        }));
-        if (!parsed.variables.length) vars.replaceChildren(h("p", { class: "logger-hint", text: "Use capital letters (A, B…) in the expression for loggers." }));
-      };
-      const expression = h("input", {
-        type: "text", class: "logger-input logger-mono", name: "expression", maxlength: EXPRESSION_MAX, placeholder: "e.g. A / B",
-        autocomplete: "off", autocapitalize: "characters", spellcheck: "false",
-        oninput: (event) => { draft.expression = event.target.value; paintVars(); changed(); },
-      });
-      expression.value = draft.expression;
-      paintVars();
-      modePanel = [
-        field("Expression", expression, "Numbers, capital letters for loggers, + - * / and brackets."),
-        problem,
-        h("fieldset", { class: "logger-field" }, h("legend", { class: "logger-label", text: "Variables" }), vars),
-      ];
-      if (!others.length) modePanel.push(h("p", { class: "logger-hint", text: "No loggers yet: + Add Source beside a letter makes one for it." }));
+        };
+        const aUnit = unitOfId(loggers, draft.targets[0]);
+        const bUnit = unitOfId(loggers, draft.targets[1]);
+        modePanel = [
+          field("Math Operation", math),
+          h("fieldset", { class: "logger-field logger-sources" },
+            h("legend", { class: "logger-label", text: "Ratio" }),
+            h("p", { class: "logger-hint", text: "Numerator (A) \u00f7 Denominator (B)." }),
+            h("div", { class: "logger-vars" }, ...slotRow("A", 0), ...slotRow("B", 1)),
+            h("p", {
+              class: "logger-ratio-unit", role: "status",
+              text: `Output Unit: ${aUnit} / ${bUnit}`,
+            })),
+        ];
+      } else {
+        const checks = others.map((logger) => {
+          const blocked = loops.has(logger.id);
+          const box = h("input", {
+            type: "checkbox", value: logger.id, disabled: blocked,
+            onchange: (event) => {
+              const set = new Set(draft.targets.filter(Boolean));
+              if (event.target.checked) set.add(logger.id);
+              else set.delete(logger.id);
+              draft.targets = others.map((row) => row.id).filter((id) => set.has(id));
+              changed();
+            },
+          });
+          box.checked = draft.targets.includes(logger.id) && !blocked;
+          return h("label", { class: `logger-check${blocked ? " is-blocked" : ""}`, title: blocked ? "It already uses this logger" : null },
+            box, tile(logger), h("span", { class: "logger-row-name", text: logger.name }), badge(logger, blocked ? "Uses this one" : null));
+        });
+        modePanel = [
+          field("Math Operation", math),
+          h("fieldset", { class: "logger-field logger-sources" }, h("legend", { class: "logger-label", text: "Data Sources" }),
+            checks.length
+              ? h("div", { class: "logger-checks" }, checks)
+              : h("p", { class: "logger-hint", text: "No loggers to combine yet. Add one here, or keep this roll-up and connect its sources later." }),
+            ui.quick?.mode === "rollup" && !ui.quick.letter
+              ? quickForm(groups)
+              : h("button", { type: "button", class: "logger-add-source", "data-quick-open": "rollup", "aria-expanded": "false", text: "+ Add Source", onclick: () => openQuick("") })),
+        ];
+      }
     }
 
     let foot;
@@ -1191,25 +1230,35 @@
         h("button", { type: "submit", class: "logger-primary", text: "Create Logger" }));
     }
 
+    const head = h("div", {
+      class: "logger-editor-head",
+      onclick: (event) => {
+        if (event.target.closest("button")) return;
+        setSheetCollapsed(true);
+      },
+    },
+    heading,
+    h("button", { type: "button", class: "logger-icon-btn", title: "Close details", "aria-label": "Close details", onclick: deselect }, icon("close")));
+
     el.editor.replaceChildren(
-      h("div", { class: "logger-editor-head" },
-        heading,
-        h("button", { type: "button", class: "logger-icon-btn", title: "Close details", "aria-label": "Close details", onclick: deselect }, icon("close"))),
+      handle,
+      head,
       h("div", { class: "logger-editor-body" },
-        h("div", { class: "logger-pair" }, field("Name", name), field("Group", group)),
+        h("div", { class: "logger-pair logger-name-look" },
+          field("Name", name),
+          h("div", { class: "logger-field" }, h("span", { class: "logger-label", id: "logger-icon-hint", text: "Icon & Colour" }), look)),
+        field("Group", group),
         users.length > 0 && h("div", { class: "logger-field" }, h("span", { class: "logger-label", text: "Used By" }),
           h("div", { class: "logger-used-by" }, users.map((user) => h("button", {
             type: "button", class: "logger-chip", "aria-label": `Open ${user.name}`, onclick: () => select(user.id),
           }, tile(user), h("span", { class: "logger-row-name", text: user.name }))))),
-        h("div", { class: "logger-field" }, h("span", { class: "logger-label", id: "logger-icon-hint", text: "Icon & Colour" }), look),
-        h("div", { class: "logger-field" }, h("span", { class: "logger-label", text: "Mode" }), modes, kindNote),
+        h("div", { class: "logger-field logger-mode-field" }, h("span", { class: "logger-label", text: "Mode" }), modes, kindNote),
         h("div", { class: "logger-mode-panel" }, modePanel)),
       foot);
   }
 
-  /* The drawer's logger as it would be saved ({ logger, existing }), or { error, selector } saying what stops it;
-     `inline` errors are already shown beside their field. Leniently (for the tree) nothing stops it: a blank name
-     and a broken expression stand in with what's saved, or a placeholder. */
+  /* The drawer's logger as it would be saved ({ logger, existing }), or { error, selector } saying what stops it.
+     Leniently (for the tree) nothing stops it: a blank name stands in with what's saved, or a placeholder. */
   function buildFromDraft(loggers, lenient = false) {
     const draft = ui.draft;
     const existing = ui.selectedId ? loggers.find((logger) => logger.id === ui.selectedId) : null;
@@ -1224,20 +1273,20 @@
     if (draft.mode === "standard") Object.assign(raw, { inputType: draft.inputType, unit: draft.unit });
     // A metric saves before its sources are connected (pending), showing — until they are.
     if (draft.mode === "rollup") {
-      raw.rollupConfig = { math: draft.math, targetLoggers: draft.targets.filter((target) => others.some((logger) => logger.id === target)) };
-    }
-    if (draft.mode === "formula") {
-      const parsed = parseFormula(draft.expression);
-      if (parsed.error && !lenient) return { error: parsed.error, selector: "[name='expression']", inline: true };
-      if (parsed.error) {
-        raw.formulaConfig = existing?.mode === "formula" ? existing.formulaConfig : { expression: draft.expression, variables: {} };
+      if (draft.math === "ratio") {
+        const [a, b] = ratioTargets(draft.targets, id);
+        raw.rollupConfig = {
+          math: "ratio",
+          targetLoggers: [
+            others.some((logger) => logger.id === a) ? a : "",
+            others.some((logger) => logger.id === b) ? b : "",
+          ],
+        };
       } else {
-        const variables = {};
-        for (const letter of parsed.variables) {
-          const target = draft.variables[letter] || "";
-          variables[letter] = others.some((logger) => logger.id === target) ? target : "";
-        }
-        raw.formulaConfig = { expression: draft.expression, variables };
+        raw.rollupConfig = {
+          math: draft.math,
+          targetLoggers: draft.targets.filter((target) => target && others.some((logger) => logger.id === target)),
+        };
       }
     }
     const now = new Date().toISOString();
@@ -1257,7 +1306,7 @@
     if (ui.selectedId) {
       const { loggers, groups } = readAll();
       const built = buildFromDraft(loggers);
-      if (built.error) setStatus(built.inline ? "" : built.error, !built.inline);
+      if (built.error) setStatus(built.error, true);
       else if (!autosave(loggers.map((row) => (row.id === built.logger.id ? built.logger : row)), groups, waitingNote(built.logger))) {
         setStatus("Sign in to keep loggers.", true);
       }
@@ -1280,7 +1329,7 @@
     const built = buildFromDraft(loggers);
     if (built.error) return fail(built.error, built.selector);
     if (!persist([...loggers, built.logger], groups, "Created.", waitingNote(built.logger))) return fail("Sign in to keep loggers.", null);
-    Object.assign(ui, { selectedId: built.logger.id, draft: draftOf(built.logger), groupKey: built.logger.groupId, confirmDelete: false });
+    Object.assign(ui, { selectedId: built.logger.id, draft: draftOf(built.logger), groupKey: built.logger.groupId, confirmDelete: false, sheetCollapsed: false });
     renderInPlace();
     focusNode(built.logger.id, false);
   }
@@ -1293,10 +1342,10 @@
     report("", waitingNote(built.logger));
   }
 
-  /* ---------- Making a source from inside a roll-up or formula ---------- */
+  /* ---------- Making a source from inside a roll-up ---------- */
 
-  // A few fields for a new input logger, inside the open roll-up's sources or under a formula's letter. Its fields
-  // live in ui.quick, so a redraw (the expression changing) keeps what's typed.
+  // A few fields for a new input logger, inside the open roll-up's sources or under a ratio's A/B. Its fields live
+  // in ui.quick, so a redraw keeps what's typed.
   function quickForm(groups) {
     const quick = ui.quick;
     const purpose = quick.letter ? `for ${quick.letter}` : "as a source";
@@ -1327,7 +1376,7 @@
     box = h("div", {
       class: "logger-quick", role: "group", "aria-label": `New input logger ${purpose}`, "data-quick": "",
       onkeydown: (event) => {
-        // Enter in its fields adds the logger rather than submitting the roll-up or formula around it.
+        // Enter in its fields adds the logger rather than submitting the roll-up around it.
         if (event.key !== "Enter" || event.target.tagName !== "INPUT") return;
         event.preventDefault();
         event.stopPropagation();
@@ -1345,7 +1394,7 @@
     return box;
   }
 
-  // `letter` is the formula letter it's for, or "" for a roll-up's source. It starts in the open logger's group.
+  // `letter` is "A"/"B" for a ratio slot, or "" for a multi-source roll-up. It starts in the open logger's group.
   function openQuick(letter) {
     ui.quick = { mode: ui.draft.mode, letter, name: "", inputType: "numeric", unit: "", groupId: ui.draft.groupId, error: "" };
     renderInPlace("[name='quick-name']");
@@ -1357,8 +1406,8 @@
     renderInPlace(`[data-quick-open="${letter || "rollup"}"]`);
   }
 
-  /* Saves the new input logger at once and ticks it as a source (or sets it as the letter's logger), so it hangs off
-     the open node in the tree. A saved roll-up or formula keeps that straight away; a new one once it's created. */
+  /* Saves the new input logger at once and ticks it as a source (or sets it as A/B), so it hangs off the open node
+     in the tree. A saved roll-up keeps that straight away; a new one once it's created. */
   function addQuickSource() {
     const quick = ui.quick;
     if (!quick) return;
@@ -1374,8 +1423,15 @@
       id: newId("lgr"), name, icon: "", color: DEFAULT_COLOR, groupId: groups.some((row) => row.id === quick.groupId) ? quick.groupId : "",
       mode: "standard", inputType: quick.inputType, unit: quick.unit, createdAt: now, updatedAt: now,
     });
-    if (quick.letter) ui.draft.variables[quick.letter] = logger.id;
-    else ui.draft.targets = [...ui.draft.targets, logger.id];
+    if (quick.letter === "A" || quick.letter === "B") {
+      const index = quick.letter === "A" ? 0 : 1;
+      const next = [...(ui.draft.targets.length >= 2 ? ui.draft.targets : [ui.draft.targets[0] || "", ui.draft.targets[1] || ""])];
+      next[index] = logger.id;
+      ui.draft.math = "ratio";
+      ui.draft.targets = next;
+    } else {
+      ui.draft.targets = [...ui.draft.targets.filter(Boolean), logger.id];
+    }
     const parent = clip(ui.draft.name, NAME_MAX) || "the new logger";
     const placed = quick.letter ? `It's ${quick.letter} in ${parent}` : `It's a source of ${parent}`;
     let next = [...loggers, logger];
@@ -1393,7 +1449,7 @@
       return;
     }
     ui.quick = null;
-    renderInPlace(quick.letter ? `[name="var-${quick.letter}"]` : `.logger-check input[value="${CSS.escape(logger.id)}"]`);
+    renderInPlace(quick.letter ? `[name="ratio-${quick.letter}"]` : `.logger-check input[value="${CSS.escape(logger.id)}"]`);
     focusNode(logger.id, false);
   }
 
@@ -1460,19 +1516,22 @@
     if (selector) el.editor.querySelector(selector)?.focus();
   }
 
-  // Deletes a logger, taking it out of the roll-ups and formulas that read from it (their lines to it go too).
+  // Deletes a logger, taking it out of the roll-ups that read from it (their lines to it go too).
   function deleteLogger(id) {
     const { loggers, groups } = readAll();
     const now = new Date().toISOString();
     const next = loggers.filter((logger) => logger.id !== id).map((logger) => {
-      if (!sourcesOf(logger).includes(id)) return logger;
-      if (logger.mode === "rollup") logger.rollupConfig.targetLoggers = logger.rollupConfig.targetLoggers.filter((target) => target !== id);
-      else for (const letter of Object.keys(logger.formulaConfig.variables)) if (logger.formulaConfig.variables[letter] === id) logger.formulaConfig.variables[letter] = "";
+      if (logger.mode !== "rollup" || !logger.rollupConfig.targetLoggers.includes(id)) return logger;
+      if (logger.rollupConfig.math === "ratio") {
+        logger.rollupConfig.targetLoggers = logger.rollupConfig.targetLoggers.map((target) => (target === id ? "" : target));
+      } else {
+        logger.rollupConfig.targetLoggers = logger.rollupConfig.targetLoggers.filter((target) => target !== id);
+      }
       return { ...logger, updatedAt: now };
     });
     clearTimeout(ui.saveTimer);
     ui.saveTimer = 0;
-    Object.assign(ui, { selectedId: null, draft: null, confirmDelete: false, quick: null });
+    Object.assign(ui, { selectedId: null, draft: null, sheetCollapsed: false, confirmDelete: false, quick: null });
     persist(next, groups, "Deleted.");
     render(() => el.addNode.focus({ preventScroll: true }));
   }
@@ -1490,6 +1549,8 @@
       } else if (ui.confirmDelete) {
         ui.confirmDelete = false;
         render(() => el.editor.querySelector("[data-logger-delete]")?.focus());
+      } else if (ui.draft && !ui.sheetCollapsed) {
+        setSheetCollapsed(true);
       } else if (ui.draft) {
         deselect();
       } else {
@@ -1514,14 +1575,13 @@
     read: readAll,
     cleanLogger,
     cleanGroup,
-    parseFormula,
-    evaluateFormula,
     rollUp,
     readsFrom,
     kindOf,
     pendingOf,
     calculate,
     formatValue,
+    unitOfId,
     layoutTree,
     MODES: MODES.map(([id]) => id),
     KINDS: KINDS.map(([id]) => id),

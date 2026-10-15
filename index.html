@@ -19,7 +19,7 @@
     <script src="scrapboard.js?v=26"></script>
     <script src="quick_line.js?v=2"></script>
     <script src="space.js?v=92" defer></script>
-    <script src="ficus_loggers.js?v=3" defer></script>
+    <script src="ficus_loggers.js?v=4" defer></script>
     <script src="collection.js?v=19" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -1731,9 +1731,10 @@
       }
       .logger-icon-btn:hover, .logger-icon-btn:focus-visible { background: rgba(0, 0, 0, 0.06); color: #1c1917; outline: none; }
       .logger-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .logger-stage { display: grid; grid-template-rows: minmax(11rem, 5fr) minmax(13rem, 6fr); min-width: 0; min-height: 0; }
-      /* With no node selected, the tree takes the room and the drawer shrinks to its prompt. */
-      .logger-stage.is-idle { grid-template-rows: minmax(11rem, 1fr) auto; }
+      .logger-stage { display: grid; grid-template-rows: minmax(11rem, 5fr) minmax(12rem, 5fr); min-width: 0; min-height: 0; }
+      /* With no node selected, or the sheet collapsed, the tree takes the room. */
+      .logger-stage.is-idle, .logger-stage.is-collapsed { grid-template-rows: minmax(11rem, 1fr) max-content; }
+      .logger-editor.is-collapsed { min-height: max-content; }
       .logger-canvas-wrap { position: relative; min-height: 0; border-bottom: 1px solid #e5e5e5; }
       /* Fingers scroll it natively (pan-x pan-y); a mouse drags its empty space (.is-panning). */
       .logger-canvas {
@@ -1799,7 +1800,7 @@
       .logger-node-op .logger-svg { width: 0.95rem; height: 0.95rem; }
       .logger-node-op.is-word { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.66rem; }
       .logger-node.is-rollup .logger-node-op { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; }
-      .logger-node.is-formula .logger-node-op { border-color: #ddd6fe; background: #f5f3ff; color: #6d28d9; }
+      .logger-node.is-ratio .logger-node-op { border-color: #ddd6fe; background: #f5f3ff; color: #6d28d9; }
       .logger-node-text { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 0.15rem; }
       .logger-node-name { overflow: hidden; font-size: 0.84rem; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
       .logger-node-value { display: flex; min-width: 0; align-items: baseline; gap: 0.35rem; overflow: hidden; white-space: nowrap; }
@@ -1827,15 +1828,30 @@
         font-size: 0.66rem; font-weight: 600; letter-spacing: 0.02em; color: #57534e; white-space: nowrap;
       }
       .logger-badge.is-rollup { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; }
-      .logger-badge.is-formula { border-color: #ddd6fe; background: #f5f3ff; color: #6d28d9; }
+      .logger-badge.is-ratio { border-color: #ddd6fe; background: #f5f3ff; color: #6d28d9; }
       .logger-empty { margin: 0; padding: 0.4rem 1.1rem; font-size: 0.78rem; line-height: 1.45; color: #a8a29e; }
       .logger-editor { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #fff; }
-      .logger-editor-head { display: flex; align-items: center; gap: 0.5rem; padding: 0.6rem 0.75rem 0.25rem 1.25rem; }
-      .logger-editor-title { flex: 1; min-width: 0; margin: 0; overflow: hidden; font-size: 1rem; font-weight: 700; color: #1c1917; text-overflow: ellipsis; white-space: nowrap; outline: none; }
-      .logger-editor-body { flex: 1; min-height: 0; padding: 0.5rem 1.25rem 1rem; overflow-y: auto; overscroll-behavior: contain; }
-      .logger-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: 0 1rem; }
-      .logger-drawer-empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 0.6rem; padding: 1.5rem; text-align: center; }
-      .logger-drawer-prompt { max-width: 22rem; margin: 0; font-size: 0.88rem; line-height: 1.5; color: #78716c; }
+      .logger-sheet-handle {
+        display: flex; flex-shrink: 0; align-items: center; justify-content: center; width: 100%; height: 1.35rem; padding: 0;
+        border: 0; background: transparent; cursor: grab; touch-action: none; -webkit-touch-callout: none;
+      }
+      .logger-sheet-handle:active { cursor: grabbing; }
+      .logger-sheet-pill { display: block; width: 2.25rem; height: 0.28rem; background: #d6d3d1; }
+      .logger-sheet-summary {
+        display: flex; flex-shrink: 0; align-items: baseline; gap: 0.75rem; width: 100%; min-height: 2.75rem; padding: 0.35rem 1.25rem 0.55rem;
+        border: 0; background: transparent; font: inherit; color: #1c1917; text-align: left; cursor: pointer;
+      }
+      .logger-sheet-summary:hover { background: #fafaf9; }
+      .logger-sheet-summary-name { flex: 1; min-width: 0; overflow: hidden; font-size: 0.95rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+      .logger-sheet-summary-hint { flex-shrink: 0; font-size: 0.76rem; font-weight: 600; color: #a8a29e; }
+      .logger-editor.is-collapsed .logger-status { padding: 0 1.25rem 0.55rem; }
+      .logger-editor-head { display: flex; align-items: center; gap: 0.5rem; padding: 0.15rem 0.75rem 0.2rem 1.25rem; cursor: pointer; }
+      .logger-editor-title { flex: 1; min-width: 0; margin: 0; overflow: hidden; font-size: 0.95rem; font-weight: 700; color: #1c1917; text-overflow: ellipsis; white-space: nowrap; outline: none; }
+      .logger-editor-body { flex: 1; min-height: 0; padding: 0.25rem 1.25rem 0.65rem; overflow-y: auto; overscroll-behavior: contain; }
+      .logger-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0 0.75rem; }
+      .logger-name-look { align-items: start; }
+      .logger-drawer-empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 0.5rem; padding: 1rem 1.25rem; text-align: center; }
+      .logger-drawer-prompt { max-width: 22rem; margin: 0; font-size: 0.84rem; line-height: 1.4; color: #78716c; }
       .logger-drawer-empty .logger-status { flex: 0 0 auto; }
       .logger-used-by { display: flex; flex-wrap: wrap; gap: 0.4rem; }
       .logger-chip {
@@ -1844,10 +1860,10 @@
       }
       .logger-chip:hover { border-color: #a8a29e; background: #fafaf9; }
       .logger-chip .logger-tile { width: 1.4rem; height: 1.4rem; font-size: 0.72rem; }
-      .logger-field { min-width: 0; margin: 0 0 0.9rem; padding: 0; border: 0; }
+      .logger-field { min-width: 0; margin: 0 0 0.55rem; padding: 0; border: 0; }
       .logger-field[hidden] { display: none; }
       .logger-label {
-        display: block; margin: 0 0 0.35rem; padding: 0; font-size: 0.66rem; font-weight: 700; letter-spacing: 0.07em;
+        display: block; margin: 0 0 0.25rem; padding: 0; font-size: 0.66rem; font-weight: 700; letter-spacing: 0.07em;
         text-transform: uppercase; color: #8c8c8c;
       }
       /* 16px text, so iPhone and iPad Safari don't zoom in on the field. */
@@ -1867,22 +1883,23 @@
       .logger-swatch { width: 2rem; height: 2rem; padding: 0; border: 0; background: var(--swatch); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12); cursor: pointer; }
       .logger-swatch[aria-checked="true"] { box-shadow: 0 0 0 2px #fff, 0 0 0 4px #1c1917; }
       .logger-swatch:focus-visible { outline: 2px solid #1c1917; outline-offset: 4px; }
-      .logger-modes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 0.5rem; }
-      .logger-mode-set { display: flex; min-width: 0; flex-direction: column; gap: 0.3rem; }
-      .logger-mode-kind { overflow: hidden; font-size: 0.7rem; font-weight: 600; color: #78716c; text-overflow: ellipsis; white-space: nowrap; }
-      .logger-mode-set.is-metric .logger-mode-kind { color: #6d28d9; }
-      .logger-mode-row { display: grid; grid-auto-columns: minmax(0, 1fr); grid-auto-flow: column; gap: 3px; padding: 3px; border: 1px solid #e7e5e4; background: #f5f5f4; }
-      .logger-mode-set.is-metric .logger-mode-row { border-style: dashed; border-color: #ddd6fe; background: #faf8ff; }
+      .logger-modes { min-width: 0; }
+      .logger-mode-row { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; padding: 3px; border: 1px solid #e7e5e4; background: #f5f5f4; }
       .logger-fx { font-family: Georgia, "Times New Roman", serif; font-style: italic; font-weight: 700; }
-      .logger-kind-note { margin: 0.5rem 0 0; font-size: 0.76rem; line-height: 1.45; color: #78716c; }
+      .logger-kind-note { margin: 0.3rem 0 0; font-size: 0.8rem; line-height: 1.3; color: #78716c; }
       .logger-kind-note strong { color: #44403c; }
       .logger-kind-note.is-metric, .logger-kind-note.is-metric strong { color: #6d28d9; }
-      .logger-mode { height: 2.25rem; padding: 0 0.25rem; border: 0; background: transparent; font-size: 0.8rem; font-weight: 600; color: #78716c; cursor: pointer; }
+      .logger-mode { height: 2.25rem; padding: 0 0.35rem; border: 0; background: transparent; font-size: 0.78rem; font-weight: 600; color: #78716c; cursor: pointer; }
       .logger-mode:hover { color: #1c1917; }
       .logger-mode[aria-checked="true"] { background: #fff; color: #1c1917; box-shadow: 0 1px 3px rgba(28, 25, 23, 0.12); }
       .logger-mode:focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
-      .logger-mode-panel { padding-top: 0.9rem; border-top: 1px solid #f0efed; }
-      .logger-checks { display: flex; max-height: 16rem; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; border: 1px solid #e7e5e4; }
+      .logger-mode-field { margin-bottom: 0.35rem; }
+      .logger-mode-panel { padding-top: 0.45rem; border-top: 1px solid #f0efed; }
+      .logger-ratio-unit {
+        margin: 0.45rem 0 0; padding: 0.4rem 0.6rem; border: 1px dashed #ddd6fe; background: #faf8ff;
+        font-size: 0.78rem; font-weight: 600; color: #6d28d9; font-variant-numeric: tabular-nums;
+      }
+      .logger-checks { display: flex; max-height: 9.5rem; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; border: 1px solid #e7e5e4; }
       .logger-check { display: flex; min-height: 2.75rem; align-items: center; gap: 0.6rem; padding: 0.35rem 0.75rem; font-size: 0.86rem; color: #292524; cursor: pointer; }
       .logger-check + .logger-check { border-top: 1px solid #f5f5f4; }
       .logger-check:hover { background: #fafaf9; }
@@ -1912,7 +1929,7 @@
         display: inline-flex; width: 2.5rem; height: 2.5rem; flex-shrink: 0; align-items: center; justify-content: center;
         background: #1c1917; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.95rem; font-weight: 700; color: #fff;
       }
-      .logger-editor-foot { display: flex; flex-shrink: 0; align-items: center; gap: 0.75rem; padding: 0.75rem 1.25rem; border-top: 1px solid #e5e5e5; background: #fff; }
+      .logger-editor-foot { display: flex; flex-shrink: 0; align-items: center; gap: 0.6rem; padding: 0.55rem 1.25rem; border-top: 1px solid #e5e5e5; background: #fff; }
       .logger-editor-foot.is-confirming { flex-wrap: wrap; background: rgba(185, 28, 28, 0.05); }
       .logger-status { flex: 1; min-width: 0; margin: 0; font-size: 0.76rem; line-height: 1.35; color: #78716c; }
       .logger-status.is-error { color: #be123c; }
@@ -1926,15 +1943,18 @@
       .logger-small-btn:hover { background: #f5f5f4; }
       .logger-small-btn.is-danger { border-color: #b91c1c; background: #b91c1c; color: #fff; }
       .logger-small-btn.is-danger:hover { background: #991b1b; }
-      :is(.logger-primary, .logger-text-btn, .logger-small-btn, .logger-add-group, .logger-add-source, .logger-chip):focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
+      :is(.logger-primary, .logger-text-btn, .logger-small-btn, .logger-add-group, .logger-add-source, .logger-chip, .logger-sheet-summary):focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
       .logger-group-pill:focus-visible { outline: 2px solid #1c1917; outline-offset: -2px; }
+      .logger-sheet-handle:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
       @media (hover: none), (pointer: coarse) {
-        .logger-input, .logger-mode, .logger-primary, .logger-text-btn, .logger-add-group, .logger-add-source, .logger-chip, .logger-canvas-add { height: 2.75rem; }
+        .logger-input, .logger-mode, .logger-primary, .logger-text-btn, .logger-add-group, .logger-add-source, .logger-chip, .logger-canvas-add, .logger-sheet-summary { height: 2.75rem; }
         .logger-canvas-add { width: 2.75rem; }
         .logger-icon-btn, .logger-small-btn { min-width: 2.75rem; height: 2.75rem; }
         .logger-group-pill { min-height: 2.75rem; }
         .logger-swatch { width: 2.5rem; height: 2.5rem; }
         .logger-var-letter { width: 2.75rem; height: 2.75rem; }
+        .logger-sheet-handle { height: 1.75rem; }
+        .logger-sheet-pill { width: 2.75rem; height: 0.32rem; }
         .logger-sheet .space-tag-sheet-close { width: 2.75rem; height: 2.75rem; }
       }
       /* A phone: the groups become a strip that scrolls sideways above the canvas. */
@@ -1949,8 +1969,8 @@
         .logger-group.is-confirming { flex: 0 0 18rem; }
         .logger-directory-foot { padding: 0.5rem 0.75rem 0.5rem 0; border-top: 0; }
         .logger-add-group { width: auto; padding: 0 0.75rem; white-space: nowrap; }
-        .logger-stage { grid-template-rows: minmax(12rem, 5fr) minmax(16rem, 6fr); }
-        .logger-stage.is-idle { grid-template-rows: minmax(12rem, 1fr) auto; }
+        .logger-stage { grid-template-rows: minmax(12rem, 5fr) minmax(14rem, 5fr); }
+        .logger-stage.is-idle, .logger-stage.is-collapsed { grid-template-rows: minmax(12rem, 1fr) max-content; }
       }
       /* The phone sheet runs full height, so it starts below the fixed account bar (Sign Out) in the top right. */
       @media (max-width: 767px) {
