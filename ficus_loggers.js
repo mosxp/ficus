@@ -15,7 +15,8 @@
  *   "rollup"    one value made from other loggers': `rollupConfig: { math: "sum" | "average" | "max" | "min" |
  *               "ratio" | "count", targetLoggers: [logger id, ...] }`. For ratio, `targetLoggers` is [numerator,
  *               denominator] (either may be "" until chosen). Count only accepts boolean sources and totals how many
- *               were True. Sum/average/max/min/ratio only accept numeric-family sources (not boolean/compound).
+ *               were True. Sum/average/max/min/ratio accept numeric-family inputs and nested roll-ups
+ *               (sum/average/max/min/count), but never boolean, compound, or ratio roll-ups.
  * Standard inputs may also have `attachmentConfig: { requirement: "none"|"optional"|"required", allowedTypes:
  * ["photo"|"video"|"audio"|"file"|"album", ...] }`.
  * Every logger may also have `goalConfig` (optional target): numeric shape `{ enabled, operator, targetValue }` for
@@ -54,8 +55,10 @@
     ["photo", "Photo"], ["video", "Video"], ["audio", "Audio"], ["file", "File"], ["album", "Album"],
   ];
   const ATTACH_TYPE_SET = new Set(ATTACH_TYPES.map(([id]) => id));
-  // Sources allowed for sum/average/max/min/ratio (boolean + compound are excluded).
+  // Standard types allowed under sum/average/max/min/ratio (boolean + compound are excluded).
   const NUMERIC_SOURCE_TYPES = new Set(["numeric", "currency", "tally", "timer", "rating"]);
+  // Nested roll-ups allowed as sources for those ops (ratio roll-ups are never nestable).
+  const NESTABLE_ROLLUP_MATH = new Set(["sum", "average", "max", "min", "count"]);
   const COLORS = [
     ["Sage", "#8BA888"], ["Mint", "#A3C4BC"], ["Dusty Blue", "#7D98A1"], ["Navy", "#5B6C7E"],
     ["Terracotta", "#CC8B65"], ["Ochre", "#D4A373"], ["Warm Pink", "#D49A89"], ["Plum", "#9D7A8C"],
@@ -203,16 +206,25 @@
     else if (inputType === "rating") logger.ratingConfig = cleanRatingConfig(sources.ratingConfig);
   }
 
-  // Which standard/rollup loggers may feed a given math op (count → booleans only; else numeric family only).
+  // Which loggers may feed a given math op. Count → booleans only. Other ops → numeric-family inputs plus
+  // nestable roll-ups (not ratio, boolean, or compound).
   function isEligibleSource(logger, math) {
-    if (!logger || logger.mode === "rollup") return false;
-    if (math === "count") return logger.inputType === "boolean";
-    return NUMERIC_SOURCE_TYPES.has(logger.inputType);
+    if (!logger) return false;
+    if (math === "count") return logger.mode === "standard" && logger.inputType === "boolean";
+    if (logger.mode === "standard") return NUMERIC_SOURCE_TYPES.has(logger.inputType);
+    if (logger.mode === "rollup") return NESTABLE_ROLLUP_MATH.has(logger.rollupConfig?.math);
+    return false;
   }
 
   function pruneTargetsForMath(math, targets, loggers, selfId) {
     const eligible = new Set(
-      loggers.filter((logger) => logger.id !== selfId && isEligibleSource(logger, math)).map((logger) => logger.id),
+      loggers
+        .filter((logger) => (
+          logger.id !== selfId
+          && isEligibleSource(logger, math)
+          && !(selfId && readsFrom(loggers, logger.id, selfId))
+        ))
+        .map((logger) => logger.id),
     );
     if (math === "ratio") {
       const list = Array.isArray(targets) ? targets : [];
@@ -465,24 +477,33 @@
   }
 
   /* A logger's value: an input logger's from `values` ({ [logger id]: number }), a metric's worked out from its
-     sources in turn. null when it can't be (no sources yet, no numbers to go on, a loop); formatValue shows that
-     as "—". */
+     sources in turn (nested roll-ups recurse / memoize so shared leaves run once). null when it can't be (no
+     sources yet, no numbers to go on, a loop); formatValue shows that as "—". Empty intermediates yield null, not NaN. */
   function calculate(loggers, id, values = {}) {
     const byId = new Map(loggers.map((logger) => [logger.id, logger]));
+    const memo = new Map();
     const working = new Set();
     const run = (key) => {
+      if (memo.has(key)) return memo.get(key);
       const logger = byId.get(key);
-      if (!logger || working.has(key)) return null;
+      if (!logger || working.has(key)) {
+        memo.set(key, null);
+        return null;
+      }
       if (logger.mode === "standard") {
         const raw = values[key];
-        if (raw == null || raw === "") return null;
-        if (logger.inputType === "boolean") {
-          if (raw === true || raw === 1 || raw === "1" || raw === "true") return 1;
-          if (raw === false || raw === 0 || raw === "0" || raw === "false") return 0;
-          return null;
+        let result = null;
+        if (raw != null && raw !== "") {
+          if (logger.inputType === "boolean") {
+            if (raw === true || raw === 1 || raw === "1" || raw === "true") result = 1;
+            else if (raw === false || raw === 0 || raw === "0" || raw === "false") result = 0;
+          } else {
+            const number = Number(raw);
+            result = Number.isFinite(number) ? number : null;
+          }
         }
-        const number = Number(raw);
-        return Number.isFinite(number) ? number : null;
+        memo.set(key, result);
+        return result;
       }
       working.add(key);
       const { math, targetLoggers } = logger.rollupConfig;
@@ -494,9 +515,11 @@
       } else if (math === "count") {
         result = rollUp("count", targetLoggers.map(run).filter((n) => n != null));
       } else {
-        result = rollUp(math, targetLoggers.map(run).filter((n) => n != null));
+        // Nested children that are pending/empty contribute null and are skipped, not NaN.
+        result = rollUp(math, targetLoggers.map(run).filter((n) => n != null && Number.isFinite(Number(n))));
       }
       working.delete(key);
+      memo.set(key, result);
       return result;
     };
     return run(id);
@@ -552,11 +575,16 @@
     const members = loggers.filter((logger) => logger.groupId === key);
     const shown = new Set(members.map((logger) => logger.id));
     const away = new Set();
-    for (const logger of members) {
+    // Walk every nested source so multi-tier roll-ups (and away chains) all appear with their edges.
+    const walk = [...members];
+    while (walk.length) {
+      const logger = walk.pop();
       for (const source of sourcesOf(logger)) {
         if (shown.has(source) || !byId.has(source)) continue;
         shown.add(source);
-        away.add(source);
+        const row = byId.get(source);
+        if (row.groupId !== key) away.add(source);
+        walk.push(row);
       }
     }
     const nodes = [...shown].map((id) => byId.get(id));
@@ -564,7 +592,7 @@
     if (!nodes.length) return { nodes: [], edges: [], stubs: [], width: view, height: 0, divider: null, looseLabel: null };
 
     const edges = [];
-    for (const logger of members) {
+    for (const logger of nodes) {
       if (logger.mode !== "rollup") continue;
       const { math, targetLoggers } = logger.rollupConfig;
       if (math === "ratio") {
@@ -1502,10 +1530,11 @@
 
     const editing = ui.selectedId ? loggers.find((logger) => logger.id === ui.selectedId) : null;
     const others = loggers.filter((logger) => logger.id !== ui.selectedId);
-    // Loggers this one can't read from: those that already read from it (a loop).
+    // Ancestors at any depth (parents, grandparents, …): selecting them as a source would loop.
     const loops = new Set(editing ? others.filter((logger) => readsFrom(loggers, logger.id, editing.id)).map((logger) => logger.id) : []);
     const users = editing ? others.filter((logger) => sourcesOf(logger).includes(editing.id)) : [];
-    const sourcePool = (math) => others.filter((logger) => !loops.has(logger.id) && isEligibleSource(logger, math));
+    // Eligible by math type; loop candidates stay in the checklist but are disabled below.
+    const sourcePool = (math) => others.filter((logger) => isEligibleSource(logger, math));
     const heading = h("h3", {
       class: "logger-editor-title", tabindex: "-1", "data-logger-heading": "",
       text: editing ? `Edit ${editing.name}` : `New Logger in ${groupName(groups, draft.groupId)}`,
@@ -1866,6 +1895,7 @@
       if (draft.math === "ratio" && draft.targets.length < 2) draft.targets = [draft.targets[0] || "", draft.targets[1] || ""];
       draft.targets = pruneTargetsForMath(draft.math, draft.targets, loggers, ui.selectedId || "");
       const ratioPicks = [["", "Choose a logger\u2026"], ...sourcePool(draft.math)
+        .filter((logger) => !loops.has(logger.id))
         .map((logger) => [logger.id, `${logger.name} (${badgeText(logger)})`])];
       const math = selectBox("math", ROLLUP_MATH, draft.math, (event) => {
         draft.math = event.target.value;
@@ -1926,17 +1956,21 @@
               const set = new Set(draft.targets.filter(Boolean));
               if (event.target.checked) set.add(logger.id);
               else set.delete(logger.id);
-              draft.targets = eligible.map((row) => row.id).filter((id) => set.has(id));
+              draft.targets = eligible.map((row) => row.id).filter((id) => set.has(id) && !loops.has(id));
               changed();
             },
           });
           box.checked = draft.targets.includes(logger.id) && !blocked;
-          return h("label", { class: `logger-check${blocked ? " is-blocked" : ""}`, title: blocked ? "It already uses this logger" : null },
-            box, tile(logger), h("span", { class: "logger-row-name", text: logger.name }), badge(logger, blocked ? "Uses this one" : null));
+          return h("label", {
+            class: `logger-check${blocked ? " is-blocked" : ""}`,
+            title: blocked ? "Circular reference: it already depends on this logger" : null,
+          },
+          box, tile(logger), h("span", { class: "logger-row-name", text: logger.name }),
+          badge(logger, blocked ? "Circular reference" : null));
         });
         const emptyHint = draft.math === "count"
           ? "No boolean loggers to count yet. Add one here, or keep this roll-up and connect them later."
-          : "No numeric loggers to combine yet. Add one here, or keep this roll-up and connect its sources later.";
+          : "No numeric loggers or nestable roll-ups to combine yet. Add one here, or keep this roll-up and connect its sources later.";
         modePanel = [
           field("Math Operation", math),
           mathHint,
