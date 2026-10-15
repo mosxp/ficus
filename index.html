@@ -19,7 +19,7 @@
     <script src="scrapboard.js?v=26"></script>
     <script src="quick_line.js?v=2"></script>
     <script src="space.js?v=92" defer></script>
-    <script src="ficus_loggers.js?v=10" defer></script>
+    <script src="ficus_loggers.js?v=11" defer></script>
     <script src="collection.js?v=19" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -1736,11 +1736,17 @@
       /* Transform pan/zoom on .logger-world; hit-testing stays on the transformed nodes. */
       .logger-canvas {
         position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: grab;
-        background: #fafaf9 radial-gradient(#e2e0dd 1px, transparent 1px) 0 0 / 18px 18px; outline: none;
+        background: #fafaf9; outline: none;
         -webkit-user-select: none; user-select: none;
       }
       .logger-canvas.is-panning { cursor: grabbing; }
-      .logger-world { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
+      .logger-canvas.is-node-dragging { cursor: grabbing; }
+      /* Large dotted plane pans/zooms with the world so clusters can sit far apart. */
+      .logger-world {
+        position: absolute; top: 0; left: 0; min-width: 4800px; min-height: 4800px;
+        transform-origin: 0 0; will-change: transform;
+        background: #fafaf9 radial-gradient(#e2e0dd 1px, transparent 1px) 0 0 / 18px 18px;
+      }
       .logger-canvas-title {
         position: absolute; z-index: 2; top: 0.6rem; left: 0.75rem; max-width: calc(100% - 11rem); margin: 0; padding: 0.25rem 0.5rem;
         overflow: hidden; background: rgba(250, 250, 249, 0.92); font-size: 0.7rem; font-weight: 700; letter-spacing: 0.07em;
@@ -1795,8 +1801,12 @@
       .logger-node {
         position: absolute; display: flex; box-sizing: border-box; align-items: center; gap: 0.6rem; padding: 0 0.7rem;
         border: 1px solid #e7e5e4; border-top: 3px solid var(--logger-color, #2563eb); background: #fff;
-        box-shadow: 0 1px 3px rgba(28, 25, 23, 0.08); font: inherit; color: #1c1917; text-align: left; cursor: pointer;
-        -webkit-tap-highlight-color: transparent;
+        box-shadow: 0 1px 3px rgba(28, 25, 23, 0.08); font: inherit; color: #1c1917; text-align: left; cursor: grab;
+        touch-action: none; -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+      }
+      .logger-node.is-dragging {
+        z-index: 2; cursor: grabbing;
+        box-shadow: 0 0 0 1px #1c1917, 0 12px 24px rgba(28, 25, 23, 0.22);
       }
       .logger-node:hover { border-color: #a8a29e; border-top-color: var(--logger-color, #2563eb); }
       .logger-node:focus-visible { outline: 2px solid #1c1917; outline-offset: 3px; }

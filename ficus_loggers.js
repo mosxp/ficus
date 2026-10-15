@@ -25,6 +25,7 @@
  * `kind` follows the mode: "input" for standard (an Input Logger, the only kind a dot can record values into) and
  * "metric" for roll-ups (a Calculated Metric: read-only, worked out from its sources). A metric may be saved before
  * its sources are connected; until then its value is null, shown as "—".
+ * Optional `x` / `y` (numbers) pin the node on the Manage Loggers tree canvas; missing coords are auto-placed and saved.
  * Only the active mode's fields (and the active inputType's config) are kept. A roll-up can't use itself, directly
  * or through other loggers. A saved logger with the old "formula" mode is read as a ratio roll-up (A / B from its
  * variables). Logged numeric values must be >= 0; currency may be negative (`validateLoggedValue`).
@@ -365,6 +366,12 @@
       };
     }
     logger.goalConfig = adaptGoalConfig(goalConfig, goalKindOf(logger.mode, logger.inputType));
+    delete logger.x;
+    delete logger.y;
+    const x = Number(raw.x);
+    const y = Number(raw.y);
+    if (Number.isFinite(x)) logger.x = x;
+    if (Number.isFinite(y)) logger.y = y;
     return logger;
   }
 
@@ -564,18 +571,78 @@
   const PAD = 24;
   const TOP = 60;
   const STUB = 24;
+  const WORLD_MIN = 4800;
+  const TAP_PX = 5;
+  const hasCoords = (logger) => Number.isFinite(logger?.x) && Number.isFinite(logger?.y);
 
-  /* Group `key`'s loggers laid out as a family tree in a canvas `viewWidth` wide: each metric a row above the loggers
-     it reads from, joined by lines (a source in another group shows too, as `away`), and the input loggers nothing
-     here reads from in rows of their own at the bottom (`loose`). A metric still missing sources gets a dashed stub
-     for each: "sources" for a multi-source roll-up, or "A"/"B" for a ratio. Rows are ordered to keep lines from
-     crossing. */
+  // Orthogonal elbow: bottom-centre of parent → midY → top-centre of child.
+  const edgePath = (edge) => {
+    const midY = (edge.y1 + edge.y2) / 2;
+    return `M${edge.x1} ${edge.y1} L${edge.x1} ${midY} L${edge.x2} ${midY} L${edge.x2} ${edge.y2}`;
+  };
+  const elbowLabel = (edge) => ({ x: (edge.x1 + edge.x2) / 2, y: (edge.y1 + edge.y2) / 2 });
+
+  // Default cascade positions (used only when a logger has no saved x/y yet).
+  function autoPositions(nodes, edges, parents, children, isLoose, view) {
+    const depth = new Map();
+    const visiting = new Set();
+    const depthOf = (id) => {
+      if (depth.has(id)) return depth.get(id);
+      if (visiting.has(id)) return 0;
+      visiting.add(id);
+      const value = parents.get(id).reduce((deepest, parent) => Math.max(deepest, depthOf(parent) + 1), 0);
+      visiting.delete(id);
+      depth.set(id, value);
+      return value;
+    };
+    const tiers = [];
+    for (const logger of nodes) if (!isLoose(logger)) (tiers[depthOf(logger.id)] ||= []).push(logger.id);
+    const rows = tiers.filter(Boolean);
+    const slot = new Map();
+    const place = () => rows.forEach((row) => row.forEach((id, i) => slot.set(id, i - (row.length - 1) / 2)));
+    const mean = (ids, own) => (ids.length ? ids.reduce((sum, id) => sum + slot.get(id), 0) / ids.length : own);
+    place();
+    for (let pass = 0; pass < 2; pass += 1) {
+      for (let r = 1; r < rows.length; r += 1) {
+        rows[r].sort((a, b) => mean(parents.get(a), slot.get(a)) - mean(parents.get(b), slot.get(b)));
+        place();
+      }
+      for (let r = rows.length - 2; r >= 0; r -= 1) {
+        rows[r].sort((a, b) => mean(children.get(a), slot.get(a)) - mean(children.get(b), slot.get(b)));
+        place();
+      }
+    }
+    const lineWidth = (count) => count * NODE_W + Math.max(0, count - 1) * GAP_X;
+    const loose = nodes.filter(isLoose).map((logger) => logger.id);
+    const perLine = Math.max(1, Math.floor((view - PAD * 2 + GAP_X) / (NODE_W + GAP_X)));
+    const width = Math.max(view, ...rows.map((row) => lineWidth(row.length) + PAD * 2), lineWidth(Math.min(perLine, loose.length || 1)) + PAD * 2);
+    const pos = new Map();
+    let y = TOP;
+    for (const row of rows) {
+      const left = (width - lineWidth(row.length)) / 2;
+      row.forEach((id, i) => pos.set(id, { x: left + i * (NODE_W + GAP_X), y }));
+      y += NODE_H + GAP_Y;
+    }
+    if (loose.length) {
+      const left = (width - lineWidth(Math.min(perLine, loose.length))) / 2;
+      if (rows.length) y += 26;
+      y += 22;
+      loose.forEach((id, i) => {
+        const column = i % perLine;
+        if (i && !column) y += NODE_H + LOOSE_GAP_Y;
+        pos.set(id, { x: left + column * (NODE_W + GAP_X), y });
+      });
+    }
+    return pos;
+  }
+
+  /* Group `key`'s loggers on the tree canvas. Saved `x`/`y` win; missing coords get a cascade default and are
+     returned in `seeded` so the UI can persist them. Edges are orthogonal elbows (parent bottom → child top). */
   function layoutTree(loggers, key, viewWidth = 0) {
     const byId = new Map(loggers.map((logger) => [logger.id, logger]));
     const members = loggers.filter((logger) => logger.groupId === key);
     const shown = new Set(members.map((logger) => logger.id));
     const away = new Set();
-    // Walk every nested source so multi-tier roll-ups (and away chains) all appear with their edges.
     const walk = [...members];
     while (walk.length) {
       const logger = walk.pop();
@@ -589,7 +656,12 @@
     }
     const nodes = [...shown].map((id) => byId.get(id));
     const view = Math.max(viewWidth, NODE_W + PAD * 2);
-    if (!nodes.length) return { nodes: [], edges: [], stubs: [], width: view, height: 0, divider: null, looseLabel: null };
+    if (!nodes.length) {
+      return {
+        nodes: [], edges: [], stubs: [], seeded: [], width: Math.max(view, WORLD_MIN), height: Math.max(view, WORLD_MIN),
+        divider: null, looseLabel: null,
+      };
+    }
 
     const edges = [];
     for (const logger of nodes) {
@@ -610,127 +682,67 @@
       children.get(edge.from).push(edge.to);
     }
     const isLoose = (logger) => logger.mode === "standard" && !parents.get(logger.id).length;
-
-    const depth = new Map();
-    const visiting = new Set();
-    const depthOf = (id) => {
-      if (depth.has(id)) return depth.get(id);
-      if (visiting.has(id)) return 0;
-      visiting.add(id);
-      const value = parents.get(id).reduce((deepest, parent) => Math.max(deepest, depthOf(parent) + 1), 0);
-      visiting.delete(id);
-      depth.set(id, value);
-      return value;
-    };
-    const tiers = [];
-    for (const logger of nodes) if (!isLoose(logger)) (tiers[depthOf(logger.id)] ||= []).push(logger.id);
-    const rows = tiers.filter(Boolean);
-
-    const slot = new Map();
-    const place = () => rows.forEach((row) => row.forEach((id, i) => slot.set(id, i - (row.length - 1) / 2)));
-    const mean = (ids, own) => (ids.length ? ids.reduce((sum, id) => sum + slot.get(id), 0) / ids.length : own);
-    place();
-    for (let pass = 0; pass < 2; pass += 1) {
-      for (let r = 1; r < rows.length; r += 1) {
-        rows[r].sort((a, b) => mean(parents.get(a), slot.get(a)) - mean(parents.get(b), slot.get(b)));
-        place();
-      }
-      for (let r = rows.length - 2; r >= 0; r -= 1) {
-        rows[r].sort((a, b) => mean(children.get(a), slot.get(a)) - mean(children.get(b), slot.get(b)));
-        place();
-      }
-    }
-
-    const lineWidth = (count) => count * NODE_W + Math.max(0, count - 1) * GAP_X;
-    const loose = nodes.filter(isLoose).map((logger) => logger.id);
-    const perLine = Math.max(1, Math.floor((view - PAD * 2 + GAP_X) / (NODE_W + GAP_X)));
-    const width = Math.max(view, ...rows.map((row) => lineWidth(row.length) + PAD * 2), lineWidth(Math.min(perLine, loose.length)) + PAD * 2);
+    const defaults = autoPositions(nodes, edges, parents, children, isLoose, view);
     const pos = new Map();
-    let y = TOP;
-    for (const row of rows) {
-      const left = (width - lineWidth(row.length)) / 2;
-      row.forEach((id, i) => pos.set(id, { x: left + i * (NODE_W + GAP_X), y }));
-      y += NODE_H + GAP_Y;
-    }
-    let divider = null;
-    let looseLabel = null;
-    if (loose.length) {
-      const left = (width - lineWidth(Math.min(perLine, loose.length))) / 2;
-      if (rows.length) {
-        divider = y - 22;
-        y += 4;
+    const seeded = [];
+    for (const logger of nodes) {
+      if (hasCoords(logger)) {
+        pos.set(logger.id, { x: logger.x, y: logger.y });
+      } else {
+        const at = defaults.get(logger.id) || { x: PAD, y: TOP };
+        pos.set(logger.id, at);
+        seeded.push({ id: logger.id, x: at.x, y: at.y });
       }
-      looseLabel = { x: left, y };
-      y += 22;
-      loose.forEach((id, i) => {
-        const column = i % perLine;
-        if (i && !column) y += NODE_H + LOOSE_GAP_Y;
-        pos.set(id, { x: left + column * (NODE_W + GAP_X), y });
-      });
     }
 
     const stubs = [];
-    const outs = new Map();
-    const ins = new Map();
-    const push = (map, id, item) => (map.get(id) || map.set(id, []).get(id)).push(item);
-    for (const edge of edges) {
-      push(outs, edge.from, edge);
-      push(ins, edge.to, edge);
-    }
     for (const logger of members) {
       for (const item of pendingOf(logger)) {
-        const stub = { from: logger.id, letter: item === "sources" ? "" : item };
-        stubs.push(stub);
-        push(outs, logger.id, stub);
+        stubs.push({ from: logger.id, letter: item === "sources" ? "" : item });
       }
     }
-    // Lines leave a metric and meet a source spread along their edges, in the order of the nodes at the far end.
-    const farX = (item) => (item.to ? pos.get(item.to).x : Number.MAX_SAFE_INTEGER);
-    for (const [id, list] of outs) {
+    const attachEdge = (edge) => {
+      const from = pos.get(edge.from);
+      const to = pos.get(edge.to);
+      edge.x1 = from.x + NODE_W / 2;
+      edge.y1 = from.y + NODE_H;
+      edge.x2 = to.x + NODE_W / 2;
+      edge.y2 = to.y;
+      if (edge.letter) edge.label = elbowLabel(edge);
+    };
+    for (const edge of edges) attachEdge(edge);
+    const stubGroups = new Map();
+    for (const stub of stubs) (stubGroups.get(stub.from) || stubGroups.set(stub.from, []).get(stub.from)).push(stub);
+    for (const [id, list] of stubGroups) {
       const at = pos.get(id);
-      list.sort((a, b) => farX(a) - farX(b));
-      list.forEach((item, i) => Object.assign(item, { x1: at.x + ((i + 1) * NODE_W) / (list.length + 1), y1: at.y + NODE_H }));
+      list.forEach((stub, i) => {
+        stub.x1 = at.x + ((i + 1) * NODE_W) / (list.length + 1);
+        stub.y1 = at.y + NODE_H;
+      });
     }
-    for (const [id, list] of ins) {
-      const at = pos.get(id);
-      list.sort((a, b) => pos.get(a.from).x - pos.get(b.from).x);
-      list.forEach((edge, i) => Object.assign(edge, { x2: at.x + ((i + 1) * NODE_W) / (list.length + 1), y2: at.y }));
-    }
-    for (const edge of edges) if (edge.letter) edge.label = curvePoint(edge, 0.3);
 
-    const bottom = Math.max(...[...pos.values()].map((at) => at.y + NODE_H), ...stubs.map((stub) => stub.y1 + STUB + 18));
+    const xs = [...pos.values()].map((at) => at.x);
+    const ys = [...pos.values()].map((at) => at.y);
+    const maxX = Math.max(...xs.map((x) => x + NODE_W), 0);
+    const maxY = Math.max(...ys.map((y) => y + NODE_H), ...stubs.map((stub) => stub.y1 + STUB + 18), 0);
+    const width = Math.max(WORLD_MIN, view, maxX + PAD * 4);
+    const height = Math.max(WORLD_MIN, maxY + PAD * 4);
     return {
       nodes: nodes.map((logger) => ({ logger, ...pos.get(logger.id), away: away.has(logger.id), loose: isLoose(logger) }))
         .sort((a, b) => a.y - b.y || a.x - b.x),
-      edges, stubs, width, height: bottom + PAD, divider, looseLabel,
+      edges, stubs, seeded, width, height, divider: null, looseLabel: null,
     };
   }
-
-  // The point `t` of the way along an edge's curve (it leaves and arrives vertically, bending at the halfway height).
-  function curvePoint(edge, t) {
-    const mid = (edge.y1 + edge.y2) / 2;
-    const u = 1 - t;
-    return {
-      x: u * u * u * edge.x1 + 3 * u * u * t * edge.x1 + 3 * u * t * t * edge.x2 + t * t * t * edge.x2,
-      y: u * u * u * edge.y1 + 3 * u * u * t * mid + 3 * u * t * t * mid + t * t * t * edge.y2,
-    };
-  }
-
-  const edgePath = (edge) => {
-    const mid = (edge.y1 + edge.y2) / 2;
-    return `M${edge.x1} ${edge.y1}C${edge.x1} ${mid} ${edge.x2} ${mid} ${edge.x2} ${edge.y2}`;
-  };
 
   /* ---------- Manage Loggers ---------- */
 
   /* Three parts: the groups down the left (a strip along the top on a phone); the open group's loggers as a zoomable
-     tree canvas (layoutTree) on the right; and a floating pop-over form for the selected node. A saved logger saves
-     as it's edited and its node follows each change; a new one is a dashed node until Create Logger.
-     `groupKey` is the open group's id ("" for No group). `draft` is the pop-over's form, null when no node is
-     selected, kept across mode switches so flipping between modes loses nothing; `selectedId` is its logger's id,
-     null while it's new. `view` is the canvas pan/zoom ({ scale, x, y }). `quick` is the small form that makes an
-     input logger from inside a roll-up's sources or beside a ratio's A/B
-     ({ mode, letter, name, inputType, unit, groupId, error }). */
+     freeform tree canvas (layoutTree + saved x/y, orthogonal elbows) on the right; and a floating pop-over form for
+     the selected node. A saved logger saves as it's edited and its node follows each change; a new one is a dashed
+     node until Create Logger. `groupKey` is the open group's id ("" for No group). `draft` is the pop-over's form,
+     null when no node is selected; `selectedId` is its logger's id, null while it's new. `view` is the canvas
+     pan/zoom ({ scale, x, y }). `ghostPos` holds x/y for an unsaved dashed node. `quick` is the small form that
+     makes an input logger from inside a roll-up's sources or beside a ratio's A/B. */
   const NEW_ID = "__new_logger__";
   const SAVE_PAUSE = 900;
   const VIEW_MIN = 0.4;
@@ -741,6 +753,7 @@
     selectedId: null,
     draft: null,
     view: { scale: 1, x: 0, y: 0 },
+    ghostPos: null, // { x, y } for the unsaved dashed node
     lookPop: null, // null | "color" | "sticker"
     iconMode: "text", // "text" | "sticker"
     groupEdit: null,
@@ -761,6 +774,10 @@
   let pinch = null;
   /** @type {{ id: number, x: number, y: number, vx: number, vy: number } | null} */
   let dragPan = null;
+  /** Live tree geometry for fast edge redraws while dragging a node. */
+  let liveTree = null;
+  /** @type {{ pointerId: number, id: string, sx: number, sy: number, ox: number, oy: number, moved: boolean, card: HTMLElement } | null} */
+  let nodeDrag = null;
 
   // Logging values isn't built yet, so no input logger has a latest value and every node shows "—".
   const latestValues = () => ({});
@@ -892,7 +909,6 @@
     el = {
       overlay,
       button,
-      sheet: overlay.querySelector(".logger-sheet"),
       groups: overlay.querySelector("[data-logger-groups]"),
       addGroup: overlay.querySelector("[data-logger-add-group]"),
       stage: overlay.querySelector(".logger-stage"),
@@ -997,6 +1013,7 @@
       y: ui.view.y,
     };
     dragPan = null;
+    cancelNodeDrag(false);
     el.canvas.classList.add("is-panning");
   }
 
@@ -1024,6 +1041,7 @@
       const at = coords(event);
       pointers.set(event.pointerId, { x: at.x, y: at.y, onNode });
       if (pointers.size >= 2) {
+        cancelNodeDrag(false);
         // Capture both fingers so pinch keeps tracking if one started on a node.
         for (const id of pointers.keys()) {
           try { el.canvas.setPointerCapture(id); } catch (_) { /* ignore */ }
@@ -1143,7 +1161,7 @@
   function open() {
     if (!init()) return;
     Object.assign(ui, {
-      selectedId: null, draft: null, view: { scale: 1, x: 0, y: 0 }, lookPop: null, iconMode: "text",
+      selectedId: null, draft: null, ghostPos: null, view: { scale: 1, x: 0, y: 0 }, lookPop: null, iconMode: "text",
       groupEdit: null, groupConfirm: null, confirmDelete: false, quick: null, status: { text: "", error: false },
     });
     closeLookPops();
@@ -1155,8 +1173,7 @@
     el.button.setAttribute("aria-expanded", "true");
     applyView();
     render();
-    const coarse = window.matchMedia?.("(pointer: coarse)").matches;
-    (coarse ? el.sheet : el.groups.querySelector("[aria-current='true']") || el.addNode)?.focus({ preventScroll: true });
+    (el.groups.querySelector("[aria-current='true']") || el.addNode)?.focus({ preventScroll: true });
   }
 
   function close(refocus = true) {
@@ -1171,7 +1188,7 @@
   function startNew() {
     settle();
     Object.assign(ui, {
-      selectedId: null, draft: blankDraft(ui.groupKey), lookPop: null, iconMode: "text", confirmDelete: false, quick: null,
+      selectedId: null, draft: blankDraft(ui.groupKey), ghostPos: null, lookPop: null, iconMode: "text", confirmDelete: false, quick: null,
       status: { text: "", error: false },
     });
     closeLookPops();
@@ -1200,7 +1217,10 @@
     const id = ui.selectedId;
     settle();
     closeLookPops();
-    Object.assign(ui, { selectedId: null, draft: null, lookPop: null, iconMode: "text", confirmDelete: false, quick: null, status: { text: "", error: false } });
+    Object.assign(ui, {
+      selectedId: null, draft: null, ghostPos: null, lookPop: null, iconMode: "text", confirmDelete: false, quick: null,
+      status: { text: "", error: false },
+    });
     render(() => (id && focusNode(id)) || el.addNode.focus({ preventScroll: true }));
   }
 
@@ -1401,6 +1421,228 @@
     return ui.selectedId ? loggers.map((row) => (row.id === logger.id ? logger : row)) : [...loggers, logger];
   }
 
+  // Keeps coords without status chatter (seed on first show, or after a node drag).
+  function quietPersist(loggers, groups) {
+    const saver = store();
+    if (!saver?.saveLoggers) return false;
+    saver.saveLoggers(loggers, groups);
+    clearTimeout(ui.saveTimer);
+    ui.saveTimer = setTimeout(() => {
+      ui.saveTimer = 0;
+      ui.saveSeq += 1;
+      Promise.resolve(store()?.flush?.()).catch(() => {});
+    }, SAVE_PAUSE);
+    return true;
+  }
+
+  function seedMissingPositions(seeded) {
+    if (!seeded?.length) return;
+    const real = seeded.filter((row) => row.id && row.id !== NEW_ID);
+    const ghost = seeded.find((row) => row.id === NEW_ID);
+    if (ghost) ui.ghostPos = { x: ghost.x, y: ghost.y };
+    if (!real.length) return;
+    const { loggers, groups } = readAll();
+    let dirty = false;
+    const next = loggers.map((logger) => {
+      const hit = real.find((row) => row.id === logger.id);
+      if (!hit || hasCoords(logger)) return logger;
+      dirty = true;
+      return cleanLogger({ ...logger, x: hit.x, y: hit.y });
+    });
+    if (dirty) quietPersist(next, groups);
+  }
+
+  function saveNodePosition(id, x, y) {
+    if (!id || id === NEW_ID) {
+      ui.ghostPos = { x, y };
+      return;
+    }
+    const { loggers, groups } = readAll();
+    const next = loggers.map((logger) => (
+      logger.id === id ? cleanLogger({ ...logger, x, y, updatedAt: new Date().toISOString() }) : logger
+    ));
+    quietPersist(next, groups);
+  }
+
+  function cancelNodeDrag(commit) {
+    if (!nodeDrag) return;
+    const { card, id, moved, ox, oy } = nodeDrag;
+    card.classList.remove("is-dragging");
+    el.canvas.classList.remove("is-node-dragging");
+    if (commit && moved) {
+      const x = parseFloat(card.style.left);
+      const y = parseFloat(card.style.top);
+      if (liveTree) liveTree.pos.set(id, { x, y });
+      saveNodePosition(id, x, y);
+      expandTreeBounds();
+    } else if (!commit && moved) {
+      card.style.left = `${ox}px`;
+      card.style.top = `${oy}px`;
+      if (liveTree) {
+        liveTree.pos.set(id, { x: ox, y: oy });
+        redrawLiveEdges(id);
+      }
+    }
+    nodeDrag = null;
+  }
+
+  function expandTreeBounds() {
+    if (!liveTree || !el?.tree) return;
+    let maxX = 0;
+    let maxY = 0;
+    for (const at of liveTree.pos.values()) {
+      maxX = Math.max(maxX, at.x + NODE_W);
+      maxY = Math.max(maxY, at.y + NODE_H);
+    }
+    for (const stub of liveTree.stubs) maxY = Math.max(maxY, stub.y1 + STUB + 18);
+    const width = Math.max(WORLD_MIN, el.canvas.clientWidth, maxX + PAD * 4);
+    const height = Math.max(WORLD_MIN, maxY + PAD * 4);
+    if (width !== liveTree.width || height !== liveTree.height) {
+      liveTree.width = width;
+      liveTree.height = height;
+      el.tree.style.width = `${width}px`;
+      el.tree.style.height = `${height}px`;
+      el.world.style.minWidth = `${width}px`;
+      el.world.style.minHeight = `${height}px`;
+      const lines = el.tree.querySelector(".logger-tree-lines");
+      if (lines) {
+        lines.setAttribute("width", String(width));
+        lines.setAttribute("height", String(height));
+      }
+    }
+  }
+
+  function redrawLiveEdges(movedId) {
+    if (!liveTree) return;
+    const { pos, edges, stubs } = liveTree;
+    for (const edge of edges) {
+      if (movedId && edge.from !== movedId && edge.to !== movedId) continue;
+      const from = pos.get(edge.from);
+      const to = pos.get(edge.to);
+      if (!from || !to) continue;
+      edge.x1 = from.x + NODE_W / 2;
+      edge.y1 = from.y + NODE_H;
+      edge.x2 = to.x + NODE_W / 2;
+      edge.y2 = to.y;
+      edge.pathEl?.setAttribute("d", edgePath(edge));
+      if (edge.letter && edge.labelEl) {
+        const label = elbowLabel(edge);
+        edge.labelEl.querySelector("circle")?.setAttribute("cx", String(label.x));
+        edge.labelEl.querySelector("circle")?.setAttribute("cy", String(label.y));
+        const text = edge.labelEl.querySelector("text");
+        text?.setAttribute("x", String(label.x));
+        text?.setAttribute("y", String(label.y));
+      }
+    }
+    for (const stub of stubs) {
+      if (movedId && stub.from !== movedId) continue;
+      const at = pos.get(stub.from);
+      if (!at) continue;
+      // Keep relative offset within the node width from initial layout.
+      const offset = Number.isFinite(stub.offset) ? stub.offset : 0.5;
+      stub.x1 = at.x + offset * NODE_W;
+      stub.y1 = at.y + NODE_H;
+      const end = stub.y1 + STUB;
+      stub.pathEl?.setAttribute("d", `M${stub.x1} ${stub.y1}V${end}`);
+      if (stub.endEl) {
+        const circle = stub.endEl.querySelector("circle");
+        const text = stub.endEl.querySelector("text");
+        if (stub.letter) {
+          circle?.setAttribute("cx", String(stub.x1));
+          circle?.setAttribute("cy", String(end + 8));
+          text?.setAttribute("x", String(stub.x1));
+          text?.setAttribute("y", String(end + 8));
+        } else {
+          circle?.setAttribute("cx", String(stub.x1));
+          circle?.setAttribute("cy", String(end));
+          text?.setAttribute("x", String(stub.x1));
+          text?.setAttribute("y", String(end + 12));
+        }
+      }
+    }
+  }
+
+  function activateNode(logger, selected) {
+    if (logger.id === NEW_ID) el.editor.querySelector("[name='name']")?.focus();
+    else if (!selected) select(logger.id);
+    else el.editor.querySelector("[name='name']")?.focus();
+  }
+
+  function bindNodeDrag(card, logger, selected) {
+    const coords = (event) => window.FicusInput.getCoordinates(event);
+    let skipClick = false;
+    card.addEventListener("pointerdown", (event) => {
+      if (event.button != null && event.button !== 0) return;
+      if (pinch || pointers.size > 1) return;
+      const at = coords(event);
+      nodeDrag = {
+        pointerId: event.pointerId,
+        id: logger.id,
+        sx: at.x,
+        sy: at.y,
+        ox: parseFloat(card.style.left) || 0,
+        oy: parseFloat(card.style.top) || 0,
+        moved: false,
+        card,
+        selected,
+        logger,
+      };
+      try { card.setPointerCapture(event.pointerId); } catch (_) { /* ignore */ }
+      event.stopPropagation();
+    });
+    card.addEventListener("pointermove", (event) => {
+      if (!nodeDrag || nodeDrag.pointerId !== event.pointerId || nodeDrag.card !== card) return;
+      if (pinch || pointers.size > 1) {
+        cancelNodeDrag(false);
+        return;
+      }
+      const at = coords(event);
+      const dist = Math.hypot(at.x - nodeDrag.sx, at.y - nodeDrag.sy);
+      if (!nodeDrag.moved && dist < TAP_PX) return;
+      nodeDrag.moved = true;
+      card.classList.add("is-dragging");
+      el.canvas.classList.add("is-node-dragging");
+      const x = nodeDrag.ox + (at.x - nodeDrag.sx) / ui.view.scale;
+      const y = nodeDrag.oy + (at.y - nodeDrag.sy) / ui.view.scale;
+      card.style.left = `${x}px`;
+      card.style.top = `${y}px`;
+      if (liveTree) {
+        liveTree.pos.set(logger.id, { x, y });
+        redrawLiveEdges(logger.id);
+      }
+      event.preventDefault();
+    });
+    const end = (event) => {
+      if (!nodeDrag || nodeDrag.pointerId !== event.pointerId || nodeDrag.card !== card) return;
+      const moved = nodeDrag.moved;
+      if (card.hasPointerCapture(event.pointerId)) {
+        try { card.releasePointerCapture(event.pointerId); } catch (_) { /* ignore */ }
+      }
+      if (moved) {
+        skipClick = true;
+        cancelNodeDrag(true);
+      } else {
+        nodeDrag = null;
+      }
+    };
+    card.addEventListener("pointerup", end);
+    card.addEventListener("pointercancel", (event) => {
+      if (!nodeDrag || nodeDrag.pointerId !== event.pointerId) return;
+      skipClick = true;
+      cancelNodeDrag(false);
+    });
+    // Tap (< 5px) falls through to click → open editor; a drag suppresses that click.
+    card.addEventListener("click", (event) => {
+      if (skipClick) {
+        skipClick = false;
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      activateNode(logger, selected);
+    });
+  }
+
   function renderTree(loggers, groups) {
     const name = groupName(groups, ui.groupKey);
     el.treeTitle.textContent = name;
@@ -1408,9 +1650,16 @@
     el.addNode.title = `New logger in ${name}`;
     el.laidWidth = el.wrap.clientWidth;
     const shown = withDraft(loggers);
+    // Apply ghost position for the unsaved node before layout so it stays put while drafting.
+    if (ui.draft && !ui.selectedId && ui.ghostPos) {
+      const ghost = shown.find((row) => row.id === NEW_ID);
+      if (ghost) Object.assign(ghost, ui.ghostPos);
+    }
     const layout = layoutTree(shown, ui.groupKey, el.canvas.clientWidth);
     const focused = el.tree.contains(document.activeElement) ? document.activeElement.dataset.nodeId : null;
+    nodeDrag = null;
     if (!layout.nodes.length) {
+      liveTree = null;
       el.tree.removeAttribute("style");
       el.tree.replaceChildren(h("p", {
         class: "logger-tree-empty", text: `${ui.groupKey ? `No loggers in ${name} yet.` : "No loggers outside a group."} Press + to add one.`,
@@ -1418,35 +1667,59 @@
       return;
     }
     el.tree.style.cssText = `width:${layout.width}px;height:${layout.height}px`;
+    el.world.style.minWidth = `${layout.width}px`;
+    el.world.style.minHeight = `${layout.height}px`;
     const selectedKey = ui.draft ? ui.selectedId || NEW_ID : null;
     const context = { loggers: shown, groups, values: latestValues(), selectedKey };
+    const lines = drawLines(layout, selectedKey);
     el.tree.replaceChildren(...[
-      drawLines(layout, selectedKey),
-      layout.looseLabel && h("p", { class: "logger-tree-label", style: `left:${layout.looseLabel.x}px;top:${layout.looseLabel.y}px`, text: "Standalone inputs" }),
+      lines,
       ...layout.nodes.map((node) => nodeCard(node, context)),
     ].filter(Boolean));
+    seedMissingPositions(layout.seeded);
     if (focused) el.tree.querySelector(`[data-node-id="${CSS.escape(focused)}"]`)?.focus({ preventScroll: true });
   }
 
   function drawLines(layout, selectedKey) {
     const lines = svg("svg", { class: "logger-tree-lines", width: layout.width, height: layout.height, "aria-hidden": "true" });
-    if (layout.divider != null) lines.append(svg("line", { class: "logger-tree-rule", x1: PAD, x2: layout.width - PAD, y1: layout.divider, y2: layout.divider }));
     const lit = (edge) => edge.from === selectedKey || edge.to === selectedKey;
+    const edgeRows = [];
     for (const edge of layout.edges) {
-      lines.append(svg("path", { class: `logger-edge${lit(edge) ? " is-lit" : ""}${edge.away ? " is-away" : ""}`, d: edgePath(edge) }));
+      const pathEl = svg("path", {
+        class: `logger-edge${lit(edge) ? " is-lit" : ""}${edge.away ? " is-away" : ""}`,
+        d: edgePath(edge),
+        "data-from": edge.from,
+        "data-to": edge.to,
+      });
+      lines.append(pathEl);
+      edgeRows.push({ ...edge, pathEl, labelEl: null });
     }
-    for (const edge of layout.edges) {
+    for (const edge of edgeRows) {
       if (!edge.letter) continue;
-      lines.append(svg("g", { class: `logger-edge-letter${lit(edge) ? " is-lit" : ""}` },
-        svg("circle", { cx: edge.label.x, cy: edge.label.y, r: 8 }), svg("text", { x: edge.label.x, y: edge.label.y }, edge.letter)));
+      const labelEl = svg("g", { class: `logger-edge-letter${lit(edge) ? " is-lit" : ""}` },
+        svg("circle", { cx: edge.label.x, cy: edge.label.y, r: 8 }), svg("text", { x: edge.label.x, y: edge.label.y }, edge.letter));
+      lines.append(labelEl);
+      edge.labelEl = labelEl;
     }
+    const stubRows = [];
     for (const stub of layout.stubs) {
+      const at = layout.nodes.find((node) => node.logger.id === stub.from);
+      const offset = at ? (stub.x1 - at.x) / NODE_W : 0.5;
       const end = stub.y1 + STUB;
-      lines.append(svg("path", { class: "logger-stub", d: `M${stub.x1} ${stub.y1}V${end}` }));
-      lines.append(stub.letter
+      const pathEl = svg("path", { class: "logger-stub", d: `M${stub.x1} ${stub.y1}V${end}` });
+      const endEl = stub.letter
         ? svg("g", { class: "logger-stub-end" }, svg("circle", { cx: stub.x1, cy: end + 8, r: 8 }), svg("text", { x: stub.x1, y: end + 8 }, stub.letter))
-        : svg("g", { class: "logger-stub-end" }, svg("circle", { cx: stub.x1, cy: end, r: 3 }), svg("text", { class: "is-note", x: stub.x1, y: end + 12 }, "no sources yet")));
+        : svg("g", { class: "logger-stub-end" }, svg("circle", { cx: stub.x1, cy: end, r: 3 }), svg("text", { class: "is-note", x: stub.x1, y: end + 12 }, "no sources yet"));
+      lines.append(pathEl, endEl);
+      stubRows.push({ ...stub, offset, pathEl, endEl });
     }
+    liveTree = {
+      width: layout.width,
+      height: layout.height,
+      pos: new Map(layout.nodes.map((node) => [node.logger.id, { x: node.x, y: node.y }])),
+      edges: edgeRows,
+      stubs: stubRows,
+    };
     return lines;
   }
 
@@ -1467,16 +1740,11 @@
     const withGoal = hasActiveGoal(logger);
     const label = [rowLabel(logger), value === "\u2014" ? "no value yet" : `value ${value}`, node.away && `in ${home}`, isNew && "not created yet", withGoal && "has a goal"]
       .filter(Boolean).join(", ");
-    return h("button", {
+    const card = h("button", {
       type: "button",
       class: `logger-node is-${logger.mode}${logger.mode === "rollup" && logger.rollupConfig.math === "ratio" ? " is-ratio" : ""}${selected ? " is-selected" : ""}${node.away ? " is-away" : ""}${isNew ? " is-new" : ""}${withGoal ? " has-goal" : ""}`,
       style: `left:${node.x}px;top:${node.y}px;width:${NODE_W}px;height:${NODE_H}px;--logger-color:${logger.color}`,
       "data-node-id": logger.id, "aria-current": selected ? "true" : null, "aria-label": label,
-      onclick: () => {
-        if (isNew) el.editor.querySelector("[name='name']")?.focus();
-        else if (!selected) select(logger.id);
-        else el.editor.querySelector("[name='name']")?.focus();
-      },
     },
     h("span", { class: `logger-node-op${mark.word ? " is-word" : ""}`, title: mark.label, "aria-hidden": "true" }, mark.content),
     withGoal && h("span", { class: "logger-node-goal", title: "Has a goal", "aria-hidden": "true" }, icon("target")),
@@ -1487,6 +1755,8 @@
         pending
           ? h("span", { class: "logger-pending", title: "Not connected to its sources yet: it shows \u2014 until it is", text: "Pending" })
           : h("span", { class: "logger-node-note", text: note }))));
+    bindNodeDrag(card, logger, selected);
+    return card;
   }
 
   /* ---------- The floating pop-over editor ---------- */
@@ -2177,6 +2447,10 @@
       name = existing?.name || "New logger";
     }
     const raw = { ...(existing || {}), id, name, icon: normalizeIcon(draft.icon), color: draft.color, groupId: draft.groupId, mode: draft.mode };
+    if (!existing && ui.ghostPos) {
+      raw.x = ui.ghostPos.x;
+      raw.y = ui.ghostPos.y;
+    }
     for (const key of STANDARD_CONFIG_KEYS) delete raw[key];
     delete raw.unit;
     delete raw.inputType;
@@ -2242,7 +2516,9 @@
     const built = buildFromDraft(loggers);
     if (built.error) return fail(built.error, built.selector);
     if (!persist([...loggers, built.logger], groups, "Created.", waitingNote(built.logger))) return fail("Sign in to keep loggers.", null);
-    Object.assign(ui, { selectedId: built.logger.id, draft: draftOf(built.logger), groupKey: built.logger.groupId, confirmDelete: false });
+    Object.assign(ui, {
+      selectedId: built.logger.id, draft: draftOf(built.logger), groupKey: built.logger.groupId, confirmDelete: false, ghostPos: null,
+    });
     renderInPlace();
     focusNode(built.logger.id, false);
   }
@@ -2501,6 +2777,7 @@
     formatValue,
     unitOfId,
     layoutTree,
+    edgePath,
     validateLoggedValue,
     isEligibleSource,
     MODES: MODES.map(([id]) => id),
