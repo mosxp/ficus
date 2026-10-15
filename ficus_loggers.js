@@ -415,21 +415,24 @@
 
   /* ---------- Manage Loggers ---------- */
 
-  /* Three parts: the groups down the left (a strip along the top on a phone); the open group's loggers as a tree
-     (layoutTree) on the right; and under the tree, a collapsible sheet with the selected node's form. A saved logger
-     saves as it's edited and its node follows each change; a new one is a dashed node until Create Logger.
-     `groupKey` is the open group's id ("" for No group). `draft` is the drawer's form, null when no node is
+  /* Three parts: the groups down the left (a strip along the top on a phone); the open group's loggers as a zoomable
+     tree canvas (layoutTree) on the right; and a floating pop-over form for the selected node. A saved logger saves
+     as it's edited and its node follows each change; a new one is a dashed node until Create Logger.
+     `groupKey` is the open group's id ("" for No group). `draft` is the pop-over's form, null when no node is
      selected, kept across mode switches so flipping between modes loses nothing; `selectedId` is its logger's id,
-     null while it's new. `sheetCollapsed` shrinks the sheet to the name and "Tap to edit". `quick` is the small form
-     that makes an input logger from inside a roll-up's sources or beside a ratio's A/B
+     null while it's new. `view` is the canvas pan/zoom ({ scale, x, y }). `quick` is the small form that makes an
+     input logger from inside a roll-up's sources or beside a ratio's A/B
      ({ mode, letter, name, inputType, unit, groupId, error }). */
   const NEW_ID = "__new_logger__";
   const SAVE_PAUSE = 900;
+  const VIEW_MIN = 0.4;
+  const VIEW_MAX = 2.5;
+  const VIEW_STEP = 0.15;
   const ui = {
     groupKey: null,
     selectedId: null,
     draft: null,
-    sheetCollapsed: false,
+    view: { scale: 1, x: 0, y: 0 },
     groupEdit: null,
     groupConfirm: null,
     confirmDelete: false,
@@ -439,8 +442,12 @@
     status: { text: "", error: false },
   };
   let el = null;
-  let pan = null;
-  let sheetDrag = null;
+  /** @type {Map<number, { x: number, y: number, onNode: boolean }>} */
+  let pointers = new Map();
+  /** @type {{ dist: number, scale: number, midX: number, midY: number, x: number, y: number } | null} */
+  let pinch = null;
+  /** @type {{ id: number, x: number, y: number, vx: number, vy: number } | null} */
+  let dragPan = null;
 
   // Logging values isn't built yet, so no input logger has a latest value and every node shows "—".
   const latestValues = () => ({});
@@ -544,9 +551,14 @@
       stage: overlay.querySelector(".logger-stage"),
       wrap: overlay.querySelector(".logger-canvas-wrap"),
       canvas: overlay.querySelector("[data-logger-canvas]"),
+      world: overlay.querySelector("[data-logger-world]"),
       tree: overlay.querySelector("[data-logger-tree]"),
       treeTitle: overlay.querySelector("[data-logger-tree-title]"),
       addNode: overlay.querySelector("[data-logger-new]"),
+      zoomIn: overlay.querySelector("[data-zoom-in]"),
+      zoomOut: overlay.querySelector("[data-zoom-out]"),
+      zoomReset: overlay.querySelector("[data-zoom-reset]"),
+      pop: overlay.querySelector("[data-logger-pop]"),
       editor: overlay.querySelector("[data-logger-editor]"),
       laidWidth: 0,
     };
@@ -566,7 +578,10 @@
       if (ui.selectedId) saveNow();
       else createFromDraft();
     });
-    bindPan();
+    el.pop.addEventListener("pointerdown", (event) => {
+      if (event.target === el.pop) deselect();
+    });
+    bindView();
     if (window.ResizeObserver) {
       new ResizeObserver(() => {
         if (el.overlay.classList.contains("hidden") || el.wrap.clientWidth === el.laidWidth) return;
@@ -577,96 +592,175 @@
     return true;
   }
 
-  // Fingers and pens scroll the canvas natively; a mouse drags its empty space to pan.
-  function bindPan() {
+  function clampScale(scale) {
+    return Math.min(VIEW_MAX, Math.max(VIEW_MIN, scale));
+  }
+
+  function applyView() {
+    const { scale, x, y } = ui.view;
+    el.world.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
+    el.zoomReset.textContent = `${Math.round(scale * 100)}%`;
+  }
+
+  function resetView() {
+    ui.view = { scale: 1, x: 0, y: 0 };
+    applyView();
+  }
+
+  // Zooms around a point in canvas client space (keeps that world point under the cursor/fingers).
+  function zoomAt(clientX, clientY, nextScale) {
+    const rect = el.canvas.getBoundingClientRect();
+    const cx = clientX - rect.left;
+    const cy = clientY - rect.top;
+    const { scale, x, y } = ui.view;
+    const worldX = (cx - x) / scale;
+    const worldY = (cy - y) / scale;
+    const s = clampScale(nextScale);
+    ui.view.scale = s;
+    ui.view.x = cx - worldX * s;
+    ui.view.y = cy - worldY * s;
+    applyView();
+  }
+
+  function zoomBy(factor) {
+    const rect = el.canvas.getBoundingClientRect();
+    zoomAt(rect.left + rect.width / 2, rect.top + rect.height / 2, ui.view.scale * factor);
+  }
+
+  function pointerDist(a, b) {
+    const dx = a.x - b.x;
+    const dy = a.y - b.y;
+    return Math.hypot(dx, dy) || 1;
+  }
+
+  function pointerMid(a, b) {
+    return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  }
+
+  function beginPinch() {
+    const pts = [...pointers.values()];
+    if (pts.length < 2) return;
+    const mid = pointerMid(pts[0], pts[1]);
+    pinch = {
+      dist: pointerDist(pts[0], pts[1]),
+      scale: ui.view.scale,
+      midX: mid.x,
+      midY: mid.y,
+      x: ui.view.x,
+      y: ui.view.y,
+    };
+    dragPan = null;
+    el.canvas.classList.add("is-panning");
+  }
+
+  function endPointers() {
+    pointers.clear();
+    pinch = null;
+    dragPan = null;
+    el.canvas.classList.remove("is-panning");
+  }
+
+  // Canvas pan (one finger / mouse on background) and pinch-zoom (two fingers); wheel zooms on desktop.
+  function bindView() {
     const coords = (event) => window.FicusInput.getCoordinates(event);
-    el.canvas.addEventListener("pointerdown", (event) => {
-      if (event.pointerType !== "mouse" || event.button !== 0 || event.target.closest(".logger-node")) return;
-      const at = coords(event);
-      pan = { id: event.pointerId, x: at.x, y: at.y, left: el.canvas.scrollLeft, top: el.canvas.scrollTop };
-      el.canvas.setPointerCapture(event.pointerId);
-      el.canvas.classList.add("is-panning");
+    el.zoomIn.addEventListener("click", () => zoomBy(1 + VIEW_STEP));
+    el.zoomOut.addEventListener("click", () => zoomBy(1 / (1 + VIEW_STEP)));
+    el.zoomReset.addEventListener("click", resetView);
+    el.canvas.addEventListener("wheel", (event) => {
       event.preventDefault();
+      const factor = event.deltaY < 0 ? 1.08 : 1 / 1.08;
+      zoomAt(event.clientX, event.clientY, ui.view.scale * factor);
+    }, { passive: false });
+    el.canvas.addEventListener("pointerdown", (event) => {
+      if (event.button != null && event.button !== 0) return;
+      const onNode = Boolean(event.target.closest(".logger-node"));
+      const at = coords(event);
+      pointers.set(event.pointerId, { x: at.x, y: at.y, onNode });
+      if (pointers.size >= 2) {
+        // Capture both fingers so pinch keeps tracking if one started on a node.
+        for (const id of pointers.keys()) {
+          try { el.canvas.setPointerCapture(id); } catch (_) { /* ignore */ }
+        }
+        beginPinch();
+        event.preventDefault();
+        return;
+      }
+      if (!onNode) {
+        // Background only: capture for pan. Leave node taps uncaptured so click still fires.
+        try { el.canvas.setPointerCapture(event.pointerId); } catch (_) { /* ignore */ }
+        dragPan = { id: event.pointerId, x: at.x, y: at.y, vx: ui.view.x, vy: ui.view.y };
+        el.canvas.classList.add("is-panning");
+        event.preventDefault();
+      }
     });
     el.canvas.addEventListener("pointermove", (event) => {
-      if (!pan || pan.id !== event.pointerId) return;
+      if (!pointers.has(event.pointerId)) return;
       const at = coords(event);
-      el.canvas.scrollLeft = pan.left - (at.x - pan.x);
-      el.canvas.scrollTop = pan.top - (at.y - pan.y);
+      const prev = pointers.get(event.pointerId);
+      pointers.set(event.pointerId, { x: at.x, y: at.y, onNode: prev.onNode });
+      if (pointers.size >= 2) {
+        if (!pinch) beginPinch();
+        const pts = [...pointers.values()];
+        const mid = pointerMid(pts[0], pts[1]);
+        const dist = pointerDist(pts[0], pts[1]);
+        const next = clampScale(pinch.scale * (dist / pinch.dist));
+        const rect = el.canvas.getBoundingClientRect();
+        const startCx = pinch.midX - rect.left;
+        const startCy = pinch.midY - rect.top;
+        const worldX = (startCx - pinch.x) / pinch.scale;
+        const worldY = (startCy - pinch.y) / pinch.scale;
+        const cx = mid.x - rect.left;
+        const cy = mid.y - rect.top;
+        ui.view.scale = next;
+        ui.view.x = cx - worldX * next;
+        ui.view.y = cy - worldY * next;
+        applyView();
+        event.preventDefault();
+        return;
+      }
+      if (dragPan && dragPan.id === event.pointerId) {
+        ui.view.x = dragPan.vx + (at.x - dragPan.x);
+        ui.view.y = dragPan.vy + (at.y - dragPan.y);
+        applyView();
+        event.preventDefault();
+      }
     });
     const end = (event) => {
-      if (!pan || pan.id !== event.pointerId) return;
-      pan = null;
-      el.canvas.classList.remove("is-panning");
-      if (el.canvas.hasPointerCapture(event.pointerId)) el.canvas.releasePointerCapture(event.pointerId);
+      if (!pointers.has(event.pointerId)) return;
+      pointers.delete(event.pointerId);
+      if (el.canvas.hasPointerCapture(event.pointerId)) {
+        try { el.canvas.releasePointerCapture(event.pointerId); } catch (_) { /* ignore */ }
+      }
+      if (pointers.size >= 2) beginPinch();
+      else if (pointers.size === 1) {
+        pinch = null;
+        const [id, pt] = [...pointers.entries()][0];
+        if (!pt.onNode) {
+          dragPan = { id, x: pt.x, y: pt.y, vx: ui.view.x, vy: ui.view.y };
+          el.canvas.classList.add("is-panning");
+        } else {
+          dragPan = null;
+          el.canvas.classList.remove("is-panning");
+        }
+      } else {
+        endPointers();
+      }
     };
     el.canvas.addEventListener("pointerup", end);
     el.canvas.addEventListener("pointercancel", end);
-  }
-
-  // Dragging the sheet's handle down collapses it; dragging up expands it. A tap (or keyboard click) toggles.
-  function bindSheetHandle(handle) {
-    const coords = (event) => window.FicusInput.getCoordinates(event);
-    let skipClick = false;
-    handle.addEventListener("pointerdown", (event) => {
-      if (event.button != null && event.button !== 0) return;
-      const at = coords(event);
-      sheetDrag = { id: event.pointerId, y: at.y, moved: false };
-      handle.setPointerCapture(event.pointerId);
-      event.preventDefault();
-    });
-    handle.addEventListener("pointermove", (event) => {
-      if (!sheetDrag || sheetDrag.id !== event.pointerId) return;
-      const at = coords(event);
-      if (Math.abs(at.y - sheetDrag.y) > 8) sheetDrag.moved = true;
-    });
-    const end = (event) => {
-      if (!sheetDrag || sheetDrag.id !== event.pointerId) return;
-      const at = coords(event);
-      const dy = at.y - sheetDrag.y;
-      const moved = sheetDrag.moved;
-      sheetDrag = null;
-      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
-      if (!moved) return;
-      skipClick = true;
-      if (dy > 28 && !ui.sheetCollapsed) setSheetCollapsed(true);
-      else if (dy < -28 && ui.sheetCollapsed) setSheetCollapsed(false);
-    };
-    handle.addEventListener("pointerup", end);
-    handle.addEventListener("pointercancel", end);
-    handle.addEventListener("click", () => {
-      if (skipClick) {
-        skipClick = false;
-        return;
-      }
-      setSheetCollapsed(!ui.sheetCollapsed);
-    });
-  }
-
-  function setSheetCollapsed(collapsed) {
-    if (ui.sheetCollapsed === collapsed) return;
-    ui.sheetCollapsed = collapsed;
-    const { loggers, groups } = readAll();
-    renderDrawer(loggers, groups);
-    syncStage();
-    // The canvas grows or shrinks with the sheet; re-lay the tree and keep the selected node in view.
-    requestAnimationFrame(() => {
-      renderTree(loggers, groups);
-      const id = ui.selectedId || (ui.draft ? NEW_ID : null);
-      if (id) focusNode(id, false);
+    el.canvas.addEventListener("lostpointercapture", (event) => {
+      if (pointers.has(event.pointerId)) end(event);
     });
   }
 
   function syncStage() {
-    el.stage.classList.toggle("is-idle", !ui.draft);
-    el.stage.classList.toggle("is-collapsed", Boolean(ui.draft && ui.sheetCollapsed));
-    el.editor.classList.toggle("is-collapsed", Boolean(ui.draft && ui.sheetCollapsed));
+    el.pop.classList.toggle("hidden", !ui.draft);
   }
 
   function open() {
     if (!init()) return;
     Object.assign(ui, {
-      selectedId: null, draft: null, sheetCollapsed: false, groupEdit: null, groupConfirm: null, confirmDelete: false,
+      selectedId: null, draft: null, view: { scale: 1, x: 0, y: 0 }, groupEdit: null, groupConfirm: null, confirmDelete: false,
       quick: null, status: { text: "", error: false },
     });
     const { loggers, groups } = readAll();
@@ -675,6 +769,7 @@
     }
     el.overlay.classList.remove("hidden");
     el.button.setAttribute("aria-expanded", "true");
+    applyView();
     render();
     const coarse = window.matchMedia?.("(pointer: coarse)").matches;
     (coarse ? el.sheet : el.groups.querySelector("[aria-current='true']") || el.addNode)?.focus({ preventScroll: true });
@@ -688,11 +783,11 @@
     if (refocus) el.button.focus({ preventScroll: true });
   }
 
-  // A new logger in the open group: a dashed node, and its form in the drawer.
+  // A new logger in the open group: a dashed node, and its form in the pop-over.
   function startNew() {
     settle();
     Object.assign(ui, {
-      selectedId: null, draft: blankDraft(ui.groupKey), sheetCollapsed: false, confirmDelete: false, quick: null,
+      selectedId: null, draft: blankDraft(ui.groupKey), confirmDelete: false, quick: null,
       status: { text: "", error: false },
     });
     render(() => {
@@ -708,7 +803,7 @@
     if (!logger) return;
     settle();
     Object.assign(ui, {
-      groupKey: logger.groupId, selectedId: id, draft: draftOf(logger), sheetCollapsed: false, confirmDelete: false,
+      groupKey: logger.groupId, selectedId: id, draft: draftOf(logger), confirmDelete: false,
       quick: null, groupConfirm: null, status: { text: "", error: false },
     });
     render(() => focusNode(id));
@@ -717,20 +812,26 @@
   function deselect() {
     const id = ui.selectedId;
     settle();
-    Object.assign(ui, { selectedId: null, draft: null, sheetCollapsed: false, confirmDelete: false, quick: null, status: { text: "", error: false } });
+    Object.assign(ui, { selectedId: null, draft: null, confirmDelete: false, quick: null, status: { text: "", error: false } });
     render(() => (id && focusNode(id)) || el.addNode.focus({ preventScroll: true }));
   }
 
-  // Focuses a node and scrolls the canvas to it; false if it isn't in the tree.
+  // Focuses a node and pans the view so it sits near the centre of the canvas; false if it isn't in the tree.
   function focusNode(id, focus = true) {
     const node = el.tree.querySelector(`[data-node-id="${CSS.escape(id)}"]`);
     if (!node) return false;
     if (focus) node.focus({ preventScroll: true });
-    node.scrollIntoView({ block: "nearest", inline: "nearest" });
+    const nx = parseFloat(node.style.left) + NODE_W / 2;
+    const ny = parseFloat(node.style.top) + NODE_H / 2;
+    const vw = el.canvas.clientWidth;
+    const vh = el.canvas.clientHeight;
+    ui.view.x = vw / 2 - nx * ui.view.scale;
+    ui.view.y = vh / 2 - ny * ui.view.scale;
+    applyView();
     return true;
   }
 
-  // The groups that get a pill: every group, and No group while it has loggers (or the drawer's logger is in it), or
+  // The groups that get a pill: every group, and No group while it has loggers (or the pop-over's logger is in it), or
   // while there are no groups.
   function groupKeys(loggers, groups) {
     const keys = groups.map((group) => group.id);
@@ -740,7 +841,7 @@
 
   function settleState(loggers, groups) {
     if (ui.selectedId && !loggers.some((logger) => logger.id === ui.selectedId)) {
-      Object.assign(ui, { selectedId: null, draft: null, sheetCollapsed: false, confirmDelete: false });
+      Object.assign(ui, { selectedId: null, draft: null, confirmDelete: false });
     }
     if (ui.quick && ui.quick.mode !== ui.draft?.mode) ui.quick = null;
     const keys = groupKeys(loggers, groups);
@@ -757,7 +858,7 @@
     then?.();
   }
 
-  // Redraws the groups and the tree only, leaving the drawer (and whatever is focused in it) alone.
+  // Redraws the groups and the tree only, leaving the pop-over (and whatever is focused in it) alone.
   function refresh() {
     const { loggers, groups } = readAll();
     settleState(loggers, groups);
@@ -766,14 +867,12 @@
     renderTree(loggers, groups);
   }
 
-  // Redraws without moving the form: the drawer and sheet keep their scroll, then `selector` (if any) is focused.
+  // Redraws without moving the form: the pop-over body keeps its scroll, then `selector` (if any) is focused.
   function renderInPlace(selector) {
     const bodyTop = el.editor.querySelector(".logger-editor-body")?.scrollTop || 0;
-    const sheetTop = el.sheet.scrollTop;
     render(() => {
       const body = el.editor.querySelector(".logger-editor-body");
       if (body) body.scrollTop = bodyTop;
-      el.sheet.scrollTop = sheetTop;
       const target = selector ? el.editor.querySelector(selector) : null;
       if (!target) return;
       target.focus({ preventScroll: true });
@@ -831,7 +930,7 @@
     settle();
     Object.assign(ui, { groupKey: key, groupConfirm: null });
     if (ui.draft && !ui.selectedId) ui.draft.groupId = key;
-    else Object.assign(ui, { selectedId: null, draft: null, sheetCollapsed: false, confirmDelete: false, quick: null, status: { text: "", error: false } });
+    else Object.assign(ui, { selectedId: null, draft: null, confirmDelete: false, quick: null, status: { text: "", error: false } });
   }
 
   function openGroup(key) {
@@ -907,7 +1006,7 @@
 
   /* ---------- The tree canvas ---------- */
 
-  // The saved loggers with the drawer's changes on top: its logger as it stands, or the new one not made yet.
+  // The saved loggers with the pop-over's changes on top: its logger as it stands, or the new one not made yet.
   function withDraft(loggers) {
     if (!ui.draft) return loggers;
     const { logger } = buildFromDraft(loggers, true);
@@ -987,7 +1086,7 @@
       onclick: () => {
         if (isNew) el.editor.querySelector("[name='name']")?.focus();
         else if (!selected) select(logger.id);
-        else if (ui.sheetCollapsed) setSheetCollapsed(false);
+        else el.editor.querySelector("[name='name']")?.focus();
       },
     },
     h("span", { class: `logger-node-op${mark.word ? " is-word" : ""}`, title: mark.label, "aria-hidden": "true" }, mark.content),
@@ -1000,7 +1099,7 @@
           : h("span", { class: "logger-node-note", text: note }))));
   }
 
-  /* ---------- The drawer (collapsible bottom sheet) ---------- */
+  /* ---------- The floating pop-over editor ---------- */
 
   function field(labelText, control, hint) {
     const id = control.id || (control.id = `logger-field-${Math.random().toString(36).slice(2, 8)}`);
@@ -1019,36 +1118,11 @@
   function renderDrawer(loggers, groups) {
     const draft = ui.draft;
     if (!draft) {
-      el.editor.replaceChildren(h("div", { class: "logger-drawer-empty" },
-        h("p", { class: "logger-drawer-prompt", text: "Select a logger node to view and edit details, or click + to create one." }),
-        statusLine()));
+      el.editor.replaceChildren();
       return;
     }
 
     const editing = ui.selectedId ? loggers.find((logger) => logger.id === ui.selectedId) : null;
-    const titleText = editing
-      ? (clip(draft.name, NAME_MAX) || editing.name)
-      : (clip(draft.name, NAME_MAX) || `New logger in ${groupName(groups, draft.groupId)}`);
-
-    const handle = h("button", {
-      type: "button", class: "logger-sheet-handle", "aria-label": ui.sheetCollapsed ? "Expand details" : "Collapse details",
-      "aria-expanded": String(!ui.sheetCollapsed), title: ui.sheetCollapsed ? "Tap to edit" : "Drag down or tap to collapse",
-    }, h("span", { class: "logger-sheet-pill", "aria-hidden": "true" }));
-    bindSheetHandle(handle);
-
-    if (ui.sheetCollapsed) {
-      el.editor.replaceChildren(
-        handle,
-        h("button", {
-          type: "button", class: "logger-sheet-summary", "aria-label": `Expand details for ${titleText}`,
-          onclick: () => setSheetCollapsed(false),
-        },
-        h("span", { class: "logger-sheet-summary-name", text: titleText }),
-        h("span", { class: "logger-sheet-summary-hint", text: "Tap to edit" })),
-        statusLine());
-      return;
-    }
-
     const others = loggers.filter((logger) => logger.id !== ui.selectedId);
     // Loggers this one can't read from: those that already read from it (a loop).
     const loops = new Set(editing ? others.filter((logger) => readsFrom(loggers, logger.id, editing.id)).map((logger) => logger.id) : []);
@@ -1113,8 +1187,8 @@
       }))));
     const kindNote = kindOf(draft.mode) === "metric"
       ? h("p", { class: "logger-kind-note is-metric" }, h("span", { class: "logger-fx", "aria-hidden": "true", text: FX }), " ",
-        h("strong", { text: "Calculated metric." }), " Read-only: Ficus works it out from its sources, and it shows \u2014 until they're connected.")
-      : h("p", { class: "logger-kind-note" }, h("strong", { text: "Input logger." }), " You'll record its values in dots.");
+        h("strong", { text: "Calculated metric." }), " Read-only until its sources are connected.")
+      : h("p", { class: "logger-kind-note" }, h("strong", { text: "Input logger." }), " Values are recorded in dots.");
 
     let modePanel;
     if (draft.mode === "standard") {
@@ -1160,7 +1234,7 @@
             pick,
             h("button", {
               type: "button", class: "logger-text-btn logger-var-new", "data-quick-open": letter, "aria-expanded": String(making),
-              "aria-label": `Add a source logger for ${letter}`, title: `Add a source logger for ${letter}`, text: "+ Add Source",
+              "aria-label": `Add a source logger for ${letter}`, title: `Add a source logger for ${letter}`, text: "+ Add",
               onclick: () => (making ? closeQuick() : openQuick(letter)),
             }));
           return making ? [row, quickForm(groups)] : [row];
@@ -1230,18 +1304,11 @@
         h("button", { type: "submit", class: "logger-primary", text: "Create Logger" }));
     }
 
-    const head = h("div", {
-      class: "logger-editor-head",
-      onclick: (event) => {
-        if (event.target.closest("button")) return;
-        setSheetCollapsed(true);
-      },
-    },
-    heading,
-    h("button", { type: "button", class: "logger-icon-btn", title: "Close details", "aria-label": "Close details", onclick: deselect }, icon("close")));
+    const head = h("div", { class: "logger-editor-head" },
+      heading,
+      h("button", { type: "button", class: "logger-icon-btn", title: "Close", "aria-label": "Close", onclick: deselect }, icon("close")));
 
     el.editor.replaceChildren(
-      handle,
       head,
       h("div", { class: "logger-editor-body" },
         h("div", { class: "logger-pair logger-name-look" },
@@ -1257,7 +1324,7 @@
       foot);
   }
 
-  /* The drawer's logger as it would be saved ({ logger, existing }), or { error, selector } saying what stops it.
+  /* The pop-over's logger as it would be saved ({ logger, existing }), or { error, selector } saying what stops it.
      Leniently (for the tree) nothing stops it: a blank name stands in with what's saved, or a placeholder. */
   function buildFromDraft(loggers, lenient = false) {
     const draft = ui.draft;
@@ -1297,7 +1364,7 @@
     return { logger, existing };
   }
 
-  // After each change in the drawer: a saved logger saves, and the groups and tree follow it (into another group, if
+  // After each change in the pop-over: a saved logger saves, and the groups and tree follow it (into another group, if
   // it moved).
   function changed() {
     const draft = ui.draft;
@@ -1329,7 +1396,7 @@
     const built = buildFromDraft(loggers);
     if (built.error) return fail(built.error, built.selector);
     if (!persist([...loggers, built.logger], groups, "Created.", waitingNote(built.logger))) return fail("Sign in to keep loggers.", null);
-    Object.assign(ui, { selectedId: built.logger.id, draft: draftOf(built.logger), groupKey: built.logger.groupId, confirmDelete: false, sheetCollapsed: false });
+    Object.assign(ui, { selectedId: built.logger.id, draft: draftOf(built.logger), groupKey: built.logger.groupId, confirmDelete: false });
     renderInPlace();
     focusNode(built.logger.id, false);
   }
@@ -1499,7 +1566,7 @@
     return true;
   }
 
-  // Sends a change still waiting for a pause to Google Drive now, without a word (the drawer is moving on).
+  // Sends a change still waiting for a pause to Google Drive now, without a word (the pop-over is moving on).
   function settle() {
     if (!ui.saveTimer) return;
     clearTimeout(ui.saveTimer);
@@ -1531,7 +1598,7 @@
     });
     clearTimeout(ui.saveTimer);
     ui.saveTimer = 0;
-    Object.assign(ui, { selectedId: null, draft: null, sheetCollapsed: false, confirmDelete: false, quick: null });
+    Object.assign(ui, { selectedId: null, draft: null, confirmDelete: false, quick: null });
     persist(next, groups, "Deleted.");
     render(() => el.addNode.focus({ preventScroll: true }));
   }
@@ -1549,8 +1616,6 @@
       } else if (ui.confirmDelete) {
         ui.confirmDelete = false;
         render(() => el.editor.querySelector("[data-logger-delete]")?.focus());
-      } else if (ui.draft && !ui.sheetCollapsed) {
-        setSheetCollapsed(true);
       } else if (ui.draft) {
         deselect();
       } else {

@@ -19,7 +19,7 @@
     <script src="scrapboard.js?v=26"></script>
     <script src="quick_line.js?v=2"></script>
     <script src="space.js?v=92" defer></script>
-    <script src="ficus_loggers.js?v=4" defer></script>
+    <script src="ficus_loggers.js?v=5" defer></script>
     <script src="collection.js?v=19" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -1731,24 +1731,38 @@
       }
       .logger-icon-btn:hover, .logger-icon-btn:focus-visible { background: rgba(0, 0, 0, 0.06); color: #1c1917; outline: none; }
       .logger-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .logger-stage { display: grid; grid-template-rows: minmax(11rem, 5fr) minmax(12rem, 5fr); min-width: 0; min-height: 0; }
-      /* With no node selected, or the sheet collapsed, the tree takes the room. */
-      .logger-stage.is-idle, .logger-stage.is-collapsed { grid-template-rows: minmax(11rem, 1fr) max-content; }
-      .logger-editor.is-collapsed { min-height: max-content; }
-      .logger-canvas-wrap { position: relative; min-height: 0; border-bottom: 1px solid #e5e5e5; }
-      /* Fingers scroll it natively (pan-x pan-y); a mouse drags its empty space (.is-panning). */
+      .logger-stage { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+      .logger-canvas-wrap { position: relative; flex: 1; min-height: 0; }
+      /* Transform pan/zoom on .logger-world; hit-testing stays on the transformed nodes. */
       .logger-canvas {
-        position: absolute; inset: 0; overflow: auto; overscroll-behavior: contain; touch-action: pan-x pan-y; cursor: grab;
-        background: #fafaf9 radial-gradient(#e2e0dd 1px, transparent 1px) 0 0 / 18px 18px local; outline: none;
+        position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: grab;
+        background: #fafaf9 radial-gradient(#e2e0dd 1px, transparent 1px) 0 0 / 18px 18px; outline: none;
+        -webkit-user-select: none; user-select: none;
       }
-      .logger-canvas.is-panning { cursor: grabbing; user-select: none; -webkit-user-select: none; }
+      .logger-canvas.is-panning { cursor: grabbing; }
+      .logger-world { position: absolute; top: 0; left: 0; transform-origin: 0 0; will-change: transform; }
       .logger-canvas-title {
-        position: absolute; z-index: 2; top: 0.6rem; left: 0.75rem; max-width: calc(100% - 6rem); margin: 0; padding: 0.25rem 0.5rem;
+        position: absolute; z-index: 2; top: 0.6rem; left: 0.75rem; max-width: calc(100% - 11rem); margin: 0; padding: 0.25rem 0.5rem;
         overflow: hidden; background: rgba(250, 250, 249, 0.92); font-size: 0.7rem; font-weight: 700; letter-spacing: 0.07em;
         text-transform: uppercase; color: #78716c; text-overflow: ellipsis; white-space: nowrap; pointer-events: none;
       }
+      .logger-zoom {
+        position: absolute; z-index: 3; top: 0.5rem; right: 3.85rem; display: inline-flex; align-items: stretch;
+        border: 1px solid #e7e5e4; background: rgba(255, 255, 255, 0.94); box-shadow: 0 2px 8px rgba(28, 25, 23, 0.12);
+      }
+      .logger-zoom-btn, .logger-zoom-reset {
+        display: inline-flex; min-width: 2.25rem; height: 2.5rem; align-items: center; justify-content: center; padding: 0 0.55rem;
+        border: 0; background: transparent; font: inherit; font-size: 1rem; font-weight: 700; color: #1c1917; cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .logger-zoom-reset {
+        min-width: 3.1rem; border-left: 1px solid #e7e5e4; border-right: 1px solid #e7e5e4;
+        font-size: 0.72rem; font-weight: 700; letter-spacing: 0.02em; font-variant-numeric: tabular-nums;
+      }
+      .logger-zoom-btn:hover, .logger-zoom-reset:hover { background: #f5f5f4; }
+      .logger-zoom-btn:focus-visible, .logger-zoom-reset:focus-visible { outline: 2px solid #1c1917; outline-offset: -2px; }
       .logger-canvas-add {
-        position: absolute; z-index: 2; top: 0.5rem; right: 1.1rem; display: inline-flex; width: 2.5rem; height: 2.5rem; align-items: center;
+        position: absolute; z-index: 3; top: 0.5rem; right: 0.75rem; display: inline-flex; width: 2.5rem; height: 2.5rem; align-items: center;
         justify-content: center; border: 0; background: #1c1917; color: #fff; box-shadow: 0 2px 8px rgba(28, 25, 23, 0.25); cursor: pointer;
       }
       .logger-canvas-add svg { width: 1.15rem; height: 1.15rem; }
@@ -1830,131 +1844,122 @@
       .logger-badge.is-rollup { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; }
       .logger-badge.is-ratio { border-color: #ddd6fe; background: #f5f3ff; color: #6d28d9; }
       .logger-empty { margin: 0; padding: 0.4rem 1.1rem; font-size: 0.78rem; line-height: 1.45; color: #a8a29e; }
-      .logger-editor { display: flex; flex-direction: column; min-width: 0; min-height: 0; background: #fff; }
-      .logger-sheet-handle {
-        display: flex; flex-shrink: 0; align-items: center; justify-content: center; width: 100%; height: 1.35rem; padding: 0;
-        border: 0; background: transparent; cursor: grab; touch-action: none; -webkit-touch-callout: none;
+      .logger-pop {
+        position: absolute; inset: 0; z-index: 5; display: flex; align-items: center; justify-content: center;
+        padding: 0.75rem; background: rgba(28, 25, 23, 0.28);
       }
-      .logger-sheet-handle:active { cursor: grabbing; }
-      .logger-sheet-pill { display: block; width: 2.25rem; height: 0.28rem; background: #d6d3d1; }
-      .logger-sheet-summary {
-        display: flex; flex-shrink: 0; align-items: baseline; gap: 0.75rem; width: 100%; min-height: 2.75rem; padding: 0.35rem 1.25rem 0.55rem;
-        border: 0; background: transparent; font: inherit; color: #1c1917; text-align: left; cursor: pointer;
+      .logger-pop.hidden { display: none; }
+      .logger-editor {
+        display: flex; flex-direction: column; width: min(26rem, 100%); max-height: min(92%, 34rem);
+        min-width: 0; background: #fff; box-shadow: 0 16px 40px rgba(28, 25, 23, 0.22);
       }
-      .logger-sheet-summary:hover { background: #fafaf9; }
-      .logger-sheet-summary-name { flex: 1; min-width: 0; overflow: hidden; font-size: 0.95rem; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-      .logger-sheet-summary-hint { flex-shrink: 0; font-size: 0.76rem; font-weight: 600; color: #a8a29e; }
-      .logger-editor.is-collapsed .logger-status { padding: 0 1.25rem 0.55rem; }
-      .logger-editor-head { display: flex; align-items: center; gap: 0.5rem; padding: 0.15rem 0.75rem 0.2rem 1.25rem; cursor: pointer; }
-      .logger-editor-title { flex: 1; min-width: 0; margin: 0; overflow: hidden; font-size: 0.95rem; font-weight: 700; color: #1c1917; text-overflow: ellipsis; white-space: nowrap; outline: none; }
-      .logger-editor-body { flex: 1; min-height: 0; padding: 0.25rem 1.25rem 0.65rem; overflow-y: auto; overscroll-behavior: contain; }
-      .logger-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 0 0.75rem; }
-      .logger-name-look { align-items: start; }
-      .logger-drawer-empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 0.5rem; padding: 1rem 1.25rem; text-align: center; }
-      .logger-drawer-prompt { max-width: 22rem; margin: 0; font-size: 0.84rem; line-height: 1.4; color: #78716c; }
-      .logger-drawer-empty .logger-status { flex: 0 0 auto; }
-      .logger-used-by { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+      .logger-editor-head { display: flex; align-items: center; gap: 0.4rem; padding: 0.65rem 0.55rem 0.35rem 0.9rem; }
+      .logger-editor-title { flex: 1; min-width: 0; margin: 0; overflow: hidden; font-size: 0.84rem; font-weight: 700; color: #1c1917; text-overflow: ellipsis; white-space: nowrap; outline: none; }
+      .logger-editor-body { flex: 1; min-height: 0; padding: 0.15rem 0.9rem 0.55rem; overflow-y: auto; overscroll-behavior: contain; }
+      .logger-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0 0.55rem; }
+      .logger-name-look { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); align-items: start; }
+      .logger-used-by { display: flex; flex-wrap: wrap; gap: 0.3rem; }
       .logger-chip {
-        display: inline-flex; max-width: 14rem; height: 2.25rem; align-items: center; gap: 0.45rem; padding: 0 0.65rem 0 0.4rem;
-        border: 1px solid #e7e5e4; background: #fff; font-size: 0.8rem; font-weight: 600; color: #44403c; cursor: pointer;
+        display: inline-flex; max-width: 12rem; height: 1.9rem; align-items: center; gap: 0.35rem; padding: 0 0.5rem 0 0.3rem;
+        border: 1px solid #e7e5e4; background: #fff; font-size: 0.72rem; font-weight: 600; color: #44403c; cursor: pointer;
       }
       .logger-chip:hover { border-color: #a8a29e; background: #fafaf9; }
-      .logger-chip .logger-tile { width: 1.4rem; height: 1.4rem; font-size: 0.72rem; }
-      .logger-field { min-width: 0; margin: 0 0 0.55rem; padding: 0; border: 0; }
+      .logger-chip .logger-tile { width: 1.2rem; height: 1.2rem; font-size: 0.62rem; }
+      .logger-field { min-width: 0; margin: 0 0 0.4rem; padding: 0; border: 0; }
       .logger-field[hidden] { display: none; }
       .logger-label {
-        display: block; margin: 0 0 0.25rem; padding: 0; font-size: 0.66rem; font-weight: 700; letter-spacing: 0.07em;
+        display: block; margin: 0 0 0.18rem; padding: 0; font-size: 0.62rem; font-weight: 700; letter-spacing: 0.07em;
         text-transform: uppercase; color: #8c8c8c;
       }
       /* 16px text, so iPhone and iPad Safari don't zoom in on the field. */
       .logger-input {
-        display: block; box-sizing: border-box; width: 100%; height: 2.5rem; padding: 0 0.75rem; border: 1px solid #e7e5e4;
+        display: block; box-sizing: border-box; width: 100%; height: 2.25rem; padding: 0 0.55rem; border: 1px solid #e7e5e4;
         background: #fafaf9; font: inherit; font-size: 1rem; color: #1c1917; outline: none;
       }
       .logger-input:focus { border-color: #1c1917; background: #fff; }
-      select.logger-input { cursor: pointer; }
+      select.logger-input { cursor: pointer; font-size: 0.875rem; }
       .logger-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: 0.02em; }
-      .logger-hint { margin: 0.35rem 0 0; font-size: 0.74rem; line-height: 1.4; color: #a8a29e; }
-      .logger-hint.is-error { margin: -0.5rem 0 0.9rem; color: #be123c; }
+      .logger-hint { margin: 0.2rem 0 0; font-size: 0.68rem; line-height: 1.35; color: #a8a29e; }
+      .logger-hint.is-error { margin: -0.35rem 0 0.55rem; color: #be123c; }
       .logger-hint[hidden] { display: none; }
-      .logger-look { display: flex; flex-wrap: wrap; align-items: center; gap: 0.6rem; }
-      .logger-icon-input { width: 4.5rem; text-align: center; }
-      .logger-swatches { display: flex; flex-wrap: wrap; gap: 0.4rem; }
-      .logger-swatch { width: 2rem; height: 2rem; padding: 0; border: 0; background: var(--swatch); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12); cursor: pointer; }
-      .logger-swatch[aria-checked="true"] { box-shadow: 0 0 0 2px #fff, 0 0 0 4px #1c1917; }
-      .logger-swatch:focus-visible { outline: 2px solid #1c1917; outline-offset: 4px; }
+      .logger-look { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+      .logger-icon-input { width: 3.25rem; text-align: center; }
+      .logger-swatches { display: flex; flex-wrap: wrap; gap: 0.28rem; }
+      .logger-swatch { width: 1.65rem; height: 1.65rem; padding: 0; border: 0; background: var(--swatch); box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12); cursor: pointer; }
+      .logger-swatch[aria-checked="true"] { box-shadow: 0 0 0 2px #fff, 0 0 0 3px #1c1917; }
+      .logger-swatch:focus-visible { outline: 2px solid #1c1917; outline-offset: 3px; }
       .logger-modes { min-width: 0; }
-      .logger-mode-row { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; padding: 3px; border: 1px solid #e7e5e4; background: #f5f5f4; }
+      .logger-mode-row { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; padding: 2px; border: 1px solid #e7e5e4; background: #f5f5f4; }
       .logger-fx { font-family: Georgia, "Times New Roman", serif; font-style: italic; font-weight: 700; }
-      .logger-kind-note { margin: 0.3rem 0 0; font-size: 0.8rem; line-height: 1.3; color: #78716c; }
+      .logger-kind-note { margin: 0.2rem 0 0; font-size: 0.7rem; line-height: 1.3; color: #78716c; }
       .logger-kind-note strong { color: #44403c; }
       .logger-kind-note.is-metric, .logger-kind-note.is-metric strong { color: #6d28d9; }
-      .logger-mode { height: 2.25rem; padding: 0 0.35rem; border: 0; background: transparent; font-size: 0.78rem; font-weight: 600; color: #78716c; cursor: pointer; }
+      .logger-mode { height: 2rem; padding: 0 0.3rem; border: 0; background: transparent; font-size: 0.72rem; font-weight: 600; color: #78716c; cursor: pointer; }
       .logger-mode:hover { color: #1c1917; }
       .logger-mode[aria-checked="true"] { background: #fff; color: #1c1917; box-shadow: 0 1px 3px rgba(28, 25, 23, 0.12); }
       .logger-mode:focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
-      .logger-mode-field { margin-bottom: 0.35rem; }
-      .logger-mode-panel { padding-top: 0.45rem; border-top: 1px solid #f0efed; }
+      .logger-mode-field { margin-bottom: 0.25rem; }
+      .logger-mode-panel { padding-top: 0.35rem; border-top: 1px solid #f0efed; }
       .logger-ratio-unit {
-        margin: 0.45rem 0 0; padding: 0.4rem 0.6rem; border: 1px dashed #ddd6fe; background: #faf8ff;
-        font-size: 0.78rem; font-weight: 600; color: #6d28d9; font-variant-numeric: tabular-nums;
+        margin: 0.3rem 0 0; padding: 0.3rem 0.45rem; border: 1px dashed #ddd6fe; background: #faf8ff;
+        font-size: 0.7rem; font-weight: 600; color: #6d28d9; font-variant-numeric: tabular-nums;
       }
-      .logger-checks { display: flex; max-height: 9.5rem; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; border: 1px solid #e7e5e4; }
-      .logger-check { display: flex; min-height: 2.75rem; align-items: center; gap: 0.6rem; padding: 0.35rem 0.75rem; font-size: 0.86rem; color: #292524; cursor: pointer; }
+      .logger-checks { display: flex; max-height: 7.5rem; flex-direction: column; overflow-y: auto; overscroll-behavior: contain; border: 1px solid #e7e5e4; }
+      .logger-check { display: flex; min-height: 2.15rem; align-items: center; gap: 0.45rem; padding: 0.2rem 0.55rem; font-size: 0.78rem; color: #292524; cursor: pointer; }
       .logger-check + .logger-check { border-top: 1px solid #f5f5f4; }
       .logger-check:hover { background: #fafaf9; }
-      .logger-check input { width: 1.15rem; height: 1.15rem; flex-shrink: 0; margin: 0; accent-color: #1c1917; cursor: pointer; }
+      .logger-check input { width: 1.05rem; height: 1.05rem; flex-shrink: 0; margin: 0; accent-color: #1c1917; cursor: pointer; }
       .logger-check.is-blocked { opacity: 0.55; cursor: not-allowed; }
-      .logger-sources > .logger-hint { margin: 0 0 0.5rem; }
+      .logger-sources > .logger-hint { margin: 0 0 0.35rem; }
       .logger-add-source {
-        width: 100%; height: 2.5rem; margin-top: 0.5rem; border: 1px dashed #d6d3d1; background: #fff; font-size: 0.8rem; font-weight: 600;
+        width: 100%; height: 2.15rem; margin-top: 0.35rem; border: 1px dashed #d6d3d1; background: #fff; font-size: 0.74rem; font-weight: 600;
         color: #44403c; cursor: pointer;
       }
       .logger-add-source:hover { border-color: #a8a29e; background: #fafaf9; }
-      .logger-quick { margin-top: 0.5rem; padding: 0.75rem; border: 1px solid #e7e5e4; border-left: 3px solid #1c1917; background: #fafaf9; }
+      .logger-quick { margin-top: 0.35rem; padding: 0.55rem; border: 1px solid #e7e5e4; border-left: 3px solid #1c1917; background: #fafaf9; }
       .logger-vars .logger-quick { margin-top: 0; }
-      .logger-quick-title { margin: 0 0 0.6rem; font-size: 0.82rem; font-weight: 700; color: #1c1917; }
-      .logger-quick .logger-field { margin-bottom: 0.6rem; }
+      .logger-quick-title { margin: 0 0 0.4rem; font-size: 0.74rem; font-weight: 700; color: #1c1917; }
+      .logger-quick .logger-field { margin-bottom: 0.4rem; }
       .logger-quick .logger-input { background: #fff; }
-      .logger-quick-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0 0.6rem; }
-      .logger-quick-error { margin: 0 0 0.6rem; font-size: 0.76rem; color: #be123c; }
-      .logger-quick-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.5rem; }
+      .logger-quick-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr)); gap: 0 0.45rem; }
+      .logger-quick-error { margin: 0 0 0.4rem; font-size: 0.68rem; color: #be123c; }
+      .logger-quick-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.4rem; }
       .logger-small-btn.is-primary { border-color: #1c1917; background: #1c1917; color: #fff; }
       .logger-small-btn.is-primary:hover { background: #44403c; }
-      .logger-var-new { padding: 0 0.6rem; white-space: nowrap; }
+      .logger-var-new { padding: 0 0.45rem; white-space: nowrap; font-size: 0.72rem; }
       .logger-var-new[aria-expanded="true"] { border-color: #1c1917; }
-      .logger-vars { display: flex; flex-direction: column; gap: 0.5rem; }
-      .logger-var { display: flex; align-items: center; gap: 0.6rem; }
+      .logger-vars { display: flex; flex-direction: column; gap: 0.35rem; }
+      .logger-var { display: flex; align-items: center; gap: 0.4rem; }
       .logger-var-letter {
-        display: inline-flex; width: 2.5rem; height: 2.5rem; flex-shrink: 0; align-items: center; justify-content: center;
-        background: #1c1917; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.95rem; font-weight: 700; color: #fff;
+        display: inline-flex; width: 2rem; height: 2rem; flex-shrink: 0; align-items: center; justify-content: center;
+        background: #1c1917; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.82rem; font-weight: 700; color: #fff;
       }
-      .logger-editor-foot { display: flex; flex-shrink: 0; align-items: center; gap: 0.6rem; padding: 0.55rem 1.25rem; border-top: 1px solid #e5e5e5; background: #fff; }
+      .logger-editor-foot { display: flex; flex-shrink: 0; align-items: center; gap: 0.45rem; padding: 0.45rem 0.9rem; border-top: 1px solid #e5e5e5; background: #fff; }
       .logger-editor-foot.is-confirming { flex-wrap: wrap; background: rgba(185, 28, 28, 0.05); }
-      .logger-status { flex: 1; min-width: 0; margin: 0; font-size: 0.76rem; line-height: 1.35; color: #78716c; }
+      .logger-status { flex: 1; min-width: 0; margin: 0; font-size: 0.68rem; line-height: 1.3; color: #78716c; }
       .logger-status.is-error { color: #be123c; }
-      .logger-primary { height: 2.5rem; flex-shrink: 0; padding: 0 1.1rem; border: 0; background: #1c1917; font-size: 0.82rem; font-weight: 600; color: #fff; cursor: pointer; }
+      .logger-primary { height: 2.25rem; flex-shrink: 0; padding: 0 0.9rem; border: 0; background: #1c1917; font-size: 0.78rem; font-weight: 600; color: #fff; cursor: pointer; }
       .logger-primary:hover { background: #44403c; }
-      .logger-text-btn { height: 2.5rem; flex-shrink: 0; padding: 0 0.75rem; border: 1px solid #e7e5e4; background: #fff; font-size: 0.8rem; font-weight: 600; color: #44403c; cursor: pointer; }
+      .logger-text-btn { height: 2.25rem; flex-shrink: 0; padding: 0 0.65rem; border: 1px solid #e7e5e4; background: #fff; font-size: 0.74rem; font-weight: 600; color: #44403c; cursor: pointer; }
       .logger-text-btn.is-danger { color: #b91c1c; }
       .logger-text-btn.is-danger:hover { border-color: #b91c1c; background: rgba(185, 28, 28, 0.05); }
-      .logger-confirm-text { flex: 1 1 12rem; min-width: 0; font-size: 0.8rem; line-height: 1.35; color: #b91c1c; }
-      .logger-small-btn { height: 2.25rem; flex-shrink: 0; padding: 0 0.75rem; border: 1px solid #e5e5e5; background: #fff; font-size: 0.76rem; font-weight: 600; color: #44403c; cursor: pointer; }
+      .logger-confirm-text { flex: 1 1 10rem; min-width: 0; font-size: 0.74rem; line-height: 1.3; color: #b91c1c; }
+      .logger-small-btn { height: 2rem; flex-shrink: 0; padding: 0 0.65rem; border: 1px solid #e5e5e5; background: #fff; font-size: 0.72rem; font-weight: 600; color: #44403c; cursor: pointer; }
       .logger-small-btn:hover { background: #f5f5f4; }
       .logger-small-btn.is-danger { border-color: #b91c1c; background: #b91c1c; color: #fff; }
       .logger-small-btn.is-danger:hover { background: #991b1b; }
-      :is(.logger-primary, .logger-text-btn, .logger-small-btn, .logger-add-group, .logger-add-source, .logger-chip, .logger-sheet-summary):focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
+      :is(.logger-primary, .logger-text-btn, .logger-small-btn, .logger-add-group, .logger-add-source, .logger-chip):focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
       .logger-group-pill:focus-visible { outline: 2px solid #1c1917; outline-offset: -2px; }
-      .logger-sheet-handle:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
       @media (hover: none), (pointer: coarse) {
-        .logger-input, .logger-mode, .logger-primary, .logger-text-btn, .logger-add-group, .logger-add-source, .logger-chip, .logger-canvas-add, .logger-sheet-summary { height: 2.75rem; }
-        .logger-canvas-add { width: 2.75rem; }
+        .logger-input, .logger-mode, .logger-primary, .logger-text-btn, .logger-add-group, .logger-add-source, .logger-chip, .logger-canvas-add, .logger-zoom-btn, .logger-zoom-reset { height: 2.75rem; }
+        .logger-canvas-add, .logger-zoom-btn { width: 2.75rem; min-width: 2.75rem; }
+        .logger-zoom { right: 4.1rem; }
+        .logger-zoom-reset { min-width: 3.4rem; }
         .logger-icon-btn, .logger-small-btn { min-width: 2.75rem; height: 2.75rem; }
         .logger-group-pill { min-height: 2.75rem; }
-        .logger-swatch { width: 2.5rem; height: 2.5rem; }
-        .logger-var-letter { width: 2.75rem; height: 2.75rem; }
-        .logger-sheet-handle { height: 1.75rem; }
-        .logger-sheet-pill { width: 2.75rem; height: 0.32rem; }
+        .logger-swatch { width: 2.25rem; height: 2.25rem; }
+        .logger-var-letter { width: 2.5rem; height: 2.5rem; }
+        .logger-check { min-height: 2.75rem; }
         .logger-sheet .space-tag-sheet-close { width: 2.75rem; height: 2.75rem; }
       }
       /* A phone: the groups become a strip that scrolls sideways above the canvas. */
@@ -1969,8 +1974,8 @@
         .logger-group.is-confirming { flex: 0 0 18rem; }
         .logger-directory-foot { padding: 0.5rem 0.75rem 0.5rem 0; border-top: 0; }
         .logger-add-group { width: auto; padding: 0 0.75rem; white-space: nowrap; }
-        .logger-stage { grid-template-rows: minmax(12rem, 5fr) minmax(14rem, 5fr); }
-        .logger-stage.is-idle, .logger-stage.is-collapsed { grid-template-rows: minmax(12rem, 1fr) max-content; }
+        .logger-editor { width: min(100%, 26rem); max-height: min(88%, 32rem); }
+        .logger-name-look { grid-template-columns: 1fr; }
       }
       /* The phone sheet runs full height, so it starts below the fixed account bar (Sign Out) in the top right. */
       @media (max-width: 767px) {
@@ -4167,11 +4172,20 @@
                   <div class="logger-canvas-wrap">
                     <h3 id="logger-tree-title" class="logger-canvas-title" data-logger-tree-title></h3>
                     <div class="logger-canvas" data-logger-canvas role="group" aria-labelledby="logger-tree-title">
-                      <div class="logger-tree" data-logger-tree></div>
+                      <div class="logger-world" data-logger-world>
+                        <div class="logger-tree" data-logger-tree></div>
+                      </div>
+                    </div>
+                    <div class="logger-zoom" data-logger-zoom role="group" aria-label="Zoom">
+                      <button type="button" class="logger-zoom-btn" data-zoom-out aria-label="Zoom out" title="Zoom out">−</button>
+                      <button type="button" class="logger-zoom-reset" data-zoom-reset aria-label="Reset zoom" title="Reset zoom">100%</button>
+                      <button type="button" class="logger-zoom-btn" data-zoom-in aria-label="Zoom in" title="Zoom in">+</button>
                     </div>
                     <button type="button" class="logger-canvas-add" data-logger-new aria-label="New logger" title="New logger"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 3v10M3 8h10" /></svg></button>
                   </div>
-                  <form class="logger-editor" data-logger-editor novalidate autocomplete="off" aria-label="Logger details"></form>
+                  <div class="logger-pop hidden" data-logger-pop>
+                    <form class="logger-editor" data-logger-editor novalidate autocomplete="off" aria-label="Logger details"></form>
+                  </div>
                 </div>
               </div>
             </div>
