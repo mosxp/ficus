@@ -2,13 +2,17 @@
  *
  * Everything a user makes is one JSON object, saved as Ficus/ficus_master_backup.json in their Drive
  * (ficus_drive.js):
- *   { format: "ficus-master", version: 1, savedAt,
+ *   { format: "ficus-master", version: 2, savedAt,
  *     dots,        Space's dots, each with its `children` (the arrows, in order)
  *     pages,       [{ kind: "board" | "block" | "block_board", id, dotId, data }]: board dots' sheets, block dots'
  *                  grids and scrapboard blocks' boards
  *     tags,        { types: { Type: [Name, ...] }, colors: { "Type:Name": { color } } }
  *     notebooks,   Collection's notebooks, in Shelf order
- *     library }    { checklistTemplates, pads, stickers, palettes, gif } (answered by ficus_cloud.js)
+ *     library,     { checklistTemplates, pads, stickers, palettes, gif } (answered by ficus_cloud.js)
+ *     loggers,     tracking loggers' definitions (see ficus_loggers.js)
+ *     logger_groups } the groups Manage Loggers clusters them in
+ * Version 2 added loggers and logger_groups; a page still on version 1 refuses a version 2 file (parseMaster), so
+ * it can't save over them.
  *
  * load(session) reads it once, at sign-in, and space.js and collection.js then read from memory without waiting.
  * Their saves change memory at once; a copy goes into IndexedDB on this device straight after, and 3 seconds after
@@ -19,7 +23,7 @@
   "use strict";
 
   const FORMAT = "ficus-master";
-  const VERSION = 1;
+  const VERSION = 2;
   const PAGE_KINDS = new Set(["board", "block", "block_board"]);
   const DRIVE_DELAY_MS = 3000;
   const DEVICE_DELAY_MS = 400;
@@ -58,6 +62,8 @@
   let tags = { types: {}, colors: {} };
   let notebooks = [];
   let library = emptyLibrary();
+  let loggers = [];
+  let loggerGroups = [];
 
   // The Drive file and the revision of it this device last read or wrote.
   let fileId = null;
@@ -88,6 +94,8 @@
       tags,
       notebooks,
       library,
+      loggers,
+      logger_groups: loggerGroups,
     };
   }
 
@@ -112,6 +120,8 @@
       palettes: list(saved.palettes),
       gif: isObject(saved.gif) ? saved.gif : null,
     };
+    loggers = list(master.loggers);
+    loggerGroups = list(master.logger_groups);
   }
 
   // The Drive file's text as a master object; throws (so nothing overwrites it) if it isn't one.
@@ -343,6 +353,8 @@
     tags = { types: {}, colors: {} };
     notebooks = [];
     library = emptyLibrary();
+    loggers = [];
+    loggerGroups = [];
     setStatus();
   }
 
@@ -603,6 +615,16 @@
     saveNotebooks(next) {
       if (!uid || !Array.isArray(next)) return;
       notebooks = next;
+      changed();
+    },
+
+    // Loggers and their groups as ficus_loggers.js keeps them (it checks their shape); saved together, as a logger's
+    // groupId points into the groups.
+    getLoggers: () => ({ loggers, groups: loggerGroups }),
+    saveLoggers(nextLoggers, nextGroups) {
+      if (!uid || !Array.isArray(nextLoggers) || !Array.isArray(nextGroups)) return;
+      loggers = nextLoggers;
+      loggerGroups = nextGroups;
       changed();
     },
 

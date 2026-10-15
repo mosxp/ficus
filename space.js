@@ -15084,6 +15084,7 @@
     closeMenus();
     closeDeletePrompt(false);
     closeTagManager(false);
+    window.FicusLoggers?.close(false);
     if (!followingRef) leaveRefTrail();
     openDotId = id;
     el.detailKicker.textContent = DOT_TYPES[dot.type].label;
@@ -15613,6 +15614,7 @@
       closeDetail(true);
       closeTitlePrompt();
       closeTagManager(false);
+      window.FicusLoggers?.close(false);
       closeMenus();
       stopSimulation();
       hoverId = null;

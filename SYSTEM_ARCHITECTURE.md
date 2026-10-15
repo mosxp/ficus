@@ -90,6 +90,26 @@ Appearance defaults to gray `#8C8C8C` at size 1, and the size slider runs from 0
 - In a dot's header, each Name badge (not its Type group) shows a 10% tint of its colour with a solid 2px left border in the colour. A Name with no colour uses the default dot gray.
 - Global renames carry colours to the new Type:Name; if the target already has a colour, that one stays. Global deletes remove the colour too.
 
+### Loggers
+
+Loggers are the things a user tracks over time (weight, spending, steps…). So far only their definitions exist: nothing records values yet. They are kept in the master file as `loggers` and `logger_groups` (see "Storage"). `ficus_loggers.js` (`window.FicusLoggers`) holds the model and the Manage Loggers modal.
+- A group is `{ id, name }`. Group names are unique, ignoring case.
+- A logger is `{ id, name, icon, color, groupId, mode, createdAt, updatedAt }` plus the fields of its mode:
+  - `standard`: `inputType` (`currency`, `numeric`, `tally`, `boolean`, `timer`, `compound` or `rating`), and `unit` for numeric and currency.
+  - `rollup`: `rollupConfig: { math, targetLoggers }`, `math` being `sum`, `average`, `max` or `min` and `targetLoggers` the ids of the loggers it combines.
+  - `formula`: `formulaConfig: { expression, variables }`, e.g. `{ expression: "A / B", variables: { A: <id>, B: <id> } }`. An expression takes numbers, the capital letters A–Z for loggers, `+ - * /` (also `× ÷ −`), signs and brackets. `parseFormula` reads it without `eval`. A letter not yet given a logger is `""`.
+- `icon` is at most 2 characters, an emoji or letters. Without one, the logger's tile shows the first letter of its name on its `color`.
+- `cleanLogger` keeps only the fields of the logger's mode, plus any fields it doesn't know. A `groupId` naming no group reads as no group.
+- A roll-up or formula can't read from itself, directly or through other loggers. The loggers that would make a loop are disabled in the roll-up checklist ("Uses this one") and left out of the formula dropdowns, and saving checks again (`readsFrom`).
+- Deleting a logger takes it out of every roll-up's sources and blanks the formula letters that used it. Deleting a group moves its loggers to No group.
+- `evaluateFormula(expression, values)` and `rollUp(math, numbers)` are ready for logged values. They give `null` for a division by zero, a missing value, or no numbers.
+
+**Manage Loggers** opens from the blue tally-mark button under the tag button (`#space-loggers-btn`):
+- **Directory (left):** each group is a collapsible section (whether it's collapsed isn't saved), listing its loggers with their icon, name and a type badge (the input type, "Roll-up · Sum", or "Formula"). "No group" comes last. A group's + starts a logger in it; its ✏️ and 🗑️ rename and delete it after a confirmation in the row. + Add Group at the bottom names the group in place: Enter or leaving the field saves, Escape cancels.
+- **Editor (right):** the selected logger, or a blank form from + New Logger. Name, Group, Icon & Colour and Mode (Standard Input | Roll-up | Formula) are always shown. Standard Input adds Input Type, and Unit Label for numeric and currency. Roll-up adds Math Operation and a checklist of the other loggers. Formula adds the expression, any problem with it shown under it as you type, and a logger dropdown for each letter it uses. Switching mode keeps what was filled in for the others until the logger is saved.
+- Save Logger (Create Logger for a new one) checks the form, saves, and writes to Drive straight away (`FicusStore.flush()`). The line beside it then says "Saved to Google Drive." or "Kept on this device until Google Drive can be reached." An error there clears as soon as the form is edited.
+- Under 640px wide it shows one pane at a time, with "‹ All loggers" to go back; under 768px it starts below the Sign Out corner. On touch screens its controls are 44px tall. If the screen is too short for the form, the whole sheet scrolls. Escape cancels a confirmation or closes it, and Tab stays inside it.
+
 ### Linked Calendar events
 
 - `linkedEvents` lists the Google Calendar events linked to a dot, each `{ eventId, title, startTime, endTime, htmlLink }`, one per event, in the order linked. Times are kept as Google gives them: dates for all-day events (the end being the day after), date-times with their offset for timed ones.
@@ -150,7 +170,7 @@ Ficus has no database of its own: each user's work is kept in their own Google D
 | `uploads/` | Photos, files, audio and video from `/api/upload`, and the images of stickers and sticky pads. |
 | `ficus_master_backup (replaced …).json`, `(unsynced from a device …)` | Copies kept when two devices saved over each other (below). |
 
-The master file is `{ format: "ficus-master", version: 1, savedAt, dots, pages, tags, notebooks, library }`:
+The master file is `{ format: "ficus-master", version: 2, savedAt, dots, pages, tags, notebooks, library, loggers, logger_groups }`:
 
 | Field | Holds | Replaces (localStorage, per user) |
 |-------|-------|-----------------------------------|
@@ -159,9 +179,13 @@ The master file is `{ format: "ficus-master", version: 1, savedAt, dots, pages, 
 | `tags` | `{ types, colors }`: the tag master list and tag colours. | `ficus_master_tags:`, `ficus_tag_metadata:` |
 | `notebooks` | Collection's notebooks, in Shelf order. | `ficus_notebooks:` |
 | `library` | `{ checklistTemplates, pads, stickers, palettes, gif }` (see section 4). Stickers and pads keep their image's Drive `fileId` and `/drive-file/` `src`. | The Supabase tables of the same names |
+| `loggers` | The loggers' definitions (see "Loggers" above). | Nothing: new in version 2 |
+| `logger_groups` | The groups Manage Loggers sorts them into. | Nothing: new in version 2 |
+
+Version 2 added `loggers` and `logger_groups`. A page still running version 1 code refuses a version 2 file when it loads it ("saved by a newer version of Ficus. Reload the page to update."), so it can't save over them. A version 1 tab that was already open saves as before; the file it replaces is kept as a copy (below).
 
 `ficus_store.js` (`window.FicusStore`) holds it in memory:
-- `load(session)` reads it once, at sign-in, while a spinner covers the app. From then on `space.js`, `collection.js` and `ficus_cloud.js` read from memory, synchronously. Their API is unchanged from the localStorage days (`getDots` / `saveDots`, `getPage` / `setPage` / `removePage`, `getTags` / `saveTagTypes` / `saveTagColors`, `getNotebooks` / `saveNotebooks`), plus `getLibrary` / `editLibrary`.
+- `load(session)` reads it once, at sign-in, while a spinner covers the app. From then on `space.js`, `collection.js` and `ficus_cloud.js` read from memory, synchronously. Their API is unchanged from the localStorage days (`getDots` / `saveDots`, `getPage` / `setPage` / `removePage`, `getTags` / `saveTagTypes` / `saveTagColors`, `getNotebooks` / `saveNotebooks`), plus `getLibrary` / `editLibrary` and `getLoggers` / `saveLoggers(loggers, groups)`.
 - Saves change memory at once, so the UI never waits. A copy of everything goes into IndexedDB on this device 400ms later (`master:<user id>` in the `ficus` database, with the Drive file's id and revision and whether Drive is behind). 3 seconds after the last change, the whole object overwrites the Drive file (a `PATCH` upload).
 - Before each write it checks the file's `headRevisionId`. If it isn't the one this device last read or wrote, another device saved in between: that version is copied beside it as `… (replaced <local time>).json` before the overwrite. Nothing is merged.
 - A failed write is retried after 5, 15, 30, then every 60 seconds, and straight away when the browser comes back online. Hiding the tab writes what's waiting, and closing it asks first only if the device copy isn't written yet. An expired token isn't retried: it waits for Reconnect (see "Signing in" in section 4).
