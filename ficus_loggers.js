@@ -13,17 +13,20 @@
  *               `timerConfig: { mode: "manual"|"stopwatch" }`, `compoundConfig: { fieldALabel, fieldAUnit,
  *               fieldBLabel, fieldBUnit }`, `ratingConfig: { max: 5|10, lowLabel, highLabel }`.
  *   "rollup"    one value made from other loggers': `rollupConfig: { math: "sum" | "average" | "max" | "min" |
- *               "ratio", targetLoggers: [logger id, ...] }`. For ratio, `targetLoggers` is [numerator, denominator]
- *               (either may be "" until chosen).
+ *               "ratio" | "count", targetLoggers: [logger id, ...] }`. For ratio, `targetLoggers` is [numerator,
+ *               denominator] (either may be "" until chosen). Count only accepts boolean sources and totals how many
+ *               were True. Sum/average/max/min/ratio only accept numeric-family sources (not boolean/compound).
+ * Standard inputs may also have `attachmentConfig: { requirement: "none"|"optional"|"required", allowedTypes:
+ * ["photo"|"video"|"audio"|"file"|"album", ...] }`.
  * Every logger may also have `goalConfig` (optional target): numeric shape `{ enabled, operator, targetValue }` for
- * numeric/currency/tally/rating/timer and roll-ups; boolean `{ enabled, operator: "=", targetValue: boolean }`;
- * compound `{ enabled, fieldA: { enabled, operator, targetValue }, fieldB: { ... } }`.
+ * numeric/currency/tally/rating/timer and roll-ups (including count); boolean `{ enabled, operator: "=",
+ * targetValue: boolean }`; compound `{ enabled, fieldA: { enabled, operator, targetValue }, fieldB: { ... } }`.
  * `kind` follows the mode: "input" for standard (an Input Logger, the only kind a dot can record values into) and
  * "metric" for roll-ups (a Calculated Metric: read-only, worked out from its sources). A metric may be saved before
  * its sources are connected; until then its value is null, shown as "—".
  * Only the active mode's fields (and the active inputType's config) are kept. A roll-up can't use itself, directly
  * or through other loggers. A saved logger with the old "formula" mode is read as a ratio roll-up (A / B from its
- * variables).
+ * variables). Logged numeric values must be >= 0; currency may be negative (`validateLoggedValue`).
  */
 (function () {
   "use strict";
@@ -38,12 +41,21 @@
   ];
   const UNIT_TYPES = new Set(["numeric", "currency", "tally"]);
   const unitPlaceholder = (inputType) => (inputType === "currency" ? "e.g. $, AUD, \u20ac" : "e.g. kg, hours, km");
-  const ROLLUP_MATH = [["sum", "Sum"], ["average", "Average"], ["max", "Max"], ["min", "Min"], ["ratio", "Ratio"]];
+  const ROLLUP_MATH = [
+    ["sum", "Sum"], ["average", "Average"], ["max", "Max"], ["min", "Min"], ["ratio", "Ratio"], ["count", "Count"],
+  ];
   const TIMER_MODES = [["manual", "Manual Entry"], ["stopwatch", "Active Stopwatch"]];
   const RATING_SCALES = [["5", "1\u20135"], ["10", "1\u201310"]];
   const GOAL_OPS = [[">", ">"], [">=", "\u2265"], ["=", "="], ["<=", "\u2264"], ["<", "<"]];
   const GOAL_OP_SET = new Set(GOAL_OPS.map(([id]) => id));
   const GOAL_ENABLE = [["off", "No Goal"], ["on", "Set Target"]];
+  const ATTACH_REQ = [["none", "None"], ["optional", "Optional"], ["required", "Required"]];
+  const ATTACH_TYPES = [
+    ["photo", "Photo"], ["video", "Video"], ["audio", "Audio"], ["file", "File"], ["album", "Album"],
+  ];
+  const ATTACH_TYPE_SET = new Set(ATTACH_TYPES.map(([id]) => id));
+  // Sources allowed for sum/average/max/min/ratio (boolean + compound are excluded).
+  const NUMERIC_SOURCE_TYPES = new Set(["numeric", "currency", "tally", "timer", "rating"]);
   const COLORS = [
     ["Sage", "#8BA888"], ["Mint", "#A3C4BC"], ["Dusty Blue", "#7D98A1"], ["Navy", "#5B6C7E"],
     ["Terracotta", "#CC8B65"], ["Ochre", "#D4A373"], ["Warm Pink", "#D49A89"], ["Plum", "#9D7A8C"],
@@ -169,6 +181,19 @@
     ratingConfig: { max: 5, lowLabel: "", highLabel: "" },
   });
 
+  const defaultAttachmentConfig = () => ({ requirement: "none", allowedTypes: [] });
+
+  function cleanAttachmentConfig(raw) {
+    const src = isObject(raw) ? raw : {};
+    const requirement = src.requirement === "optional" || src.requirement === "required" ? src.requirement : "none";
+    const allowedTypes = requirement === "none"
+      ? []
+      : [...new Set((Array.isArray(src.allowedTypes) ? src.allowedTypes : [])
+        .map((type) => String(type))
+        .filter((type) => ATTACH_TYPE_SET.has(type)))];
+    return { requirement, allowedTypes };
+  }
+
   // Attach only the config that belongs to `inputType`; drop the others so a type switch can't leak.
   function applyStandardConfig(logger, inputType, sources = {}) {
     if (inputType === "tally") logger.tallyConfig = cleanTallyConfig(sources.tallyConfig);
@@ -178,7 +203,25 @@
     else if (inputType === "rating") logger.ratingConfig = cleanRatingConfig(sources.ratingConfig);
   }
 
-  // Goal shape follows mode/inputType: numeric (incl. roll-ups), boolean, or compound (per-field targets).
+  // Which standard/rollup loggers may feed a given math op (count → booleans only; else numeric family only).
+  function isEligibleSource(logger, math) {
+    if (!logger || logger.mode === "rollup") return false;
+    if (math === "count") return logger.inputType === "boolean";
+    return NUMERIC_SOURCE_TYPES.has(logger.inputType);
+  }
+
+  function pruneTargetsForMath(math, targets, loggers, selfId) {
+    const eligible = new Set(
+      loggers.filter((logger) => logger.id !== selfId && isEligibleSource(logger, math)).map((logger) => logger.id),
+    );
+    if (math === "ratio") {
+      const list = Array.isArray(targets) ? targets : [];
+      return [eligible.has(list[0]) ? list[0] : "", eligible.has(list[1]) ? list[1] : ""];
+    }
+    return (Array.isArray(targets) ? targets : []).filter((id) => id && eligible.has(id));
+  }
+
+  // Goal shape follows mode/inputType: numeric (incl. roll-ups / count), boolean, or compound (per-field targets).
   const goalKindOf = (mode, inputType) => {
     if (mode === "rollup") return "numeric";
     if (inputType === "boolean") return "boolean";
@@ -263,12 +306,13 @@
   function cleanLogger(raw) {
     if (!isObject(raw) || raw.id == null || raw.id === "") return null;
     const {
-      inputType, unit, rollupConfig, formulaConfig, goalConfig,
+      inputType, unit, rollupConfig, formulaConfig, goalConfig, attachmentConfig,
       tallyConfig, booleanConfig, timerConfig, compoundConfig, ratingConfig,
       ...rest
     } = raw;
     for (const key of STANDARD_CONFIG_KEYS) delete rest[key];
     delete rest.goalConfig;
+    delete rest.attachmentConfig;
     let mode = known(MODES, raw.mode) ? raw.mode : "standard";
     let math = "sum";
     let targets = [];
@@ -299,6 +343,7 @@
       applyStandardConfig(logger, logger.inputType, {
         tallyConfig, booleanConfig, timerConfig, compoundConfig, ratingConfig,
       });
+      logger.attachmentConfig = cleanAttachmentConfig(attachmentConfig);
     } else {
       logger.rollupConfig = {
         math,
@@ -331,6 +376,14 @@
       ids.add(logger.id);
       loggers.push(logger);
     }
+    // Drop sources that don't match each roll-up's math (e.g. a boolean left under Sum).
+    for (const logger of loggers) {
+      if (logger.mode !== "rollup") continue;
+      const { math, targetLoggers } = logger.rollupConfig;
+      logger.rollupConfig.targetLoggers = math === "ratio"
+        ? pruneTargetsForMath(math, targetLoggers, loggers, logger.id)
+        : [...new Set(pruneTargetsForMath(math, targetLoggers, loggers, logger.id))];
+    }
     return { loggers, groups };
   }
 
@@ -360,7 +413,13 @@
   }
 
   // A roll-up's value from its sources' numbers, or null with none to go on (ratio needs both, and a non-zero B).
+  // Count totals how many source values are True (truthy / 1).
   function rollUp(math, numbers) {
+    if (math === "count") {
+      const list = numbers || [];
+      if (!list.length) return null;
+      return list.reduce((sum, n) => sum + (n ? 1 : 0), 0);
+    }
     const list = (numbers || []).map(Number).filter(Number.isFinite);
     if (math === "ratio") {
       if (list.length < 2 || list[1] === 0) return null;
@@ -371,6 +430,25 @@
     if (math === "max") return Math.max(...list);
     if (math === "min") return Math.min(...list);
     return list.reduce((sum, n) => sum + n, 0);
+  }
+
+  // Shape-check a value before it is written into a standard logger (logging UI will call this).
+  function validateLoggedValue(logger, value) {
+    if (!logger || logger.mode !== "standard") return { ok: true, value };
+    if (logger.inputType === "numeric") {
+      if (value == null || value === "") return { ok: false, error: "Enter a number.", value: null };
+      const n = Number(value);
+      if (!Number.isFinite(n)) return { ok: false, error: "Enter a number.", value: null };
+      if (n < 0) return { ok: false, error: "Must be 0 or greater.", value: null };
+      return { ok: true, value: n };
+    }
+    if (logger.inputType === "currency") {
+      if (value == null || value === "") return { ok: false, error: "Enter an amount.", value: null };
+      const n = Number(value);
+      if (!Number.isFinite(n)) return { ok: false, error: "Enter an amount.", value: null };
+      return { ok: true, value: n };
+    }
+    return { ok: true, value };
   }
 
   // What a metric still lacks: ["sources"] for a multi-source roll-up with none, else "A" and/or "B" for a ratio.
@@ -396,7 +474,14 @@
       const logger = byId.get(key);
       if (!logger || working.has(key)) return null;
       if (logger.mode === "standard") {
-        const number = values[key] == null || values[key] === "" ? NaN : Number(values[key]);
+        const raw = values[key];
+        if (raw == null || raw === "") return null;
+        if (logger.inputType === "boolean") {
+          if (raw === true || raw === 1 || raw === "1" || raw === "true") return 1;
+          if (raw === false || raw === 0 || raw === "0" || raw === "false") return 0;
+          return null;
+        }
+        const number = Number(raw);
         return Number.isFinite(number) ? number : null;
       }
       working.add(key);
@@ -406,6 +491,8 @@
         const a = targetLoggers[0] ? run(targetLoggers[0]) : null;
         const b = targetLoggers[1] ? run(targetLoggers[1]) : null;
         result = rollUp("ratio", [a, b].filter((n) => n != null).length === 2 ? [a, b] : []);
+      } else if (math === "count") {
+        result = rollUp("count", targetLoggers.map(run).filter((n) => n != null));
       } else {
         result = rollUp(math, targetLoggers.map(run).filter((n) => n != null));
       }
@@ -654,6 +741,7 @@
     return {
       name: "", icon: "", color: DEFAULT_COLOR, groupId, mode: "standard", inputType: "numeric", unit: "",
       ...defaultStandardConfigs(),
+      attachmentConfig: defaultAttachmentConfig(),
       goalConfig: defaultGoalConfig("numeric"),
       math: "sum", targets: [],
     };
@@ -671,6 +759,7 @@
         timerConfig: cleanTimerConfig(logger.timerConfig),
         compoundConfig: cleanCompoundConfig(logger.compoundConfig),
         ratingConfig: cleanRatingConfig(logger.ratingConfig),
+        attachmentConfig: cleanAttachmentConfig(logger.attachmentConfig),
       });
     }
     if (logger.mode === "rollup") Object.assign(draft, { math: logger.rollupConfig.math, targets: [...logger.rollupConfig.targetLoggers] });
@@ -753,11 +842,12 @@
     return `${logger.name}, ${kind}, ${typeLabel(logger).toLowerCase()}${pendingOf(logger).length ? ", sources pending" : ""}`;
   }
 
-  // The operator on a node's corner: a tally for an input logger, Σ x̄ max min for a roll-up, A:B for a ratio.
+  // The operator on a node's corner: a tally for an input logger, Σ x̄ max min # for a roll-up, A:B for a ratio.
   function opMark(logger) {
     if (logger.mode === "standard") return { content: icon("tally"), label: "Input logger" };
     const math = logger.rollupConfig.math;
     if (math === "ratio") return { content: "A:B", label: "Ratio roll-up", word: true };
+    if (math === "count") return { content: "#", label: "Count roll-up", word: true };
     return {
       content: { sum: "\u03a3", average: "x\u0304", max: "max", min: "min" }[math],
       label: `${labelOf(ROLLUP_MATH, math)} roll-up`, word: math === "max" || math === "min",
@@ -1415,8 +1505,7 @@
     // Loggers this one can't read from: those that already read from it (a loop).
     const loops = new Set(editing ? others.filter((logger) => readsFrom(loggers, logger.id, editing.id)).map((logger) => logger.id) : []);
     const users = editing ? others.filter((logger) => sourcesOf(logger).includes(editing.id)) : [];
-    const pickOptions = [["", "Choose a logger\u2026"], ...others.filter((logger) => !loops.has(logger.id)).map((logger) => [logger.id, `${logger.name} (${badgeText(logger)})`])];
-
+    const sourcePool = (math) => others.filter((logger) => !loops.has(logger.id) && isEligibleSource(logger, math));
     const heading = h("h3", {
       class: "logger-editor-title", tabindex: "-1", "data-logger-heading": "",
       text: editing ? `Edit ${editing.name}` : `New Logger in ${groupName(groups, draft.groupId)}`,
@@ -1775,21 +1864,29 @@
       ].filter(Boolean);
     } else {
       if (draft.math === "ratio" && draft.targets.length < 2) draft.targets = [draft.targets[0] || "", draft.targets[1] || ""];
+      draft.targets = pruneTargetsForMath(draft.math, draft.targets, loggers, ui.selectedId || "");
+      const ratioPicks = [["", "Choose a logger\u2026"], ...sourcePool(draft.math)
+        .map((logger) => [logger.id, `${logger.name} (${badgeText(logger)})`])];
       const math = selectBox("math", ROLLUP_MATH, draft.math, (event) => {
         draft.math = event.target.value;
         if (draft.math === "ratio") draft.targets = [draft.targets[0] || "", draft.targets[1] || ""];
         else draft.targets = draft.targets.filter(Boolean);
+        draft.targets = pruneTargetsForMath(draft.math, draft.targets, loggers, ui.selectedId || "");
         changed();
         renderInPlace("[name='math']");
       });
+      const mathHint = draft.math === "count"
+        ? h("p", { class: "logger-hint", text: "Counts the total number of times the source loggers were marked as True." })
+        : null;
       if (draft.math === "ratio") {
         const setSlot = (index, value) => {
           draft.targets = ratioTargets([index === 0 ? value : draft.targets[0], index === 1 ? value : draft.targets[1]], ui.selectedId || "");
+          draft.targets = pruneTargetsForMath("ratio", draft.targets, loggers, ui.selectedId || "");
           changed();
         };
         const slotRow = (letter, index) => {
           const making = ui.quick?.mode === "rollup" && ui.quick.letter === letter;
-          const pick = selectBox(`ratio-${letter}`, pickOptions, draft.targets[index] || "", (event) => setSlot(index, event.target.value));
+          const pick = selectBox(`ratio-${letter}`, ratioPicks, draft.targets[index] || "", (event) => setSlot(index, event.target.value));
           if (pick.value !== (draft.targets[index] || "")) {
             pick.value = "";
             draft.targets[index] = "";
@@ -1809,6 +1906,7 @@
         const bUnit = unitOfId(loggers, draft.targets[1]);
         modePanel = [
           field("Math Operation", math),
+          mathHint,
           h("fieldset", { class: "logger-field logger-sources" },
             h("legend", { class: "logger-label", text: "Ratio" }),
             h("p", { class: "logger-hint", text: "Numerator (A) \u00f7 Denominator (B)." }),
@@ -1817,9 +1915,10 @@
               class: "logger-ratio-unit", role: "status",
               text: `Output Unit: ${aUnit} / ${bUnit}`,
             })),
-        ];
+        ].filter(Boolean);
       } else {
-        const checks = others.map((logger) => {
+        const eligible = sourcePool(draft.math);
+        const checks = eligible.map((logger) => {
           const blocked = loops.has(logger.id);
           const box = h("input", {
             type: "checkbox", value: logger.id, disabled: blocked,
@@ -1827,7 +1926,7 @@
               const set = new Set(draft.targets.filter(Boolean));
               if (event.target.checked) set.add(logger.id);
               else set.delete(logger.id);
-              draft.targets = others.map((row) => row.id).filter((id) => set.has(id));
+              draft.targets = eligible.map((row) => row.id).filter((id) => set.has(id));
               changed();
             },
           });
@@ -1835,17 +1934,59 @@
           return h("label", { class: `logger-check${blocked ? " is-blocked" : ""}`, title: blocked ? "It already uses this logger" : null },
             box, tile(logger), h("span", { class: "logger-row-name", text: logger.name }), badge(logger, blocked ? "Uses this one" : null));
         });
+        const emptyHint = draft.math === "count"
+          ? "No boolean loggers to count yet. Add one here, or keep this roll-up and connect them later."
+          : "No numeric loggers to combine yet. Add one here, or keep this roll-up and connect its sources later.";
         modePanel = [
           field("Math Operation", math),
+          mathHint,
           h("fieldset", { class: "logger-field logger-sources" }, h("legend", { class: "logger-label", text: "Data Sources" }),
             checks.length
               ? h("div", { class: "logger-checks" }, checks)
-              : h("p", { class: "logger-hint", text: "No loggers to combine yet. Add one here, or keep this roll-up and connect its sources later." }),
+              : h("p", { class: "logger-hint", text: emptyHint }),
             ui.quick?.mode === "rollup" && !ui.quick.letter
               ? quickForm(groups)
               : h("button", { type: "button", class: "logger-add-source", "data-quick-open": "rollup", "aria-expanded": "false", text: "+ Add Source", onclick: () => openQuick("") })),
-        ];
+        ].filter(Boolean);
       }
+    }
+
+    let attachSection = null;
+    if (draft.mode === "standard") {
+      draft.attachmentConfig = cleanAttachmentConfig(draft.attachmentConfig);
+      const attachToggle = h("div", { class: "logger-modes logger-attach-toggle", role: "radiogroup", "aria-label": "Attachments" },
+        h("div", { class: "logger-mode-row is-triple" }, ATTACH_REQ.map(([id, text]) => h("button", {
+          type: "button", class: "logger-mode", role: "radio",
+          "aria-checked": String(draft.attachmentConfig.requirement === id),
+          "data-attach-req": id, text,
+          onclick: () => {
+            if (draft.attachmentConfig.requirement === id) return;
+            draft.attachmentConfig.requirement = id;
+            if (id === "none") draft.attachmentConfig.allowedTypes = [];
+            changed();
+            renderInPlace(`[data-attach-req="${id}"]`);
+          },
+        }))));
+      const typePills = draft.attachmentConfig.requirement === "none" ? null : h("div", {
+        class: "logger-attach-types", role: "group", "aria-label": "Allowed attachment types",
+      }, ATTACH_TYPES.map(([id, text]) => {
+        const on = draft.attachmentConfig.allowedTypes.includes(id);
+        return h("button", {
+          type: "button", class: `logger-attach-pill${on ? " is-on" : ""}`, "aria-pressed": String(on), text,
+          onclick: () => {
+            const set = new Set(draft.attachmentConfig.allowedTypes);
+            if (set.has(id)) set.delete(id);
+            else set.add(id);
+            draft.attachmentConfig.allowedTypes = ATTACH_TYPES.map(([type]) => type).filter((type) => set.has(type));
+            changed();
+            renderInPlace(`[aria-label="Allowed attachment types"]`);
+          },
+        });
+      }));
+      attachSection = h("div", { class: "logger-attach" },
+        h("span", { class: "logger-label", text: "Attachments" }),
+        attachToggle,
+        typePills);
     }
 
     const goalKind = goalKindOf(draft.mode, draft.inputType);
@@ -1984,6 +2125,7 @@
           }, tile(user), h("span", { class: "logger-row-name", text: user.name }))))),
         h("div", { class: "logger-field logger-mode-field" }, h("span", { class: "logger-label", text: "Mode" }), modes, kindNote),
         h("div", { class: "logger-mode-panel" }, modePanel),
+        attachSection,
         goalSection),
       foot);
   }
@@ -2006,27 +2148,23 @@
     delete raw.inputType;
     delete raw.rollupConfig;
     delete raw.goalConfig;
+    delete raw.attachmentConfig;
     if (draft.mode === "standard") {
       Object.assign(raw, { inputType: draft.inputType });
       if (UNIT_TYPES.has(draft.inputType)) raw.unit = draft.unit;
       applyStandardConfig(raw, draft.inputType, draft);
+      raw.attachmentConfig = cleanAttachmentConfig(draft.attachmentConfig);
     }
     raw.goalConfig = cleanGoalConfig(draft.goalConfig, goalKindOf(draft.mode, draft.inputType));
     // A metric saves before its sources are connected (pending), showing — until they are.
     if (draft.mode === "rollup") {
+      const pruned = pruneTargetsForMath(draft.math, draft.targets, loggers, id);
       if (draft.math === "ratio") {
-        const [a, b] = ratioTargets(draft.targets, id);
-        raw.rollupConfig = {
-          math: "ratio",
-          targetLoggers: [
-            others.some((logger) => logger.id === a) ? a : "",
-            others.some((logger) => logger.id === b) ? b : "",
-          ],
-        };
+        raw.rollupConfig = { math: "ratio", targetLoggers: pruned };
       } else {
         raw.rollupConfig = {
           math: draft.math,
-          targetLoggers: draft.targets.filter((target) => target && others.some((logger) => logger.id === target)),
+          targetLoggers: pruned.filter((target) => target && others.some((logger) => logger.id === target)),
         };
       }
     }
@@ -2090,6 +2228,9 @@
   function quickForm(groups) {
     const quick = ui.quick;
     const purpose = quick.letter ? `for ${quick.letter}` : "as a source";
+    const math = ui.draft?.math || "sum";
+    const typeChoices = INPUT_TYPES.filter(([id]) => isEligibleSource({ mode: "standard", inputType: id }, math));
+    if (!typeChoices.some(([id]) => id === quick.inputType) && typeChoices[0]) quick.inputType = typeChoices[0][0];
     let box;
     const name = h("input", {
       type: "text", class: "logger-input", name: "quick-name", maxlength: NAME_MAX, placeholder: "e.g. Steps", autocomplete: "off",
@@ -2108,7 +2249,7 @@
     unit.value = quick.unit;
     const unitField = field("Unit Label", unit);
     unitField.hidden = !UNIT_TYPES.has(quick.inputType);
-    const type = selectBox("quick-type", INPUT_TYPES, quick.inputType, (event) => {
+    const type = selectBox("quick-type", typeChoices.length ? typeChoices : INPUT_TYPES, quick.inputType, (event) => {
       quick.inputType = event.target.value;
       unitField.hidden = !UNIT_TYPES.has(quick.inputType);
       unit.placeholder = unitPlaceholder(quick.inputType);
@@ -2137,7 +2278,9 @@
 
   // `letter` is "A"/"B" for a ratio slot, or "" for a multi-source roll-up. It starts in the open logger's group.
   function openQuick(letter) {
-    ui.quick = { mode: ui.draft.mode, letter, name: "", inputType: "numeric", unit: "", groupId: ui.draft.groupId, error: "" };
+    const math = ui.draft?.math || "sum";
+    const inputType = math === "count" ? "boolean" : "numeric";
+    ui.quick = { mode: ui.draft.mode, letter, name: "", inputType, unit: "", groupId: ui.draft.groupId, error: "" };
     renderInPlace("[name='quick-name']");
   }
 
@@ -2324,6 +2467,8 @@
     formatValue,
     unitOfId,
     layoutTree,
+    validateLoggedValue,
+    isEligibleSource,
     MODES: MODES.map(([id]) => id),
     KINDS: KINDS.map(([id]) => id),
     INPUT_TYPES: INPUT_TYPES.map(([id]) => id),
