@@ -191,7 +191,7 @@ The block types are Rich Note, Photo, Link, Checklist, File, Photo Album, Audio 
 
 A **Calendar Event** block (`{ type: "calendar", eventId, title, start, end, allDay, htmlLink, calendarId: "primary", deleted? }`) stands for an event in the user's primary Google Calendar. Adding one opens the Calendar Event sheet with two tabs:
 
-- **Find Event** searches upcoming events (`events.list` with the typed text).
+- **Find Event** searches upcoming events (`events.list` with the typed text, from now on). The calendar button beside the search box opens the device's date picker. Once a day is picked, the search covers just that day: `timeMin` / `timeMax` run from the device's midnight to 23:59:59.999 that day. A chip under the search box shows the day ("Oct 25 ✕"); its ✕ goes back to the upcoming events. Every place that opens the sheet (block dots, board dots, text dots and the dot header's Link Event) gets the filter.
 - **New Event** makes one from a title, start and end (`events.insert`). A new event starts at the next hour. Picking a start time sets the end to 30 minutes later. The end may equal the start (a 0-minute event). **All day** swaps the time pickers for date pickers; the end date is the last day the event covers (Google's exclusive end is the day after).
 
 The block's Display state shows the event's date tile, title, when (a 0-minute event shows one time, all-day events show dates), a refresh button and a link that opens it in Google Calendar. Its Settings state is the same sheet: the pencil opens it on **Edit Event**, filled in from the block, and **Save Changes** patches the event in Google Calendar (`events.patch`). **Find Event** there switches the block to another event. After Google answers, the block is updated and saved, and the master file is written to Drive at once (`FicusStore.flush`).
@@ -206,7 +206,7 @@ An event isn't looked up again within a minute of the last check. A block whose 
 
 A **Google Task** block (`{ type: "task", taskId, tasklistId: "@default", title, status, due, notes, webViewLink, deleted? }`) stands for a task in the user's default Google Tasks list. `status` is `"needsAction"` or `"completed"`, and `due` is a day (`"2026-10-13"`) or `""`: Google keeps only the date of a due date. Adding one opens the Google Task sheet (the Calendar Event sheet's look) with two tabs:
 
-- **Find Task** lists the open tasks (`tasks.list` on `@default`, without completed or hidden ones, up to 300), soonest due first. The search box filters them on the device.
+- **Find Task** lists the open tasks (`tasks.list` on `@default`, without completed or hidden ones, up to 300), soonest due first. The search box filters them on the device. The same calendar button and chip as Find Event narrow the list to the open tasks due on one day. That day is fetched with `dueMin` / `dueMax` set to its UTC bounds (`2026-10-25T00:00:00.000Z` to `T23:59:59.999Z`), because Google stores a due date as that day's midnight UTC; the device's own midnight would pick up the wrong day in some time zones.
 - **New Task** makes one from a title, an optional due date and optional notes (`tasks.insert`).
 
 The card shows a square checkbox, the title (struck through once done), the due day ("Due today", "Due tomorrow" or the date, in red once overdue), the notes (two lines at most), a refresh button and a link that opens the task in Google Tasks. The pencil opens the sheet on **Edit Task**; **Save Changes** patches the task (`tasks.patch`), and Find Task there switches the block to another task.

@@ -450,8 +450,9 @@
     };
   }
 
-  // Upcoming events (those not yet over) whose text matches `text`, soonest first; all of them for no text.
-  async function searchEvents(text = "") {
+  // Events whose text matches `text` (all of them for no text), soonest first: those on `day` ("2026-10-25", from
+  // the device's midnight to the end of that day) if given, else the upcoming ones (those not yet over).
+  async function searchEvents(text = "", day = null) {
     const params = {
       calendarId: "primary",
       timeMin: new Date().toISOString(),
@@ -459,6 +460,11 @@
       orderBy: "startTime",
       maxResults: 25,
     };
+    if (/^\d{4}-\d{2}-\d{2}$/.test(day || "")) {
+      const [y, m, d] = day.split("-").map(Number);
+      params.timeMin = new Date(y, m - 1, d).toISOString();
+      params.timeMax = new Date(y, m - 1, d, 23, 59, 59, 999).toISOString();
+    }
     const q = String(text || "").trim();
     if (q) params.q = q;
     const result = await calendarCall((calendar) => calendar.events.list(params));
@@ -670,13 +676,17 @@
 
   const dueValue = (day) => (day ? `${day}T00:00:00.000Z` : null);
 
-  // The default list's tasks not yet done (up to 300), those due soonest first, then the most recently changed.
-  async function listTasks() {
+  // The default list's tasks not yet done (up to 300), only those due on `day` ("2026-10-25") if given, those due
+  // soonest first, then the most recently changed.
+  async function listTasks(day = null) {
+    const on = /^\d{4}-\d{2}-\d{2}$/.test(day || "") ? day : "";
+    // A due date is kept as that day's midnight UTC, so a day's tasks lie within its UTC bounds in any time zone.
+    const range = on ? { dueMin: `${on}T00:00:00.000Z`, dueMax: `${on}T23:59:59.999Z` } : {};
     const items = [];
     let pageToken;
     for (let page = 0; page < 3; page += 1) {
       const result = await tasksCall((api) => api.tasks.list({
-        tasklist: DEFAULT_TASKLIST, showCompleted: false, showHidden: false, maxResults: 100, pageToken,
+        tasklist: DEFAULT_TASKLIST, showCompleted: false, showHidden: false, maxResults: 100, pageToken, ...range,
       }));
       items.push(...(result.items || []));
       pageToken = result.nextPageToken;
@@ -684,7 +694,7 @@
     }
     const due = (task) => task.due || "\uffff";
     return items
-      .filter((task) => !task.deleted && task.status !== "completed")
+      .filter((task) => !task.deleted && task.status !== "completed" && (!on || String(task.due || "").startsWith(on)))
       .sort((a, b) => due(a).localeCompare(due(b)) || String(b.updated || "").localeCompare(String(a.updated || "")))
       .map((task) => taskFields(task));
   }

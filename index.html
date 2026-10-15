@@ -38,7 +38,7 @@
       };
     </script>
     <!-- Bump ?v= whenever these change so browsers never pair them with a different index.html. -->
-    <script src="ficus_drive.js?v=5"></script>
+    <script src="ficus_drive.js?v=6"></script>
     <script src="ficus_cloud.js?v=15"></script>
     <script src="ficus_store.js?v=2"></script>
     <script>
@@ -2974,6 +2974,35 @@
       .cal-sheet-switch input:checked { background: #1c1917; }
       .cal-sheet-switch input:checked::after { transform: translateX(1rem); }
       .cal-sheet-switch input:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      /* Find: the search box with the day filter's calendar button beside it (dark while a day is picked), its date
+         input see-through over the button, and the picked day's chip below. */
+      .cal-sheet-find { display: flex; gap: 0.5rem; }
+      .cal-sheet-find > .cal-sheet-field { flex: 1; min-width: 0; }
+      .cal-sheet-date-btn {
+        position: relative; display: inline-flex; width: 2.5rem; height: 2.5rem; flex: none; align-items: center; justify-content: center;
+        border: 1px solid #e7e5e4; background: #fafaf9; color: #57534e; cursor: pointer;
+      }
+      .cal-sheet-date-btn:hover { background: #f5f5f4; color: #1c1917; }
+      .cal-sheet-date-btn:focus-within { border-color: #8c8c8c; outline: 2px solid #1c1917; outline-offset: 1px; }
+      .cal-sheet-date-btn.is-set { border-color: #1c1917; background: #1c1917; color: #fff; }
+      .cal-sheet-date-btn > svg { width: 1.1rem; height: 1.1rem; pointer-events: none; }
+      .cal-sheet-date-btn > input {
+        position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; padding: 0; border: 0; opacity: 0;
+        font-size: 16px; cursor: pointer; -webkit-appearance: none; appearance: none;
+      }
+      .cal-sheet-date-btn > input::-webkit-calendar-picker-indicator { position: absolute; inset: 0; width: auto; height: auto; cursor: pointer; }
+      .cal-sheet-chips { display: flex; margin-top: 0.5rem; }
+      .cal-sheet-chips[hidden] { display: none; }
+      .cal-sheet-chip {
+        display: inline-flex; height: 1.75rem; align-items: center; gap: 0.15rem; padding-left: 0.6rem;
+        border: 1px solid #e7e5e4; background: #f5f5f4; font-size: 0.75rem; font-weight: 600; color: #1c1917;
+      }
+      .cal-sheet-chip-clear { display: inline-flex; width: 1.75rem; height: 100%; align-items: center; justify-content: center; font-size: 0.7rem; color: #78716c; }
+      .cal-sheet-chip-clear:hover, .cal-sheet-chip-clear:focus-visible { outline: none; background: #e7e5e4; color: #1c1917; }
+      @media (hover: none), (pointer: coarse) {
+        .cal-sheet-chip { height: 2rem; }
+        .cal-sheet-chip-clear { width: 2rem; }
+      }
       .cal-sheet-results { max-height: 17rem; margin-top: 0.5rem; overflow-y: auto; overscroll-behavior: contain; }
       .cal-sheet-result { display: flex; width: 100%; align-items: center; gap: 0.65rem; padding: 0.5rem; border-bottom: 1px solid #f5f5f4; text-align: left; }
       .cal-sheet-result:hover, .cal-sheet-result:focus-visible { outline: none; background: #f5f5f4; }
@@ -9151,7 +9180,46 @@
         const pad = (n) => String(n).padStart(2, "0");
         return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
       }
-      /** Find Event searches the user's upcoming events; New Event makes one. Given `editing` (a calendar block), it
+      /* A Find tab's day filter: a calendar button beside the search box (a see-through date input over it, so a tap
+         or click opens the device's own picker) and, once a day is picked, a chip for it ("Oct 25 ✕") whose ✕ goes
+         back to the default list. findDateButtonHtml goes in the search row, findDateChipHtml under it. */
+      function findDateButtonHtml(label) {
+        return `<label class="cal-sheet-date-btn" title="${escapeHtml(label)}">${INLINE_CALENDAR_ICON}<input type="date" data-find-date aria-label="${escapeHtml(label)}" /></label>`;
+      }
+      function findDateChipHtml() {
+        return `<div data-find-date-chip class="cal-sheet-chips" hidden><span class="cal-sheet-chip"><span data-find-date-text></span><button type="button" data-find-date-clear class="cal-sheet-chip-clear" aria-label="Clear the date">✕</button></span></div>`;
+      }
+      function findDateLabel(day) {
+        const [y, m, d] = day.split("-").map(Number);
+        const date = new Date(y, m - 1, d);
+        const opts = { month: "short", day: "numeric" };
+        if (y !== new Date().getFullYear()) opts.year = "numeric";
+        return date.toLocaleDateString(undefined, opts);
+      }
+      // Wires the filter in `pane`; onChange gets the day picked ("2026-10-25") or null once it's cleared.
+      function bindFindDateFilter(pane, onChange) {
+        const input = pane.querySelector("[data-find-date]");
+        const button = input.closest(".cal-sheet-date-btn");
+        const chip = pane.querySelector("[data-find-date-chip]");
+        let day = null;
+        const set = (next) => {
+          next = /^\d{4}-\d{2}-\d{2}$/.test(next || "") ? next : null;
+          input.value = next || "";
+          if (next === day) return;
+          day = next;
+          chip.hidden = !day;
+          pane.querySelector("[data-find-date-text]").textContent = day ? findDateLabel(day) : "";
+          button.classList.toggle("is-set", Boolean(day));
+          onChange(day);
+        };
+        // A desktop browser opens the picker only from its own small icon; showPicker opens it from anywhere on the button.
+        input.addEventListener("click", () => {
+          try { input.showPicker?.(); } catch (_) {}
+        });
+        input.addEventListener("change", () => set(input.value));
+        pane.querySelector("[data-find-date-clear]").addEventListener("click", () => set(null));
+      }
+      /** Find Event searches the user's upcoming events (or a day's, picked beside the search box); New Event makes one. Given `editing` (a calendar block), it
           opens on Edit Event instead, the form filled in from the block, and saving changes the event in Google
           Calendar; Find Event then switches the block to another event. `heading` replaces the sheet's title (a dot's
           header opens it as "Link Calendar Event"). Resolves the event's fields, or null. */
@@ -9179,9 +9247,11 @@
                   <button type="button" data-cal-connect-btn class="cal-sheet-primary"></button>
                 </div>
                 <div id="cal-pane-find" role="tabpanel" aria-labelledby="cal-tab-find" data-cal-pane="find">
-                  <form data-cal-search role="search">
+                  <form data-cal-search role="search" class="cal-sheet-find">
                     <input type="search" class="cal-sheet-field" placeholder="Search upcoming events" aria-label="Search upcoming events" enterkeyhint="search" autocomplete="off" />
+                    ${findDateButtonHtml("Show the events on a day")}
                   </form>
+                  ${findDateChipHtml()}
                   <div data-cal-results class="cal-sheet-results"></div>
                 </div>
                 <form id="cal-pane-new" role="tabpanel" aria-labelledby="cal-tab-new" data-cal-pane="new" novalidate>
@@ -9205,7 +9275,7 @@
           const tabs = [...overlay.querySelectorAll("[data-cal-tab]")];
           const findPane = $("[data-cal-pane='find']");
           const form = $("[data-cal-pane='new']");
-          const search = $("[data-cal-search] input");
+          const search = $("[data-cal-search] input[type='search']");
           const results = $("[data-cal-results]");
           const connect = $("[data-cal-connect]");
           const connectBtn = $("[data-cal-connect-btn]");
@@ -9218,6 +9288,8 @@
           let searchSeq = 0;
           let searchTimer = 0;
           let searched = false;
+          // The day Find Event is held to ("2026-10-25"), or null for the upcoming events.
+          let selectedFilterDate = null;
           const setStatus = (text, error = false) => {
             status.textContent = text || "";
             status.hidden = !text;
@@ -9277,7 +9349,10 @@
               button.addEventListener("click", () => close(event));
               return button;
             }));
-            setStatus(events.length ? "" : search.value.trim() ? "No upcoming events match that." : "No upcoming events in your calendar.");
+            const on = selectedFilterDate ? findDateLabel(selectedFilterDate) : "";
+            setStatus(events.length ? ""
+              : search.value.trim() ? (on ? `No events on ${on} match that.` : "No upcoming events match that.")
+                : on ? `No events on ${on}.` : "No upcoming events in your calendar.");
           };
           const runSearch = async () => {
             clearTimeout(searchTimer);
@@ -9285,7 +9360,7 @@
             const seq = ++searchSeq;
             setStatus("Searching…");
             try {
-              const events = await drive.searchEvents(search.value);
+              const events = await drive.searchEvents(search.value, selectedFilterDate);
               if (seq === searchSeq) showResults(events);
             } catch (err) {
               if (seq !== searchSeq) return;
@@ -9325,6 +9400,14 @@
           });
           $("[data-cal-search]").addEventListener("submit", (event) => {
             event.preventDefault();
+            runSearch();
+          });
+          bindFindDateFilter(findPane, (day) => {
+            selectedFilterDate = day;
+            const hint = day ? `Search events on ${findDateLabel(day)}` : "Search upcoming events";
+            search.placeholder = hint;
+            search.setAttribute("aria-label", hint);
+            results.replaceChildren();
             runSearch();
           });
           const HALF_HOUR = 30 * 60 * 1000;
@@ -9603,7 +9686,8 @@
       function closeTaskSheet() {
         document.getElementById("block-task-sheet")?._close?.(null);
       }
-      /** Find Task lists the tasks not yet done in the user's default list (the search box narrows them down); New
+      /** Find Task lists the tasks not yet done in the user's default list (the search box narrows them down, and a
+          day picked beside it holds them to those due then); New
           Task makes one. Given `editing` (a task block), it opens on Edit Task instead, the form filled in from the
           block, and saving changes the task in Google Tasks; Find Task then switches the block to another task.
           Resolves the task's fields, or null. */
@@ -9631,9 +9715,11 @@
                   <button type="button" data-task-connect-btn class="cal-sheet-primary"></button>
                 </div>
                 <div id="task-pane-find" role="tabpanel" aria-labelledby="task-tab-find" data-task-pane="find">
-                  <form data-task-search role="search">
+                  <form data-task-search role="search" class="cal-sheet-find">
                     <input type="search" class="cal-sheet-field" placeholder="Search your tasks" aria-label="Search your tasks" enterkeyhint="search" autocomplete="off" />
+                    ${findDateButtonHtml("Show the tasks due on a day")}
                   </form>
+                  ${findDateChipHtml()}
                   <div data-task-results class="cal-sheet-results"></div>
                 </div>
                 <form id="task-pane-new" role="tabpanel" aria-labelledby="task-tab-new" data-task-pane="new" novalidate>
@@ -9653,7 +9739,7 @@
           const tabs = [...overlay.querySelectorAll("[data-task-tab]")];
           const findPane = $("[data-task-pane='find']");
           const form = $("[data-task-pane='new']");
-          const search = $("[data-task-search] input");
+          const search = $("[data-task-search] input[type='search']");
           const results = $("[data-task-results]");
           const connect = $("[data-task-connect]");
           const connectBtn = $("[data-task-connect-btn]");
@@ -9663,8 +9749,10 @@
           let tab = editId ? "new" : "find";
           // While Google needs a click first ("signin", "reconnect" or "tasks"), the connect panel stands in for the tabs.
           let blocked = null;
-          // The open tasks, fetched once when Find Task first shows; the search box filters them here.
+          // The open tasks (just those due on selectedFilterDate, "2026-10-25", if one's picked), fetched when Find Task
+          // first shows and again for each day picked or cleared; the search box filters them here.
           let tasks = null;
+          let selectedFilterDate = null;
           let loadSeq = 0;
           const setStatus = (text, error = false) => {
             status.textContent = text || "";
@@ -9731,13 +9819,16 @@
               button.addEventListener("click", () => close(task));
               return button;
             }));
-            setStatus(shown.length ? "" : words.length ? "No open tasks match that." : "No open tasks in your list.");
+            const on = selectedFilterDate ? findDateLabel(selectedFilterDate) : "";
+            setStatus(shown.length ? ""
+              : words.length ? (on ? `No open tasks due on ${on} match that.` : "No open tasks match that.")
+                : on ? `No open tasks due on ${on}.` : "No open tasks in your list.");
           };
           const loadTasks = async () => {
             const seq = ++loadSeq;
             setStatus("Getting your tasks…");
             try {
-              const list = await drive.listTasks();
+              const list = await drive.listTasks(selectedFilterDate);
               if (seq !== loadSeq) return;
               tasks = list;
               showResults();
@@ -9781,6 +9872,15 @@
             event.preventDefault();
             if (tasks) showResults();
             else loadTasks();
+          });
+          bindFindDateFilter(findPane, (day) => {
+            selectedFilterDate = day;
+            const hint = day ? `Search tasks due on ${findDateLabel(day)}` : "Search your tasks";
+            search.placeholder = hint;
+            search.setAttribute("aria-label", hint);
+            tasks = null;
+            results.replaceChildren();
+            loadTasks();
           });
           const titleField = form.elements.namedItem("title");
           const dueField = form.elements.namedItem("due");
