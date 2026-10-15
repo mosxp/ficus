@@ -4,8 +4,9 @@
  * They're kept in the master backup (ficus_store.js) as two root-level arrays:
  *   logger_groups  [{ id, name }]
  *   loggers        [{ id, name, icon, color, groupId, mode, kind, createdAt, updatedAt, ...the mode's fields }]
- * `icon` is up to two characters (an emoji or letters; "" shows the name's first letter) on a tile of `color`, and
- * `groupId` is a group's id, or "" for none. `mode` is one of:
+ * `icon` is either up to two characters (an emoji or letters; "" shows the name's first letter) or an image
+ * URL / data:image from the sticker picker, shown on a tile of `color`. `groupId` is a group's id, or "" for none.
+ * `mode` is one of:
  *   "standard"  logged by hand: `inputType` (currency, numeric, tally, boolean, timer, compound or rating), and for
  *               numeric and currency a `unit` ("kg", "$", "hours"; may be "")
  *   "rollup"    one value made from other loggers': `rollupConfig: { math: "sum" | "average" | "max" | "min" |
@@ -32,13 +33,18 @@
   const unitPlaceholder = (inputType) => (inputType === "currency" ? "e.g. $, AUD, \u20ac" : "e.g. kg, hours, km");
   const ROLLUP_MATH = [["sum", "Sum"], ["average", "Average"], ["max", "Max"], ["min", "Min"], ["ratio", "Ratio"]];
   const COLORS = [
-    ["Blue", "#2563EB"], ["Sky", "#0EA5E9"], ["Teal", "#0D9488"], ["Green", "#16A34A"], ["Amber", "#D97706"],
-    ["Orange", "#EA580C"], ["Red", "#DC2626"], ["Pink", "#DB2777"], ["Violet", "#7C3AED"], ["Slate", "#475569"],
+    ["Sage", "#8BA888"], ["Mint", "#A3C4BC"], ["Dusty Blue", "#7D98A1"], ["Navy", "#5B6C7E"],
+    ["Terracotta", "#CC8B65"], ["Ochre", "#D4A373"], ["Warm Pink", "#D49A89"], ["Plum", "#9D7A8C"],
+    ["Neutral", "#A8A39D"], ["Slate", "#6D6A66"],
   ];
   const DEFAULT_COLOR = COLORS[0][1];
   const NAME_MAX = 80;
   const GROUP_MAX = 60;
   const UNIT_MAX = 24;
+  const ICON_IMAGE_RE = /^(data:image\/|https?:\/\/|\/)/i;
+  const ICON_IMAGE_MAX = 400000;
+  const ICON_IMAGE_PX = 96;
+  const STICKER_LIBRARY_URL = "/api/scrapbook/stickers";
 
   const store = () => window.FicusStore;
   const isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -55,6 +61,40 @@
       ? [...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text)].map((part) => part.segment)
       : Array.from(text);
     return parts.slice(0, 2).join("");
+  }
+
+  const isIconImage = (value) => typeof value === "string" && ICON_IMAGE_RE.test(value.trim());
+
+  // Text/emoji icons stay short; sticker/image icons keep their URL or data:image payload.
+  function normalizeIcon(value) {
+    const text = String(value ?? "").trim();
+    if (!text) return "";
+    if (isIconImage(text)) return text.slice(0, ICON_IMAGE_MAX);
+    return clipIcon(text);
+  }
+
+  function shrinkIconImage(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const w = img.naturalWidth;
+        const h = img.naturalHeight;
+        if (!w || !h) {
+          reject(new Error("empty image"));
+          return;
+        }
+        const scale = Math.min(1, ICON_IMAGE_PX / Math.max(w, h));
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(w * scale));
+        canvas.height = Math.max(1, Math.round(h * scale));
+        const ctx = canvas.getContext("2d");
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL("image/png"));
+      };
+      img.onerror = () => reject(new Error("image failed to load"));
+      img.src = src;
+    });
   }
 
   /* ---------- The model ---------- */
@@ -98,7 +138,7 @@
       ...rest,
       id: String(raw.id),
       name: clip(raw.name, NAME_MAX) || "Untitled logger",
-      icon: clipIcon(raw.icon),
+      icon: normalizeIcon(raw.icon),
       color: /^#[0-9a-f]{6}$/i.test(raw.color || "") ? raw.color.toUpperCase() : DEFAULT_COLOR,
       groupId: raw.groupId ? String(raw.groupId) : "",
       mode,
@@ -433,6 +473,8 @@
     selectedId: null,
     draft: null,
     view: { scale: 1, x: 0, y: 0 },
+    lookPop: null, // null | "color" | "sticker"
+    iconMode: "text", // "text" | "sticker"
     groupEdit: null,
     groupConfirm: null,
     confirmDelete: false,
@@ -441,7 +483,10 @@
     saveTimer: 0,
     status: { text: "", error: false },
   };
+  // Same sticker-library + sheet-slice state as Space's custom icon picker (space.js).
+  const stickers = { items: null, loading: null, failed: false, sheet: null, busy: false, status: "" };
   let el = null;
+  let lookOutside = null;
   /** @type {Map<number, { x: number, y: number, onNode: boolean }>} */
   let pointers = new Map();
   /** @type {{ dist: number, scale: number, midX: number, midY: number, x: number, y: number } | null} */
@@ -494,6 +539,7 @@
     trash: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5"/></svg>',
     close: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8"/></svg>',
     tally: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true"><path d="M5.2 4.5v11M8.4 4.5v11M11.6 4.5v11M14.8 4.5v11M3 13.6 17 6.4"/></svg>',
+    face: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" aria-hidden="true"><circle cx="8" cy="8" r="5.5"/><path d="M5.8 9.4c.9 1 2.5 1 3.4 0"/><path d="M6 6.4h.01M10 6.4h.01" stroke-width="2"/></svg>',
   };
   const icon = (name) => {
     const span = h("span", { class: "logger-svg", "aria-hidden": "true" });
@@ -503,11 +549,15 @@
 
   // A calculated metric's tile carries a small ƒ in its corner (`fx`), unless something beside it shows the mode.
   function tile(logger, big = false, fx = true) {
-    const text = logger.icon || (logger.name || "?").trim().charAt(0).toUpperCase() || "?";
     const metric = fx && kindOf(logger.mode) === "metric";
+    const image = isIconImage(logger.icon);
+    const text = image ? "" : (logger.icon || (logger.name || "?").trim().charAt(0).toUpperCase() || "?");
     return h("span", {
-      class: `logger-tile${big ? " is-big" : ""}${metric ? " is-metric" : ""}`, style: `--logger-color:${logger.color}`, "aria-hidden": "true",
-    }, text, metric && h("span", { class: "logger-tile-fx", text: FX }));
+      class: `logger-tile${big ? " is-big" : ""}${metric ? " is-metric" : ""}${image ? " is-image" : ""}`,
+      style: `--logger-color:${logger.color}`, "aria-hidden": "true",
+    },
+    image ? h("img", { src: logger.icon, alt: "", draggable: "false" }) : text,
+    metric && h("span", { class: "logger-tile-fx", text: FX }));
   }
 
   function badge(logger, override) {
@@ -757,12 +807,49 @@
     el.pop.classList.toggle("hidden", !ui.draft);
   }
 
+  function closeLookPops() {
+    ui.lookPop = null;
+    stickers.status = "";
+    if (lookOutside) {
+      document.removeEventListener("pointerdown", lookOutside, true);
+      lookOutside = null;
+    }
+    const colorPop = el?.editor.querySelector("[data-logger-color-pop]");
+    const stickerPop = el?.editor.querySelector("[data-logger-sticker-pop]");
+    colorPop?.classList.add("hidden");
+    stickerPop?.classList.add("hidden");
+    el?.editor.querySelector("[data-logger-color-btn]")?.setAttribute("aria-expanded", "false");
+    el?.editor.querySelector("[data-logger-icon-sticker]")?.setAttribute("aria-expanded", "false");
+  }
+
+  function bindLookOutside() {
+    if (lookOutside) return;
+    lookOutside = (event) => {
+      if (event.target.closest(".logger-look, .logger-color-pop, .logger-sticker-pop")) return;
+      closeLookPops();
+    };
+    document.addEventListener("pointerdown", lookOutside, true);
+  }
+
+  function placeLookPop(pop, anchor, align = "left") {
+    const rect = anchor.getBoundingClientRect();
+    pop.classList.remove("hidden");
+    const width = pop.offsetWidth || 200;
+    const left = align === "right"
+      ? Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8))
+      : Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    const top = Math.min(rect.bottom + 6, window.innerHeight - 12);
+    pop.style.left = `${left}px`;
+    pop.style.top = `${Math.max(8, top)}px`;
+  }
+
   function open() {
     if (!init()) return;
     Object.assign(ui, {
-      selectedId: null, draft: null, view: { scale: 1, x: 0, y: 0 }, groupEdit: null, groupConfirm: null, confirmDelete: false,
-      quick: null, status: { text: "", error: false },
+      selectedId: null, draft: null, view: { scale: 1, x: 0, y: 0 }, lookPop: null, iconMode: "text",
+      groupEdit: null, groupConfirm: null, confirmDelete: false, quick: null, status: { text: "", error: false },
     });
+    closeLookPops();
     const { loggers, groups } = readAll();
     if (!groupKeys(loggers, groups).includes(ui.groupKey)) {
       ui.groupKey = groups.find((group) => loggers.some((logger) => logger.groupId === group.id))?.id ?? groupKeys(loggers, groups)[0];
@@ -787,9 +874,10 @@
   function startNew() {
     settle();
     Object.assign(ui, {
-      selectedId: null, draft: blankDraft(ui.groupKey), confirmDelete: false, quick: null,
+      selectedId: null, draft: blankDraft(ui.groupKey), lookPop: null, iconMode: "text", confirmDelete: false, quick: null,
       status: { text: "", error: false },
     });
+    closeLookPops();
     render(() => {
       focusNode(NEW_ID, false);
       const name = el.editor.querySelector("[name='name']");
@@ -803,16 +891,19 @@
     if (!logger) return;
     settle();
     Object.assign(ui, {
-      groupKey: logger.groupId, selectedId: id, draft: draftOf(logger), confirmDelete: false,
+      groupKey: logger.groupId, selectedId: id, draft: draftOf(logger), lookPop: null,
+      iconMode: isIconImage(logger.icon) ? "sticker" : "text", confirmDelete: false,
       quick: null, groupConfirm: null, status: { text: "", error: false },
     });
+    closeLookPops();
     render(() => focusNode(id));
   }
 
   function deselect() {
     const id = ui.selectedId;
     settle();
-    Object.assign(ui, { selectedId: null, draft: null, confirmDelete: false, quick: null, status: { text: "", error: false } });
+    closeLookPops();
+    Object.assign(ui, { selectedId: null, draft: null, lookPop: null, iconMode: "text", confirmDelete: false, quick: null, status: { text: "", error: false } });
     render(() => (id && focusNode(id)) || el.addNode.focus({ preventScroll: true }));
   }
 
@@ -1101,6 +1192,21 @@
 
   /* ---------- The floating pop-over editor ---------- */
 
+  function loadStickerLibrary() {
+    if (stickers.items) return Promise.resolve(stickers.items);
+    if (!stickers.loading) {
+      stickers.failed = false;
+      stickers.loading = fetch(STICKER_LIBRARY_URL)
+        .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`sticker library ${res.status}`))))
+        .then((items) => {
+          stickers.items = Array.isArray(items) ? items.filter((item) => typeof item?.src === "string" && item.src) : [];
+        })
+        .catch(() => { stickers.failed = true; })
+        .finally(() => { stickers.loading = null; });
+    }
+    return stickers.loading;
+  }
+
   function field(labelText, control, hint) {
     const id = control.id || (control.id = `logger-field-${Math.random().toString(36).slice(2, 8)}`);
     return h("div", { class: "logger-field" }, h("label", { class: "logger-label", for: id, text: labelText }), control, hint && h("p", { class: "logger-hint", text: hint }));
@@ -1118,6 +1224,7 @@
   function renderDrawer(loggers, groups) {
     const draft = ui.draft;
     if (!draft) {
+      closeLookPops();
       el.editor.replaceChildren();
       return;
     }
@@ -1133,9 +1240,25 @@
       class: "logger-editor-title", tabindex: "-1", "data-logger-heading": "",
       text: editing ? `Edit ${editing.name}` : `New Logger in ${groupName(groups, draft.groupId)}`,
     });
-    const preview = () => tile({ name: draft.name, icon: draft.icon, color: draft.color, mode: draft.mode }, true);
-    const look = h("div", { class: "logger-look" }, preview());
-    const syncPreview = () => look.firstChild.replaceWith(preview());
+    if (ui.iconMode !== "text" && ui.iconMode !== "sticker") ui.iconMode = isIconImage(draft.icon) ? "sticker" : "text";
+    if (isIconImage(draft.icon)) ui.iconMode = "sticker";
+
+    const look = h("div", { class: "logger-look" });
+    const colorBtn = h("button", {
+      type: "button", class: "logger-color-btn", "data-logger-color-btn": "",
+      style: `--swatch:${draft.color}`, "aria-label": "Colour", title: "Colour",
+      "aria-expanded": String(ui.lookPop === "color"), "aria-haspopup": "true",
+    });
+    const syncPreview = () => {
+      colorBtn.style.setProperty("--swatch", draft.color);
+      colorBtn.replaceChildren(
+        isIconImage(draft.icon)
+          ? h("img", { src: draft.icon, alt: "", draggable: "false" })
+          : h("span", { class: "logger-color-glyph", text: draft.icon || (draft.name || "?").trim().charAt(0).toUpperCase() || "?" }),
+      );
+    };
+    syncPreview();
+
     const name = h("input", {
       type: "text", class: "logger-input", name: "name", maxlength: NAME_MAX, placeholder: "e.g. Body weight", autocomplete: "off",
       oninput: (event) => {
@@ -1146,29 +1269,213 @@
       },
     });
     name.value = draft.name;
+
     const iconField = h("input", {
-      type: "text", class: "logger-input logger-icon-input", name: "icon", placeholder: "Aa", autocomplete: "off", "aria-describedby": "logger-icon-hint",
+      type: "text", class: "logger-input logger-icon-input", name: "icon", placeholder: "Aa", autocomplete: "off",
+      "aria-label": "Text or emoji icon", "aria-describedby": "logger-icon-hint",
       oninput: (event) => {
         const clipped = clipIcon(event.target.value);
         if (clipped !== event.target.value.trim()) event.target.value = clipped;
         draft.icon = clipped;
+        ui.iconMode = "text";
+        syncMode();
         syncPreview();
         changed();
       },
     });
-    iconField.value = draft.icon;
-    const swatches = h("div", { class: "logger-swatches", role: "radiogroup", "aria-label": "Colour" },
-      COLORS.map(([colorName, hex]) => h("button", {
-        type: "button", class: "logger-swatch", role: "radio", "aria-checked": String(draft.color === hex), "aria-label": colorName, title: colorName,
-        style: `--swatch:${hex}`,
-        onclick: (event) => {
-          draft.color = hex;
-          for (const swatch of swatches.children) swatch.setAttribute("aria-checked", String(swatch === event.currentTarget));
-          syncPreview();
+    iconField.value = isIconImage(draft.icon) ? "" : draft.icon;
+
+    const colorPop = h("div", {
+      class: `logger-color-pop${ui.lookPop === "color" ? "" : " hidden"}`, "data-logger-color-pop": "",
+      role: "radiogroup", "aria-label": "Colour",
+    }, COLORS.map(([colorName, hex]) => h("button", {
+      type: "button", class: "logger-swatch", role: "radio", "aria-checked": String(draft.color === hex),
+      "aria-label": colorName, title: colorName, style: `--swatch:${hex}`,
+      onclick: (event) => {
+        draft.color = hex;
+        for (const swatch of colorPop.children) swatch.setAttribute("aria-checked", String(swatch === event.currentTarget));
+        syncPreview();
+        changed();
+        closeLookPops();
+      },
+    })));
+
+    const textModeBtn = h("button", {
+      type: "button", class: "logger-icon-mode", "data-logger-icon-text": "", role: "radio",
+      "aria-checked": String(ui.iconMode === "text"), "aria-label": "Text or emoji icon", title: "Text / emoji",
+      text: "Aa",
+      onclick: () => {
+        ui.iconMode = "text";
+        if (isIconImage(draft.icon)) {
+          draft.icon = "";
           changed();
-        },
-      })));
-    look.append(iconField, swatches);
+        }
+        closeLookPops();
+        syncMode();
+        syncPreview();
+        iconField.focus({ preventScroll: true });
+      },
+    });
+    const stickerModeBtn = h("button", {
+      type: "button", class: "logger-icon-mode", "data-logger-icon-sticker": "", role: "radio",
+      "aria-checked": String(ui.iconMode === "sticker"), "aria-expanded": String(ui.lookPop === "sticker"),
+      "aria-haspopup": "true", "aria-label": "Sticker icon", title: "Sticker / image",
+      onclick: () => {
+        ui.iconMode = "sticker";
+        syncMode();
+        if (ui.lookPop === "sticker") closeLookPops();
+        else openStickerPop();
+      },
+    }, icon("face"));
+
+    const iconModes = h("div", { class: "logger-icon-modes", role: "radiogroup", "aria-label": "Icon type" }, textModeBtn, stickerModeBtn);
+
+    const stickerPop = h("div", {
+      class: `logger-sticker-pop space-pop space-icon-pop${ui.lookPop === "sticker" ? "" : " hidden"}`,
+      "data-logger-sticker-pop": "", role: "dialog", "aria-label": "Sticker icon",
+    });
+
+    const fillStickerPop = () => {
+      let library;
+      if (stickers.items?.length) {
+        library = h("div", { class: "space-icon-grid" }, stickers.items.map((item) => h("button", {
+          type: "button", class: "space-icon-tile", title: item.name || "Sticker",
+          onclick: () => useStickerSrc(item.src),
+        }, h("img", { src: item.src, alt: "", loading: "lazy" }))));
+      } else if (stickers.items) {
+        library = h("p", { class: "space-icon-note", text: "No saved stickers yet. Upload one above, or add sticker sheets in a Vision scrapbook." });
+      } else if (stickers.failed) {
+        library = h("p", { class: "space-icon-note", text: "Couldn\u2019t load your sticker library." });
+      } else {
+        library = h("p", { class: "space-icon-note", text: "Loading your stickers\u2026" });
+      }
+      const file = h("input", { type: "file", accept: "image/*", "data-logger-sticker-file": "", hidden: true });
+      file.addEventListener("change", () => {
+        importStickerFile(file.files?.[0]);
+        file.value = "";
+      });
+      stickerPop.replaceChildren(
+        h("p", { class: "space-pop-label", text: "Sticker icon" }),
+        h("button", {
+          type: "button", class: "space-icon-upload", disabled: stickers.busy || null,
+          onclick: () => file.click(),
+        }, h("span", { "aria-hidden": "true", text: "\u21eb" }), stickers.busy ? "Slicing\u2026" : "Upload an icon or sticker sheet"),
+        file,
+        stickers.status && h("p", { class: "space-icon-note is-status", text: stickers.status }),
+        stickers.sheet && h("p", { class: "space-pop-label", text: "From your sheet" }),
+        stickers.sheet && h("div", { class: "space-icon-grid" }, stickers.sheet.map((src) => h("button", {
+          type: "button", class: "space-icon-tile", title: "Use this sticker", onclick: () => useStickerSrc(src),
+        }, h("img", { src, alt: "" })))),
+        h("p", { class: "space-pop-label", text: "Your stickers" }),
+        library,
+      );
+    };
+
+    const useStickerSrc = async (src) => {
+      if (stickers.busy) return;
+      stickers.busy = true;
+      fillStickerPop();
+      try {
+        draft.icon = normalizeIcon(await shrinkIconImage(src));
+        ui.iconMode = "sticker";
+        stickers.busy = false;
+        stickers.status = "";
+        syncMode();
+        syncPreview();
+        changed();
+        closeLookPops();
+      } catch (_) {
+        stickers.busy = false;
+        stickers.status = "Couldn\u2019t use that image. Try another one.";
+        fillStickerPop();
+      }
+    };
+
+    // Same auto-slice path as Space custom icons: JotScrapbook.sliceStickerSheet, then pick a piece.
+    const importStickerFile = async (file) => {
+      if (!file) return;
+      if (!/^image\//.test(file.type)) {
+        stickers.status = "Choose a PNG, JPG, GIF or WebP image.";
+        fillStickerPop();
+        return;
+      }
+      const kit = window.JotScrapbook;
+      stickers.busy = true;
+      stickers.status = "";
+      stickers.sheet = null;
+      fillStickerPop();
+      try {
+        const src = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        let pieces = [];
+        if (typeof kit?.sliceStickerSheet === "function") {
+          const sliced = await kit.sliceStickerSheet(src, { maxPx: kit.STICKER_ASSET_MAX_PX || 420, minAreaFrac: 0.0012 });
+          pieces = typeof kit.looksLikeCaption === "function" ? sliced.filter((piece) => !kit.looksLikeCaption(piece, sliced)) : sliced;
+        }
+        stickers.busy = false;
+        if (pieces.length <= 1) {
+          await useStickerSrc(pieces[0]?.src || src);
+          return;
+        }
+        stickers.sheet = pieces.slice(0, 60).map((piece) => piece.src);
+        stickers.status = `Found ${pieces.length} stickers. Pick one.`;
+      } catch (_) {
+        stickers.busy = false;
+        stickers.status = "Couldn\u2019t read that image. Try a PNG or JPG.";
+      }
+      fillStickerPop();
+    };
+
+    const openStickerPop = () => {
+      ui.lookPop = "sticker";
+      colorPop.classList.add("hidden");
+      colorBtn.setAttribute("aria-expanded", "false");
+      stickerModeBtn.setAttribute("aria-expanded", "true");
+      fillStickerPop();
+      placeLookPop(stickerPop, stickerModeBtn, "right");
+      bindLookOutside();
+      if (!stickers.items) {
+        loadStickerLibrary().then(() => {
+          if (ui.lookPop !== "sticker") return;
+          fillStickerPop();
+          placeLookPop(stickerPop, stickerModeBtn, "right");
+        });
+      }
+    };
+
+    const openColorPop = () => {
+      ui.lookPop = "color";
+      stickerPop.classList.add("hidden");
+      stickerModeBtn.setAttribute("aria-expanded", "false");
+      colorBtn.setAttribute("aria-expanded", "true");
+      placeLookPop(colorPop, colorBtn, "left");
+      bindLookOutside();
+    };
+
+    colorBtn.addEventListener("click", () => {
+      if (ui.lookPop === "color") closeLookPops();
+      else openColorPop();
+    });
+
+    const syncMode = () => {
+      textModeBtn.setAttribute("aria-checked", String(ui.iconMode === "text"));
+      stickerModeBtn.setAttribute("aria-checked", String(ui.iconMode === "sticker"));
+      iconField.hidden = ui.iconMode !== "text";
+    };
+    syncMode();
+    fillStickerPop();
+    look.append(colorBtn, iconModes, iconField, colorPop, stickerPop);
+    if (ui.lookPop === "color" || ui.lookPop === "sticker") {
+      requestAnimationFrame(() => {
+        if (ui.lookPop === "color") placeLookPop(colorPop, colorBtn, "left");
+        else if (ui.lookPop === "sticker") placeLookPop(stickerPop, stickerModeBtn, "right");
+        bindLookOutside();
+      });
+    }
 
     const group = selectBox("group", [["", "No group"], ...groups.map((row) => [row.id, row.name])], draft.groupId, (event) => { draft.groupId = event.target.value; changed(); });
 
@@ -1336,7 +1643,7 @@
       if (!lenient) return { error: "Give the logger a name.", selector: "[name='name']" };
       name = existing?.name || "New logger";
     }
-    const raw = { ...(existing || {}), id, name, icon: draft.icon, color: draft.color, groupId: draft.groupId, mode: draft.mode };
+    const raw = { ...(existing || {}), id, name, icon: normalizeIcon(draft.icon), color: draft.color, groupId: draft.groupId, mode: draft.mode };
     if (draft.mode === "standard") Object.assign(raw, { inputType: draft.inputType, unit: draft.unit });
     // A metric saves before its sources are connected (pending), showing — until they are.
     if (draft.mode === "rollup") {
@@ -1613,6 +1920,8 @@
         render(() => focusGroup(id, "delete"));
       } else if (ui.quick) {
         closeQuick();
+      } else if (ui.lookPop) {
+        closeLookPops();
       } else if (ui.confirmDelete) {
         ui.confirmDelete = false;
         render(() => el.editor.querySelector("[data-logger-delete]")?.focus());
