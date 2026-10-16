@@ -23,7 +23,13 @@
     root: null,
     main: null,
     modeGroup: null,
-    rangeLabel: null,
+    rangeBtn: null,
+    rangeText: null,
+    picker: null,
+    pickerLabel: null,
+    pickerGrid: null,
+    pickerMonth: null,
+    pickerOpen: false,
     stage: null,
     previewPanel: null,
     mode: "week",
@@ -31,6 +37,8 @@
     items: [],
     selectedTimelineItem: null,
   };
+
+  const CHEVRON_SVG = '<svg class="ftime-range-chevron" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg>';
 
   /* ---------- Dates ---------- */
 
@@ -448,16 +456,32 @@
     root.innerHTML = `
       <div class="ftime-main">
         <header class="ftime-toolbar">
-          <div class="ftime-toolbar-start">
+          <div class="ftime-toolbar-bar">
             <h1 id="collection-title" class="ftime-heading">Time</h1>
+            <div class="ftime-nav" aria-label="Date navigation">
+              <button type="button" class="ftime-btn is-quiet" data-ftime-nav="today">Today</button>
+              <button type="button" class="ftime-btn" data-ftime-nav="prev" aria-label="Previous">‹ Prev</button>
+              <button type="button" class="ftime-btn" data-ftime-nav="next" aria-label="Next">Next ›</button>
+            </div>
+            <div class="ftime-range-wrap">
+              <button type="button" class="ftime-range" data-ftime-range aria-haspopup="dialog" aria-expanded="false">
+                <span data-ftime-range-text></span>
+                ${CHEVRON_SVG}
+              </button>
+              <div class="ftime-picker" data-ftime-picker hidden role="dialog" aria-label="Choose a date">
+                <div class="ftime-picker-head">
+                  <button type="button" class="ftime-picker-nav" data-ftime-picker-nav="prev" aria-label="Previous month">‹</button>
+                  <p class="ftime-picker-label" data-ftime-picker-label></p>
+                  <button type="button" class="ftime-picker-nav" data-ftime-picker-nav="next" aria-label="Next month">›</button>
+                </div>
+                <div class="ftime-picker-weekdays" aria-hidden="true">
+                  <span>S</span><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span>
+                </div>
+                <div class="ftime-picker-grid" data-ftime-picker-grid></div>
+              </div>
+            </div>
             <div class="ftime-toolbar-divider" aria-hidden="true"></div>
             <div class="ftime-modes" role="tablist" aria-label="Calendar mode"></div>
-          </div>
-          <div class="ftime-nav" aria-label="Date navigation">
-            <button type="button" class="ftime-btn" data-ftime-nav="prev" aria-label="Previous">‹ Prev</button>
-            <button type="button" class="ftime-btn is-quiet" data-ftime-nav="today">Today</button>
-            <button type="button" class="ftime-btn" data-ftime-nav="next" aria-label="Next">Next ›</button>
-            <p class="ftime-range" data-ftime-range></p>
           </div>
         </header>
         <div class="ftime-stage" data-ftime-stage tabindex="-1"></div>
@@ -476,6 +500,11 @@
 
     root.addEventListener("click", onRootClick);
     root.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && ui.pickerOpen) {
+        event.preventDefault();
+        closeDatePicker();
+        return;
+      }
       if (event.key === "Enter" || event.key === " ") {
         const card = event.target.closest("[data-ftime-item]");
         if (card && root.contains(card) && !card.closest(".ctags-preview")) {
@@ -484,24 +513,65 @@
         }
       }
     });
+    document.addEventListener("pointerdown", onPickerOutside, true);
 
     ui.root = root;
     ui.main = root.querySelector(".ftime-main");
     ui.modeGroup = modeGroup;
-    ui.rangeLabel = root.querySelector("[data-ftime-range]");
+    ui.rangeBtn = root.querySelector("[data-ftime-range]");
+    ui.rangeText = root.querySelector("[data-ftime-range-text]");
+    ui.picker = root.querySelector("[data-ftime-picker]");
+    ui.pickerLabel = root.querySelector("[data-ftime-picker-label]");
+    ui.pickerGrid = root.querySelector("[data-ftime-picker-grid]");
     ui.stage = root.querySelector("[data-ftime-stage]");
     ensurePreviewPanel();
   }
 
   function onRootClick(event) {
     if (event.target.closest(".ctags-preview")) return;
+
+    const pickerNav = event.target.closest("[data-ftime-picker-nav]");
+    if (pickerNav) {
+      event.preventDefault();
+      const dir = pickerNav.dataset.ftimePickerNav === "next" ? 1 : -1;
+      ui.pickerMonth = startOfMonth(addMonths(ui.pickerMonth || startOfMonth(ui.anchor), dir));
+      renderDatePicker();
+      return;
+    }
+
+    const dayBtn = event.target.closest("[data-ftime-pick-day]");
+    if (dayBtn) {
+      event.preventDefault();
+      const iso = dayBtn.dataset.ftimePickDay;
+      const picked = parseTaskDue(iso);
+      if (picked) {
+        ui.anchor = startOfDay(picked);
+        closeDatePicker();
+        render();
+        if (ui.mode === "timeline") scrollTimelineToDay(dayKey(ui.anchor));
+      }
+      return;
+    }
+
+    const rangeBtn = event.target.closest("[data-ftime-range]");
+    if (rangeBtn) {
+      event.preventDefault();
+      if (ui.pickerOpen) closeDatePicker();
+      else openDatePicker();
+      return;
+    }
+
+    if (event.target.closest("[data-ftime-picker]")) return;
+
     const modeBtn = event.target.closest("[data-ftime-mode]");
     if (modeBtn) {
+      closeDatePicker();
       setMode(modeBtn.dataset.ftimeMode);
       return;
     }
     const nav = event.target.closest("[data-ftime-nav]");
     if (nav) {
+      closeDatePicker();
       const action = nav.dataset.ftimeNav;
       if (action === "today") {
         ui.anchor = startOfDay(new Date());
@@ -520,6 +590,56 @@
     }
   }
 
+  function onPickerOutside(event) {
+    if (!ui.pickerOpen || !ui.root) return;
+    if (ui.root.contains(event.target) && event.target.closest(".ftime-range-wrap")) return;
+    closeDatePicker();
+  }
+
+  function openDatePicker() {
+    if (!ui.picker) return;
+    ui.pickerMonth = startOfMonth(ui.anchor);
+    ui.pickerOpen = true;
+    ui.picker.hidden = false;
+    ui.rangeBtn?.setAttribute("aria-expanded", "true");
+    renderDatePicker();
+  }
+
+  function closeDatePicker() {
+    if (!ui.picker) return;
+    ui.pickerOpen = false;
+    ui.picker.hidden = true;
+    ui.rangeBtn?.setAttribute("aria-expanded", "false");
+  }
+
+  function renderDatePicker() {
+    if (!ui.pickerGrid || !ui.pickerLabel) return;
+    const month = startOfMonth(ui.pickerMonth || ui.anchor);
+    ui.pickerMonth = month;
+    ui.pickerLabel.textContent = month.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    const gridStart = startOfWeek(month);
+    const today = startOfDay(new Date());
+    const anchor = startOfDay(ui.anchor);
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < 42; i++) {
+      const day = addDays(gridStart, i);
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "ftime-picker-day"
+        + (day.getMonth() === month.getMonth() ? "" : " is-outside")
+        + (sameDay(day, today) ? " is-today" : "")
+        + (sameDay(day, anchor) ? " is-selected" : "");
+      btn.dataset.ftimePickDay = dayKey(day);
+      btn.textContent = String(day.getDate());
+      btn.setAttribute("aria-label", day.toLocaleDateString(undefined, {
+        weekday: "long", month: "long", day: "numeric", year: "numeric",
+      }));
+      if (sameDay(day, anchor)) btn.setAttribute("aria-current", "date");
+      frag.append(btn);
+    }
+    ui.pickerGrid.replaceChildren(frag);
+  }
+
   function setMode(mode) {
     if (!MODES.includes(mode)) return;
     ui.mode = mode;
@@ -527,12 +647,13 @@
   }
 
   function syncChrome() {
-    ui.modeGroup.querySelectorAll("[data-ftime-mode]").forEach((btn) => {
+    ui.modeGroup?.querySelectorAll("[data-ftime-mode]").forEach((btn) => {
       const on = btn.dataset.ftimeMode === ui.mode;
       btn.classList.toggle("is-active", on);
       btn.setAttribute("aria-selected", on ? "true" : "false");
     });
-    ui.rangeLabel.textContent = formatRangeLabel(ui.mode, ui.anchor);
+    if (ui.rangeText) ui.rangeText.textContent = formatRangeLabel(ui.mode, ui.anchor);
+    if (ui.pickerOpen) renderDatePicker();
   }
 
   function render() {
@@ -907,6 +1028,7 @@
   }
 
   function hide() {
+    closeDatePicker();
     ui.previewPanel?.close({ refocus: false });
     ui.selectedTimelineItem = null;
   }
