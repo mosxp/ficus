@@ -21,7 +21,7 @@
     <script src="space.js?v=99" defer></script>
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
-    <script src="ficus_dashboards.js?v=1" defer></script>
+    <script src="ficus_dashboards.js?v=2" defer></script>
     <script src="collection.js?v=27" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -960,7 +960,11 @@
       .ldash-logger-opt { display: flex; gap: 0.45rem; align-items: flex-start; padding: 0.35rem 0.4rem; cursor: pointer; min-height: 28px; font-weight: 500; color: #1c1917; }
       .ldash-logger-opt:hover { background: #fafaf9; }
       .ldash-dialog-error { margin: 0; font-size: 0.8rem; color: #b91c1c; }
+      .ldash-dialog-note { margin: 0; font-size: 0.9rem; line-height: 1.45; color: #57534e; font-weight: 500; }
+      .ldash-dialog-note strong { color: #1c1917; font-weight: 700; }
       .ldash-dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
+      .ldash-btn.is-danger { border-color: #b91c1c; color: #b91c1c; }
+      .ldash-btn.is-danger:hover, .ldash-btn.is-danger:focus-visible { background: #fef2f2; outline-color: #b91c1c; }
       @media (max-width: 960px) {
         .ldash { flex-wrap: wrap; overflow: auto; }
         .ldash-list { width: 100%; flex: 1 1 100%; max-height: 200px; border-right: 0; border-bottom: 1px solid #e5e5e5; }

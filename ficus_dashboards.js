@@ -577,6 +577,7 @@
   function hide() {
     dash.editing = false;
     if (dash.exportMenu) dash.exportMenu.hidden = true;
+    closeDashModal();
   }
 
   function renderList() {
@@ -709,33 +710,142 @@
     renderMain();
   }
 
+  function closeDashModal() {
+    document.querySelector(".ldash-modal[data-ldash-create-modal], .ldash-modal[data-ldash-delete-modal]")?.remove();
+  }
+
+  function openCreateDashboardModal() {
+    closeDashModal();
+    const backdrop = document.createElement("div");
+    backdrop.className = "ldash-modal";
+    backdrop.dataset.ldashCreateModal = "";
+    backdrop.setAttribute("role", "presentation");
+    backdrop.innerHTML = `
+      <div class="ldash-dialog" role="dialog" aria-modal="true" aria-labelledby="ldash-create-title">
+        <div class="ldash-dialog-head">
+          <h2 id="ldash-create-title">Create New Dashboard</h2>
+          <button type="button" class="ldash-dialog-close" data-cancel aria-label="Close">\u2715</button>
+        </div>
+        <label class="ldash-field">
+          <span>Dashboard Title</span>
+          <input type="text" data-ldash-new-title maxlength="80" placeholder="e.g. Sleep & recovery" autocomplete="off" />
+        </label>
+        <p class="ldash-dialog-error" data-error hidden></p>
+        <div class="ldash-dialog-actions">
+          <button type="button" class="ldash-btn" data-cancel>Cancel</button>
+          <button type="button" class="ldash-btn is-primary" data-save>Create</button>
+        </div>
+      </div>`;
+    const input = backdrop.querySelector("[data-ldash-new-title]");
+    const error = backdrop.querySelector("[data-error]");
+    const close = () => {
+      backdrop.remove();
+      document.removeEventListener("keydown", onKey, true);
+    };
+    const submit = () => {
+      const name = String(input.value || "").replace(/\s+/g, " ").trim();
+      if (!name) {
+        error.textContent = "Enter a dashboard title.";
+        error.hidden = false;
+        input.focus();
+        return;
+      }
+      const board = normalizeDashboard({ id: newId("ldb"), title: name, widgets: [] });
+      if (!Array.isArray(dash.dashboards)) dash.dashboards = [];
+      dash.dashboards.push(board);
+      saveDashboards();
+      dash.selectedId = board.id;
+      dash.editing = true;
+      close();
+      syncEditButton();
+      renderList();
+      renderMain();
+    };
+    const onKey = (event) => {
+      if (!backdrop.isConnected) {
+        document.removeEventListener("keydown", onKey, true);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+      } else if (event.key === "Enter" && event.target === input) {
+        event.preventDefault();
+        submit();
+      }
+    };
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop || event.target.closest("[data-cancel]")) close();
+    });
+    backdrop.querySelector("[data-save]").addEventListener("click", submit);
+    document.addEventListener("keydown", onKey, true);
+    document.body.append(backdrop);
+    input.value = "My Dashboard";
+    input.focus();
+    input.select();
+  }
+
   function createDashboard() {
-    const title = window.prompt("Dashboard title", "My Dashboard");
-    if (title == null) return;
-    const name = String(title).trim() || "Untitled dashboard";
-    const board = normalizeDashboard({ id: newId("ldb"), title: name, widgets: [] });
-    dash.dashboards.push(board);
-    saveDashboards();
-    dash.selectedId = board.id;
-    dash.editing = true;
-    syncEditButton();
-    renderList();
-    renderMain();
+    openCreateDashboardModal();
+  }
+
+  function openDeleteDashboardModal(id) {
+    const board = dash.dashboards.find((d) => d.id === id);
+    if (!board) return;
+    closeDashModal();
+    const backdrop = document.createElement("div");
+    backdrop.className = "ldash-modal";
+    backdrop.dataset.ldashDeleteModal = "";
+    backdrop.setAttribute("role", "presentation");
+    backdrop.innerHTML = `
+      <div class="ldash-dialog" role="dialog" aria-modal="true" aria-labelledby="ldash-delete-title">
+        <div class="ldash-dialog-head">
+          <h2 id="ldash-delete-title">Delete dashboard?</h2>
+          <button type="button" class="ldash-dialog-close" data-cancel aria-label="Close">\u2715</button>
+        </div>
+        <p class="ldash-dialog-note">Delete <strong></strong>? This can\u2019t be undone.</p>
+        <div class="ldash-dialog-actions">
+          <button type="button" class="ldash-btn" data-cancel>Cancel</button>
+          <button type="button" class="ldash-btn is-danger" data-confirm>Delete</button>
+        </div>
+      </div>`;
+    backdrop.querySelector(".ldash-dialog-note strong").textContent = board.title;
+    const close = () => {
+      backdrop.remove();
+      document.removeEventListener("keydown", onKey, true);
+    };
+    const onKey = (event) => {
+      if (!backdrop.isConnected) {
+        document.removeEventListener("keydown", onKey, true);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+      }
+    };
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop || event.target.closest("[data-cancel]")) close();
+    });
+    backdrop.querySelector("[data-confirm]").addEventListener("click", () => {
+      dash.dashboards = dash.dashboards.filter((d) => d.id !== id);
+      saveDashboards();
+      if (dash.selectedId === id) {
+        dash.selectedId = dash.dashboards[0]?.id || null;
+        dash.editing = false;
+      }
+      close();
+      syncEditButton();
+      renderList();
+      renderMain();
+    });
+    document.addEventListener("keydown", onKey, true);
+    document.body.append(backdrop);
+    backdrop.querySelector("[data-cancel]")?.focus();
   }
 
   function deleteDashboard(id) {
-    const board = dash.dashboards.find((d) => d.id === id);
-    if (!board) return;
-    if (!window.confirm(`Delete dashboard "${board.title}"?`)) return;
-    dash.dashboards = dash.dashboards.filter((d) => d.id !== id);
-    saveDashboards();
-    if (dash.selectedId === id) {
-      dash.selectedId = dash.dashboards[0]?.id || null;
-      dash.editing = false;
-    }
-    syncEditButton();
-    renderList();
-    renderMain();
+    openDeleteDashboardModal(id);
   }
 
   function removeWidget(widgetId) {
