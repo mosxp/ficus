@@ -8613,24 +8613,31 @@
       };
     }
 
-    // A child dot card stands for one dot, so a selection holding one (on its own or in a group) can't be
-    // duplicated: the selection bar leaves out Duplicate (and the divider after it), keeping restacking and Delete.
-    const holdsCard = (board) => boardCardDots(board.objects.filter((o) => board.selection.has(o.id))).size > 0;
+    // Data-backed board objects (child-dot cards, log entries, calendar events, Google Tasks, references) stand
+    // for one live record, so a selection holding any of them can't be duplicated. Static chrome (shapes, notes,
+    // stickers, images, strokes…) still can. The selection bar leaves out Duplicate (and the divider after it);
+    // duplicateSelection / Cmd-D also early-return so shortcuts can't bypass the UI.
+    const objectBlocksDuplicate = (o) => {
+      if (!o) return false;
+      if (o.type === DOT_CARD || isBoardItem(o)) return true;
+      if (o.type === "group" && Array.isArray(o.children)) return o.children.some(objectBlocksDuplicate);
+      return false;
+    };
+    const selectionBlocksDuplicate = (board) => board.objects.some((o) => board.selection.has(o.id) && objectBlocksDuplicate(o));
     const syncSelbar = b._syncSelbar;
     b._syncSelbar = function (...args) {
       const result = syncSelbar.apply(this, args);
       const duplicate = this.selbar.hidden ? null : this.selbar.querySelector('[data-sb-sel="duplicate"]');
-      if (duplicate && holdsCard(this)) {
+      if (duplicate && selectionBlocksDuplicate(this)) {
         if (duplicate.nextElementSibling?.classList.contains("sb-selsep")) duplicate.nextElementSibling.remove();
         duplicate.remove();
         this._positionSelbar();
       }
       return result;
     };
-    // Copies of calendar and task cards get blocks of their own, in the undo step that made them too.
     const duplicateSelection = b.duplicateSelection;
     b.duplicateSelection = function (...args) {
-      if (holdsCard(this)) return undefined;
+      if (selectionBlocksDuplicate(this)) return false;
       const result = duplicateSelection.apply(this, args);
       const copies = this.objects.filter((o) => this.selection.has(o.id));
       renewBoardItemBlocks(copies);
