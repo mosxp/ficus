@@ -452,26 +452,29 @@
       </section>
       <section class="ldash-main" aria-label="Dashboard">
         <header class="ldash-toolbar">
-          <h2 class="ldash-heading" data-ldash-title>Select a dashboard</h2>
-          <div class="ldash-toolbar-actions">
-            <label class="ldash-range">
-              <span class="sr-only">Date range</span>
-              <select data-ldash-range aria-label="Date range">
-                ${DATE_PRESETS.map(([id, label]) => `<option value="${id}">${label}</option>`).join("")}
-              </select>
-            </label>
-            <div class="ldash-custom" data-ldash-custom hidden>
-              <input type="date" data-ldash-from aria-label="From date" />
-              <input type="date" data-ldash-to aria-label="To date" />
-            </div>
-            <div class="ldash-export-wrap">
-              <button type="button" class="ldash-btn" data-ldash-export-toggle aria-haspopup="menu" aria-expanded="false">Export</button>
-              <div class="ldash-export-menu" data-ldash-export-menu hidden role="menu">
-                <button type="button" role="menuitem" data-ldash-export="csv">Export to CSV</button>
-                <button type="button" role="menuitem" data-ldash-export="pdf">Export to PDF</button>
+          <div class="ldash-toolbar-start">
+            <h2 class="ldash-heading" data-ldash-title>Select a dashboard</h2>
+            <div class="ldash-toolbar-divider" aria-hidden="true"></div>
+            <div class="ldash-toolbar-actions">
+              <label class="ldash-range">
+                <span class="sr-only">Date range</span>
+                <select data-ldash-range aria-label="Date range">
+                  ${DATE_PRESETS.map(([id, label]) => `<option value="${id}">${label}</option>`).join("")}
+                </select>
+              </label>
+              <div class="ldash-custom" data-ldash-custom hidden>
+                <input type="date" data-ldash-from aria-label="From date" />
+                <input type="date" data-ldash-to aria-label="To date" />
               </div>
+              <div class="ldash-export-wrap">
+                <button type="button" class="ldash-btn" data-ldash-export-toggle aria-haspopup="menu" aria-expanded="false">Export</button>
+                <div class="ldash-export-menu" data-ldash-export-menu hidden role="menu">
+                  <button type="button" role="menuitem" data-ldash-export="csv">Export to CSV</button>
+                  <button type="button" role="menuitem" data-ldash-export="pdf">Export to PDF</button>
+                </div>
+              </div>
+              <button type="button" class="ldash-btn" data-ldash-edit>Edit Layout / Add Widget</button>
             </div>
-            <button type="button" class="ldash-btn" data-ldash-edit>Edit Layout / Add Widget</button>
           </div>
         </header>
         <div class="ldash-canvas" data-ldash-canvas></div>

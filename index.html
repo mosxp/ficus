@@ -21,7 +21,7 @@
     <script src="space.js?v=99" defer></script>
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
-    <script src="ficus_dashboards.js?v=2" defer></script>
+    <script src="ficus_dashboards.js?v=3" defer></script>
     <script src="collection.js?v=27" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -877,11 +877,24 @@
       .ldash-item-del svg { width: 14px; height: 14px; }
       .ldash-main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
       .ldash-toolbar {
-        display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 10px;
+        display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 10px;
         min-height: 57px; padding: 10px 16px; border-bottom: 1px solid #e5e5e5; background: #fff;
+        /* Leave the far-right strip clear for the floating Sign Out / Synced block. */
+        padding-right: max(16px, calc(var(--ficus-account-room) + 12px));
       }
-      .ldash-heading { margin: 0; flex: 1; min-width: 10rem; font-size: 1.15rem; font-weight: 700; color: #1c1917; }
-      .ldash-toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+      .ldash-toolbar-start {
+        display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 12px;
+        min-width: 0; max-width: 100%;
+      }
+      .ldash-heading {
+        margin: 0; flex: 0 1 auto; min-width: 0; max-width: min(18rem, 40vw);
+        font-size: 1.15rem; font-weight: 700; color: #1c1917;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .ldash-toolbar-divider {
+        flex-shrink: 0; width: 1px; height: 1.5rem; background: #e7e5e4;
+      }
+      .ldash-toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 8px; }
       .ldash-range select, .ldash-custom input[type="date"] {
         min-height: 2.25rem; border: 1px solid #e7e5e4; background: #fff; padding: 0 0.55rem; font: inherit; font-size: 0.82rem;
       }
@@ -894,7 +907,7 @@
       .ldash-btn.is-primary, .ldash-btn.is-active { background: #1c1917; border-color: #1c1917; color: #fff; }
       .ldash-export-wrap { position: relative; }
       .ldash-export-menu {
-        position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 11rem;
+        position: absolute; left: 0; top: calc(100% + 4px); z-index: 20; min-width: 11rem;
         border: 1px solid #e7e5e4; background: #fff; box-shadow: 0 10px 24px rgba(28,25,23,0.12); padding: 0.3rem;
       }
       .ldash-export-menu button {
