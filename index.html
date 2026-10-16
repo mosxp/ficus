@@ -18,7 +18,7 @@
     <script src="canvas-editor.js?v=2"></script>
     <script src="scrapboard.js?v=26"></script>
     <script src="quick_line.js?v=2"></script>
-    <script src="space.js?v=100" defer></script>
+    <script src="space.js?v=101" defer></script>
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
     <script src="ficus_dashboards.js?v=3" defer></script>
@@ -1913,9 +1913,9 @@
         --space-bg: #ffffff; --space-ink: #44403c; --space-hint: #a8a29e;
         --space-line: rgba(0, 0, 0, 0.3); --space-line-lit: rgba(0, 0, 0, 0.62); --space-ring: #0f172a;
       }
-      #view-space[data-space-bg="gray"] { --space-bg: #ececea; --space-hint: #8a8580; }
+      #view-space[data-space-bg="gray"] { --space-bg: #F3F4F6; --space-hint: #8a8580; }
       #view-space[data-space-bg="black"] {
-        --space-bg: #0d0d0f; --space-ink: #e7e5e4; --space-hint: #78716c;
+        --space-bg: #111111; --space-ink: #e7e5e4; --space-hint: #78716c;
         --space-line: rgba(255, 255, 255, 0.26); --space-line-lit: rgba(255, 255, 255, 0.7); --space-ring: #f5f5f4;
       }
       #view-space:not(.hidden) { animation: space-fade-in 200ms ease-out; }
@@ -1932,18 +1932,32 @@
         50% { box-shadow: 0 0 0 4px #fff, 0 0 0 10px #1c1917, 0 0 28px 8px rgba(28, 25, 23, 0.55); }
       }
       .space-search {
-        position: absolute; left: 1.25rem; top: 10.75rem; z-index: 6; width: min(18rem, calc(100vw - 2.5rem));
+        position: absolute; left: 1.25rem; top: 10.75rem; z-index: 6; width: max-content; max-width: calc(100vw - 2.5rem);
         display: flex; flex-direction: column; align-items: stretch; gap: 0.35rem; pointer-events: auto;
       }
       .space-search-bar {
-        display: flex; align-items: center; gap: 0.45rem; min-height: 2.5rem; padding: 0 0.85rem;
-        border: 1px solid rgba(214, 211, 209, 0.95); border-radius: 999px; background: rgba(255, 255, 255, 0.94);
-        box-shadow: 0 8px 22px rgba(28, 25, 23, 0.08);
+        display: flex; align-items: center; justify-content: center; box-sizing: border-box;
+        width: 2.5rem; height: 2.5rem; padding: 0; overflow: hidden; cursor: pointer;
+        border: 1px solid rgba(214, 211, 209, 0.95); border-radius: 999px; background: #fff;
+        box-shadow: 0 8px 22px rgba(28, 25, 23, 0.12);
+        transition: width 300ms ease, padding 300ms ease;
       }
-      .space-search-bar svg { width: 1rem; height: 1rem; flex-shrink: 0; color: #78716c; }
+      .space-search.is-expanded .space-search-bar {
+        width: 16rem; padding: 0 1rem; justify-content: flex-start; gap: 0.45rem; cursor: text;
+      }
+      .space-search-icon {
+        display: inline-flex; flex: 0 0 auto; width: 100%; height: 100%; align-items: center; justify-content: center;
+        border: 0; padding: 0; background: transparent; color: #1c1917; cursor: pointer;
+      }
+      .space-search.is-expanded .space-search-icon { flex-basis: 1rem; width: 1rem; height: 1rem; pointer-events: none; }
+      .space-search-icon svg, .space-search-bar svg { width: 1rem; height: 1rem; flex-shrink: 0; color: #1c1917; }
       .space-search-input {
-        flex: 1; min-width: 0; border: 0; background: transparent; font: inherit; font-size: 0.85rem; color: #1c1917;
-        outline: none;
+        width: 0; min-width: 0; opacity: 0; padding: 0; border: 0; background: transparent;
+        font: inherit; font-size: 0.85rem; color: #1c1917; outline: none; pointer-events: none;
+        transition: opacity 200ms ease;
+      }
+      .space-search.is-expanded .space-search-input {
+        flex: 1; width: auto; opacity: 1; pointer-events: auto;
       }
       .space-search-input::-webkit-search-cancel-button { cursor: pointer; }
       .space-search-list {
@@ -2078,9 +2092,9 @@
       .space-menu .space-bg-swatch {
         width: 0.85rem; height: 0.85rem; border-radius: 999px; flex-shrink: 0; border: 1px solid rgba(120, 113, 108, 0.45);
       }
-      .space-menu [data-space-bg-choice="white"] .space-bg-swatch { background: #ffffff; }
-      .space-menu [data-space-bg-choice="black"] .space-bg-swatch { background: #0d0d0f; }
-      .space-menu [data-space-bg-choice="gray"] .space-bg-swatch { background: #ececea; }
+      .space-menu [data-space-bg-choice="white"] .space-bg-swatch { background: #FFFFFF; }
+      .space-menu [data-space-bg-choice="black"] .space-bg-swatch { background: #111111; }
+      .space-menu [data-space-bg-choice="gray"] .space-bg-swatch { background: #F3F4F6; }
       .space-menu [data-space-bg-choice] .space-bg-check { margin-left: auto; padding-left: 0.75rem; visibility: hidden; color: #57534e; }
       .space-menu [data-space-bg-choice][aria-checked="true"] .space-bg-check { visibility: visible; }
       .space-menu {

@@ -1615,17 +1615,24 @@
 
   /* ---------- Background ---------- */
 
-  // The canvas behind the graph: white, black or faded gray (the --space-bg theme), remembered on this device.
+  // The canvas behind the graph: white, black or faded gray, remembered on this device.
   const BG_KEY = "ficus_space_bg_v1";
   const SPACE_BGS = ["white", "black", "gray"];
+  const SPACE_BG_COLORS = { white: "#FFFFFF", black: "#111111", gray: "#F3F4F6" };
+  let themeColor = "white";
 
   function applyBg(name) {
-    const bg = SPACE_BGS.includes(name) ? name : "white";
-    el.view.dataset.spaceBg = bg;
+    themeColor = SPACE_BGS.includes(name) ? name : "white";
+    const color = SPACE_BG_COLORS[themeColor];
+    el.view.dataset.spaceBg = themeColor;
+    el.view.style.backgroundColor = color;
+    if (el.canvas) el.canvas.style.backgroundColor = color;
+    const swatch = el.bgBtn?.querySelector(".space-bg-fab-swatch");
+    if (swatch) swatch.style.background = color;
     el.bgMenu.querySelectorAll("[data-space-bg-choice]").forEach((item) => {
-      item.setAttribute("aria-checked", item.dataset.spaceBgChoice === bg ? "true" : "false");
+      item.setAttribute("aria-checked", item.dataset.spaceBgChoice === themeColor ? "true" : "false");
     });
-    return bg;
+    return themeColor;
   }
 
   function setBg(name) {
@@ -15904,17 +15911,30 @@
     const root = document.createElement("div");
     root.className = "space-search";
     root.innerHTML = `
-      <label class="space-search-bar">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.25"/><path d="M12.5 12.5 17 17"/></svg>
-        <input type="search" class="space-search-input" placeholder="Search dots" aria-label="Search dots" autocomplete="off" spellcheck="false" enterkeyhint="search" />
-      </label>
+      <div class="space-search-bar">
+        <button type="button" class="space-search-icon" aria-label="Search dots" aria-expanded="false">
+          <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.25"/><path d="M12.5 12.5 17 17"/></svg>
+        </button>
+        <input type="search" class="space-search-input" placeholder="Search dots" aria-label="Search dots" autocomplete="off" spellcheck="false" enterkeyhint="search" tabindex="-1" />
+      </div>
       <div class="space-search-list" hidden role="listbox" aria-label="Search results"></div>`;
     const input = root.querySelector(".space-search-input");
     const list = root.querySelector(".space-search-list");
+    const icon = root.querySelector(".space-search-icon");
+    let isExpanded = false;
 
     const closeList = () => {
       list.hidden = true;
       list.replaceChildren();
+    };
+
+    const setExpanded = (on) => {
+      isExpanded = Boolean(on);
+      root.classList.toggle("is-expanded", isExpanded);
+      icon.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+      input.tabIndex = isExpanded ? 0 : -1;
+      if (isExpanded) input.focus();
+      else closeList();
     };
 
     const paint = () => {
@@ -15961,19 +15981,30 @@
       if (event.key === "Escape") {
         input.value = "";
         closeList();
+        setExpanded(false);
       }
     });
+    input.addEventListener("blur", () => {
+      if (!String(input.value || "").trim()) setExpanded(false);
+    });
+    icon.addEventListener("click", () => {
+      if (!isExpanded) setExpanded(true);
+    });
+    list.addEventListener("pointerdown", (event) => event.preventDefault());
     list.addEventListener("click", (event) => {
       const hit = event.target.closest(".space-search-hit");
       if (!hit) return;
       const id = hit.dataset.dotId;
       input.value = "";
       closeList();
+      setExpanded(false);
       focusSearchResult(id);
     });
     root.addEventListener("pointerdown", (event) => event.stopPropagation());
     document.addEventListener("pointerdown", (event) => {
-      if (!root.contains(event.target)) closeList();
+      if (root.contains(event.target)) return;
+      closeList();
+      if (!String(input.value || "").trim()) setExpanded(false);
     });
     host.append(root);
   }
