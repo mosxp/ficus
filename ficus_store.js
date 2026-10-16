@@ -14,14 +14,10 @@
  *     log_entries, recorded values for input loggers (see ficus_log_entries.js)
  *     templates,   reusable master dots (space.js); same shape as a dot plus isTemplate / templateLevel
  *     flashcard_collections,  Collection → Flashcards study sets (custom / tag / hub)
- *     logger_dashboards,      Collection → Logger Dashboards (widgets over log_entries)
- *     memory_palaces }        Collection → Cells
- *                             [{ id, title, rootCellId, cells: { [cellId]: { id, items } } }]
- *                             Item: { id, type, position: { isoX, isoY, wall },
- *                                     targetDotId?, linkedCellId?, direction?, assetUrl? }
+ *     logger_dashboards }     Collection → Logger Dashboards (widgets over log_entries)
  * Version 2 added loggers and logger_groups; version 3 added log_entries; version 4 added templates;
- * version 5 added flashcard_collections; version 6 added logger_dashboards; version 7 added memory_maps;
- * version 8 replaced memory_maps with memory_palaces (rooms linked by doors and ladders, no map grid).
+ * version 5 added flashcard_collections; version 6 added logger_dashboards.
+ * Versions 7 and 8 briefly carried a Cells memory-palace field; it is ignored and not written back.
  * A page still on an older version refuses a newer file (parseMaster), so it can't save over them.
  *
  * load(session) reads it once, at sign-in, and space.js and collection.js then read from memory without waiting.
@@ -78,7 +74,6 @@
   let templates = [];
   let flashcardCollections = [];
   let loggerDashboards = [];
-  let memoryPalaces = [];
 
   // The Drive file and the revision of it this device last read or wrote.
   let fileId = null;
@@ -115,7 +110,6 @@
       templates,
       flashcard_collections: flashcardCollections,
       logger_dashboards: loggerDashboards,
-      memory_palaces: memoryPalaces,
     };
   }
 
@@ -148,32 +142,6 @@
     if (!Array.isArray(flashcardCollections)) flashcardCollections = [];
     loggerDashboards = list(master.logger_dashboards);
     if (!Array.isArray(loggerDashboards)) loggerDashboards = [];
-    memoryPalaces = list(master.memory_palaces);
-    if (!memoryPalaces.length) memoryPalaces = migrateMemoryMaps(master.memory_maps);
-  }
-
-  // Version 7 stored palaces as a coordinate grid (`memory_maps`). Rooms now link through their doors and ladders.
-  function migrateMemoryMaps(raw) {
-    if (!Array.isArray(raw)) return [];
-    return raw.filter(isObject).map((map) => {
-      const cells = {};
-      const source = Array.isArray(map.cells) ? map.cells.filter(isObject) : [];
-      for (const cell of source) {
-        if (cell.id == null) continue;
-        const id = String(cell.id);
-        const items = (Array.isArray(cell.items) ? cell.items : []).filter(isObject).map((item) => {
-          const next = { ...item };
-          if (!next.linkedCellId && next.targetCellId) next.linkedCellId = String(next.targetCellId);
-          delete next.targetCellId;
-          return next;
-        });
-        cells[id] = { id, items };
-      }
-      const origin = source.find((cell) => Number(cell.coordinates?.x) === 0 && Number(cell.coordinates?.y) === 0 && Number(cell.coordinates?.z) === 0) || source[0];
-      const rootCellId = origin?.id != null ? String(origin.id) : "";
-      if (!map.id || !rootCellId || !cells[rootCellId]) return null;
-      return { id: String(map.id), title: String(map.title || "Memory palace"), rootCellId, cells };
-    }).filter(Boolean);
   }
 
   // The Drive file's text as a master object; throws (so nothing overwrites it) if it isn't one.
@@ -411,7 +379,6 @@
     templates = [];
     flashcardCollections = [];
     loggerDashboards = [];
-    memoryPalaces = [];
     setStatus();
   }
 
@@ -715,13 +682,6 @@
       if (!uid) return;
       loggerDashboards = Array.isArray(next) ? next : [];
       changed();
-    },
-
-    // Collection → Cells. Rooms linked by doors and ladders, opened from each palace's root cell.
-    getMemoryPalaces: () => (Array.isArray(memoryPalaces) ? memoryPalaces : []),
-    saveMemoryPalaces(next) {
-      memoryPalaces = Array.isArray(next) ? next : [];
-      if (uid) changed();
     },
 
     // The libraries ficus_cloud.js answers /api/checklist-templates and /api/scrapbook/... from. `edit` changes
