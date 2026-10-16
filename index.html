@@ -22,8 +22,8 @@
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
     <script src="ficus_dashboards.js?v=3" defer></script>
-    <script src="ficus_timeline.js?v=2" defer></script>
-    <script src="collection.js?v=29" defer></script>
+    <script src="ficus_timeline.js?v=3" defer></script>
+    <script src="collection.js?v=30" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
       const APP_STORAGE_EPOCH = "2026-10-03-clean";
@@ -849,11 +849,17 @@
       .ftime {
         --ctags-preview-width: 400px;
         display: flex; flex-direction: row; height: 100%; width: 100%;
-        min-height: 0; min-width: 0; background: #fcfcfc; position: relative;
+        min-height: 0; min-width: 0; overflow: hidden; background: #fcfcfc; position: relative;
       }
       .ftime-main {
         display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0;
       }
+      /* Same DotPreviewPanel shell as Tags: width stays 0 until .has-preview is on the host. */
+      .ftime.has-preview .ctags-preview {
+        width: var(--ctags-preview-width); border-left: 1px solid #e5e5e5; visibility: visible;
+        transition: width 0.3s ease;
+      }
+      .ftime.is-resizing .ctags-preview { transition: none; }
       .ftime-toolbar {
         display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
         min-height: 57px; padding: 10px 16px; border-bottom: 1px solid #e5e5e5; background: #fff;
@@ -1419,6 +1425,8 @@
       .ctags-preview-btn:hover { background: rgba(0, 0, 0, 0.1); color: #1c1917; }
       .ctags-preview-btn:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
       .ctags-preview-body { padding: 20px 20px 40px; }
+      .dot-preview-missing { display: flex; flex-direction: column; gap: 0.5rem; }
+      .dot-preview-missing .dot-read-empty { margin: 0; line-height: 1.5; }
       /* A dot's reading view (collection.js readingView), in the Tags preview and in a notebook's cards. */
       .dot-read-title { margin: 0; overflow-wrap: anywhere; font-size: 1.4rem; font-weight: 700; line-height: 1.25; letter-spacing: -0.02em; color: #1c1917; }
       .dot-read-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 10px; }

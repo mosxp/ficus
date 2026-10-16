@@ -364,9 +364,24 @@
     window.FicusSpace?.openDot?.(dotId);
   }
 
+  function allDots() {
+    try { window.FicusSpace?.collection?.load?.(); } catch (_) {}
+    const fromSpace = window.FicusSpace?.dots;
+    if (Array.isArray(fromSpace) && fromSpace.length) return fromSpace;
+    return store()?.getDots?.() || [];
+  }
+
+  function resolveDot(dotId) {
+    if (!dotId) return null;
+    const id = String(dotId);
+    return allDots().find((dot) => dot && String(dot.id) === id) || null;
+  }
+
+  /** Open the shared DotPreviewPanel for a TimelineItem's parentDotId (not the item itself). */
   function setSelectedTimelineItem(item) {
     ui.selectedTimelineItem = item || null;
-    const dotId = item?.parentDotId || null;
+    ensurePreviewPanel();
+    const dotId = item?.parentDotId ? String(item.parentDotId) : "";
     if (dotId) ui.previewPanel?.open(dotId);
     else ui.previewPanel?.close({ refocus: false });
     markSelected();
@@ -388,21 +403,21 @@
   }
 
   function ensurePreviewPanel() {
-    if (ui.previewPanel || !ui.root) return;
+    if (!ui.root) return;
+    if (ui.previewPanel) {
+      if (!ui.root.contains(ui.previewPanel.el)) ui.root.append(ui.previewPanel.el);
+      return;
+    }
     const create = window.FicusDotPreview?.create;
     if (typeof create !== "function") return;
-    const byId = () => {
-      const dots = store()?.getDots?.() || [];
-      return new Map(dots.map((dot) => [dot.id, dot]));
-    };
     ui.previewPanel = create({
       host: ui.root,
       reservedLeft: 0,
-      getDot: (id) => byId().get(id) || null,
-      getDots: () => store()?.getDots?.() || [],
+      getDot: resolveDot,
+      getDots: allDots,
       childrenOf: (dot) => {
-        const map = byId();
-        return (dot.children || []).map((id) => map.get(id)).filter(Boolean);
+        const map = new Map(allDots().map((row) => [String(row.id), row]));
+        return (dot.children || []).map((id) => map.get(String(id))).filter(Boolean);
       },
       openInSpace,
       onOpenDot: (id) => {

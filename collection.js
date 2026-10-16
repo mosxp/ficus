@@ -987,32 +987,59 @@
       try { localStorage.setItem(PREVIEW_WIDTH_KEY, String(previewWidth)); } catch (_) {}
     }
 
+    function missingDotView(id) {
+      const wrap = document.createElement("div");
+      wrap.className = "dot-preview-missing";
+      const title = document.createElement("h2");
+      title.className = "dot-read-title";
+      title.textContent = "Original dot not found";
+      const note = document.createElement("p");
+      note.className = "dot-read-empty";
+      note.textContent = id
+        ? "This event or task pointed at a dot that is no longer in the workspace."
+        : "No parent dot was linked to this item.";
+      wrap.append(title, note);
+      return wrap;
+    }
+
     function render() {
-      const dot = previewId && typeof getDot === "function" ? getDot(previewId) : null;
-      host?.classList.toggle("has-preview", Boolean(dot));
+      // Open the pane whenever a preview id is set — even if the Dot is missing — so hosts
+      // like Time (.ftime.has-preview) get a non-zero width.
+      const hasId = Boolean(previewId);
+      host?.classList.toggle("has-preview", hasId);
       releaseReads(reads);
-      if (!dot) {
+      if (!hasId) {
         body.replaceChildren();
         return;
       }
       applyWidth();
+      const dot = typeof getDot === "function" ? getDot(previewId) : null;
+      if (!dot) {
+        body.replaceChildren(missingDotView(previewId));
+        return;
+      }
       const openLinked = (id) => {
         if (typeof onOpenDot === "function") onOpenDot(id);
         else open(id);
       };
-      const parts = readingView(dot, { pickTags, onOpenDot: openLinked, reads });
-      const parents = (typeof getDots === "function" ? getDots() : []).filter((other) => other.children?.includes(dot.id));
-      const family = document.createElement("div");
-      family.className = "dot-read-family";
-      family.append(...familySection("Parents", parents));
-      if (dot.type !== "hub") family.append(...familySection("Children", childDots(dot)));
-      parts.push(family);
-      body.replaceChildren(...parts);
+      try {
+        const parts = readingView(dot, { pickTags, onOpenDot: openLinked, reads });
+        const parents = (typeof getDots === "function" ? getDots() : []).filter((other) => other.children?.includes(dot.id));
+        const family = document.createElement("div");
+        family.className = "dot-read-family";
+        family.append(...familySection("Parents", parents));
+        if (dot.type !== "hub") family.append(...familySection("Children", childDots(dot)));
+        parts.push(family);
+        body.replaceChildren(...parts);
+      } catch (err) {
+        console.error("Dot preview couldn't render", err);
+        body.replaceChildren(missingDotView(previewId));
+      }
     }
 
     function open(id) {
-      if (!id || typeof getDot !== "function" || !getDot(id)) return false;
-      previewId = id;
+      if (!id) return false;
+      previewId = String(id);
       if (typeof onChange === "function") onChange(previewId);
       render();
       inner.scrollTop = 0;
