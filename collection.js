@@ -124,6 +124,8 @@
     page.className = "tpl-shelf";
     const bar = document.createElement("div");
     bar.className = "tpl-shelf-bar";
+    const heading = document.createElement("div");
+    heading.className = "tpl-shelf-heading flex items-center gap-3";
     const title = document.createElement("h1");
     title.id = "collection-title";
     title.className = "tpl-shelf-title";
@@ -167,7 +169,8 @@
     flyout.append(single, sub);
     menu.append(flyout);
     wrap.append(create, menu);
-    bar.append(title, wrap);
+    heading.append(title, wrap);
+    bar.append(heading);
     page.append(bar);
 
     const closeMenu = () => {
