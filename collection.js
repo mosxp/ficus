@@ -68,12 +68,13 @@
     return page;
   }
 
-  // Tags and Notebooks are built (and their data read) only while Collection is showing; the rest is a heading.
+  // Tags, Notebooks and Templates are built (and their data read) only while Collection is showing; the rest is a heading.
   function renderPage() {
     el.content.dataset.page = currentPage;
     el.content.scrollTop = 0;
     el.content.classList.toggle("is-tags", currentPage === "tags");
     el.content.classList.toggle("is-notebooks", currentPage === "notebooks");
+    el.content.classList.toggle("is-templates", currentPage === "templates");
     if (currentPage !== "tags") hideTagsPage();
     if (currentPage !== "notebooks") {
       el.content.classList.remove("is-notebook-open");
@@ -85,6 +86,10 @@
     }
     if (currentPage === "notebooks") {
       if (active) showNotebooksPage();
+      return;
+    }
+    if (currentPage === "templates") {
+      if (active) showTemplatesPage();
       return;
     }
     const title = document.createElement("h1");
@@ -99,6 +104,150 @@
     active = Boolean(on);
     if (active) renderPage();
     else tags.graph?.stop();
+  }
+
+  /* ---------- Templates ---------- */
+
+  const TEMPLATE_DOT_TYPES = [
+    ["text", "Text Dot"],
+    ["board", "Board Dot"],
+    ["block", "Block Dot"],
+  ];
+
+  function showTemplatesPage() {
+    readSpace();
+    const api = window.FicusSpace;
+    const list = typeof api?.templates === "object" && Array.isArray(api.templates)
+      ? api.templates
+      : (api?.collection?.templates?.() || []);
+    const page = document.createElement("div");
+    page.className = "tpl-shelf";
+    const bar = document.createElement("div");
+    bar.className = "tpl-shelf-bar";
+    const title = document.createElement("h1");
+    title.id = "collection-title";
+    title.className = "tpl-shelf-title";
+    title.textContent = "Templates";
+    const wrap = document.createElement("div");
+    wrap.className = "tpl-new-wrap";
+    const create = document.createElement("button");
+    create.type = "button";
+    create.className = "nb-new";
+    create.setAttribute("aria-label", "New template");
+    create.title = "New template";
+    create.setAttribute("aria-haspopup", "menu");
+    create.setAttribute("aria-expanded", "false");
+    create.innerHTML = ICONS.plus;
+    const menu = document.createElement("div");
+    menu.className = "tpl-menu";
+    menu.hidden = true;
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "New template");
+    const flyout = document.createElement("div");
+    flyout.className = "tpl-flyout";
+    const single = document.createElement("button");
+    single.type = "button";
+    single.className = "tpl-menu-item";
+    single.setAttribute("role", "menuitem");
+    single.setAttribute("aria-haspopup", "menu");
+    single.innerHTML = "<span>Single Dot Template</span><span aria-hidden=\"true\">›</span>";
+    const sub = document.createElement("div");
+    sub.className = "tpl-submenu";
+    sub.hidden = true;
+    sub.setAttribute("role", "menu");
+    for (const [type, label] of TEMPLATE_DOT_TYPES) {
+      const item = document.createElement("button");
+      item.type = "button";
+      item.className = "tpl-menu-item";
+      item.setAttribute("role", "menuitem");
+      item.dataset.tplType = type;
+      item.innerHTML = `<span class="space-type-dot" data-type="${type}" aria-hidden="true"></span><span>${label}</span>`;
+      sub.append(item);
+    }
+    flyout.append(single, sub);
+    menu.append(flyout);
+    wrap.append(create, menu);
+    bar.append(title, wrap);
+    page.append(bar);
+
+    const closeMenu = () => {
+      menu.hidden = true;
+      sub.hidden = true;
+      create.setAttribute("aria-expanded", "false");
+    };
+    const openMenu = () => {
+      menu.hidden = false;
+      create.setAttribute("aria-expanded", "true");
+    };
+
+    if (!list.length) {
+      const empty = document.createElement("p");
+      empty.className = "tpl-empty";
+      empty.textContent = "No templates yet. Press + to create a Single Dot Template.";
+      page.append(empty);
+    } else {
+      const grid = document.createElement("ul");
+      grid.className = "tpl-grid";
+      grid.setAttribute("aria-label", "Templates");
+      const sorted = [...list].sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+      for (const tpl of sorted) {
+        const item = document.createElement("li");
+        const card = document.createElement("button");
+        card.type = "button";
+        card.className = "tpl-card";
+        card.dataset.templateId = tpl.id;
+        const top = document.createElement("div");
+        top.className = "tpl-card-top";
+        const swatch = document.createElement("span");
+        swatch.className = "space-type-dot";
+        swatch.dataset.type = tpl.type;
+        swatch.setAttribute("aria-hidden", "true");
+        const name = document.createElement("span");
+        name.className = "tpl-card-title";
+        name.textContent = tpl.title || "Untitled template";
+        top.append(swatch, name);
+        const meta = document.createElement("span");
+        meta.className = "tpl-card-meta";
+        meta.textContent = spaceApi()?.typeLabel?.(tpl.type) || tpl.type;
+        card.append(top, meta);
+        item.append(card);
+        grid.append(item);
+      }
+      page.append(grid);
+    }
+
+    page.addEventListener("click", (event) => {
+      if (event.target.closest(".nb-new")) {
+        if (menu.hidden) openMenu();
+        else closeMenu();
+        return;
+      }
+      if (event.target.closest(".tpl-flyout > .tpl-menu-item")) {
+        sub.hidden = !sub.hidden;
+        return;
+      }
+      const typeBtn = event.target.closest("[data-tpl-type]");
+      if (typeBtn) {
+        closeMenu();
+        const tpl = window.FicusSpace?.createTemplate?.(typeBtn.dataset.tplType);
+        if (tpl) window.FicusSpace.openTemplateEditor(tpl.id);
+        return;
+      }
+      const card = event.target.closest("[data-template-id]");
+      if (card) {
+        window.FicusSpace?.openTemplateEditor?.(card.dataset.templateId);
+      }
+    });
+    document.addEventListener("pointerdown", function onOutside(event) {
+      if (!page.isConnected) {
+        document.removeEventListener("pointerdown", onOutside, true);
+        return;
+      }
+      if (!wrap.contains(event.target)) closeMenu();
+    }, true);
+
+    el.content.replaceChildren(page);
+    el.content.scrollTop = 0;
   }
 
   /* ---------- Tags: data ---------- */

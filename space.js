@@ -151,6 +151,7 @@
   ];
 
   let spaceDots = [];
+  let spaceTemplates = [];
   let loadedKey = null;
   let ready = false;
   let active = false;
@@ -301,6 +302,8 @@
     const list = key ? store().getDots() : [];
     spaceDots = Array.isArray(list) ? list.map(cleanDot).filter(Boolean) : [];
     tidyLinks();
+    const tpls = key ? store().getTemplates?.() : [];
+    spaceTemplates = Array.isArray(tpls) ? tpls.map(cleanTemplate).filter(Boolean) : [];
   }
 
   /* A parent lists its children's ids in `children` (one arrow per entry, parent → child) and each child names its
@@ -376,7 +379,14 @@
   function saveDots() {
     clearTimeout(saveTimer);
     saveTimer = null;
-    if (loadedKey && loadedKey === store()?.uid) store().saveDots(spaceDots);
+    if (loadedKey && loadedKey === store()?.uid) {
+      store().saveDots(spaceDots);
+      store().saveTemplates?.(spaceTemplates);
+    }
+  }
+
+  function saveTemplates() {
+    if (loadedKey && loadedKey === store()?.uid) store().saveTemplates?.(spaceTemplates);
   }
 
   function scheduleSave() {
@@ -385,7 +395,33 @@
   }
 
   function findDot(id) {
-    return spaceDots.find((dot) => dot.id === id) || null;
+    return spaceDots.find((dot) => dot.id === id) || findTemplate(id);
+  }
+
+  function findTemplate(id) {
+    return spaceTemplates.find((dot) => dot.id === id) || null;
+  }
+
+  const TEMPLATE_TYPES = { text: true, board: true, block: true };
+  const TEMPLATE_LEVEL = "single_dot";
+
+  function cleanTemplate(raw) {
+    if (!raw || typeof raw !== "object" || typeof raw.id !== "string") return null;
+    if (!TEMPLATE_TYPES[raw.type]) return null;
+    const base = cleanDot({
+      ...raw,
+      title: String(raw.title || "").trim() || `Untitled ${DOT_TYPES[raw.type].label} template`,
+      parentId: null,
+      children: [],
+    });
+    if (!base) return null;
+    return {
+      ...base,
+      parentId: null,
+      children: [],
+      isTemplate: true,
+      templateLevel: TEMPLATE_LEVEL,
+    };
   }
 
   function newDotId() {
@@ -1268,6 +1304,10 @@
     const sep = document.createElement("div");
     sep.className = "space-list-sep";
     sep.setAttribute("role", "separator");
+    const fromTpl = addMenuButton(
+      `<span class="space-add-menu-glyph" aria-hidden="true">\u25A1</span>From Template\u2026`,
+      { "data-space-from-template": "", "aria-haspopup": "dialog" },
+    );
     const link = addMenuButton(
       `<span class="space-add-menu-glyph" aria-hidden="true">${LINK_DOT_ICON}</span>Link existing dot\u2026`,
       { "data-space-add-link": "", "aria-haspopup": "menu" },
@@ -1276,7 +1316,7 @@
       link.disabled = true;
       link.title = "Needs two dots in Space";
     }
-    menu.replaceChildren(...items, sep, link);
+    menu.replaceChildren(...items, sep, fromTpl, link);
   }
 
   /* Link existing dot…, step one picks the parent and step two the dot it links to (the same search as the
@@ -3612,7 +3652,8 @@
         <button type="button" role="menuitem" class="space-list-item" data-space-child-link><span class="space-list-glyph" aria-hidden="true">${LINK_DOT_ICON}</span><span>Link existing dot…</span></button>
         <div class="space-list-sep" role="separator"></div>` + Object.entries(DOT_TYPES).map(([type, { label }]) => (
         `<button type="button" role="menuitem" class="space-list-item" data-space-child-type="${type}"><span class="space-list-glyph" aria-hidden="true"><span class="space-child-swatch" data-type="${type}"></span></span><span>${label}</span></button>`
-      )).join("");
+      )).join("") + `<div class="space-list-sep" role="separator"></div>
+        <button type="button" role="menuitem" class="space-list-item" data-space-from-template><span class="space-list-glyph" aria-hidden="true">\u25A1</span><span>From Template\u2026</span></button>`
     };
     // Linking swaps the menu for a search over the dots in Space, under a way back to the types.
     const showSearch = () => {
@@ -3646,6 +3687,12 @@
           refit();
           pop.querySelector("button")?.focus();
         });
+        return;
+      }
+      if (event.target.closest("[data-space-from-template]")) {
+        closeSpacePopovers();
+        const parent = openDotId && findDot(openDotId);
+        openTemplatePicker({ parent: parent && !parent.isTemplate ? parent : null });
         return;
       }
       const item = event.target.closest("[data-space-child-type]");
@@ -7738,7 +7785,16 @@
       else if (event.target.closest("[data-space-board-link]")) b._openPopover("linkDots");
       else if (event.target.closest("[data-space-board-link-back]")) b._openPopover("childDots");
       else if (event.target.closest("[data-space-board-child-back]")) b._openPopover("insert");
-      else if (event.target.closest("[data-space-board-google]")) {
+      else if (event.target.closest("[data-space-board-from-template]")) {
+        b._closePopover();
+        const parent = openDotId && findDot(openDotId);
+        openTemplatePicker({
+          parent: parent?.type === "board" && !parent.isTemplate ? parent : null,
+          onPick: (clone) => {
+            if (clone && board && boardView?.editing) placeBoardCard(clone);
+          },
+        });
+      } else if (event.target.closest("[data-space-board-google]")) {
         void addBoardItem(event.target.closest("[data-space-board-google]").dataset.spaceBoardGoogle);
       } else {
         const item = event.target.closest("[data-space-board-child-type]");
@@ -7755,7 +7811,9 @@
       ${Object.entries(DOT_TYPES).map(([type, { label }]) => (
         `<button type="button" role="menuitem" class="sb-menu-item" data-space-board-child-type="${type}"><span class="space-board-child-glyph" aria-hidden="true"><span class="space-child-swatch" data-type="${type}"></span></span><span>${label}</span></button>`
       )).join("")}
-    </div>`;
+    
+      <div class="sb-sep" role="separator"></div>
+      <button type="button" role="menuitem" class="sb-menu-item" data-space-board-from-template><span class="space-board-child-glyph" aria-hidden="true">\u25A1</span><span>From Template\u2026</span></button></div>`;
   }
 
   /* A new child of the open board dot, synced to Space like any child (parent and children links, a spot beside the
@@ -12366,6 +12424,26 @@
         placeChild((rect, frameId) => addBlockChildDot(view, child.dataset.spaceAddChild, rect, frameId));
         return;
       }
+      if (event.target.closest("[data-space-from-template]")) {
+        const parent = findDot(view.dotId);
+        const rect = sketch.rect;
+        const frameId = sketch.frameId;
+        view.sketch = null;
+        closeSpacePopovers();
+        sketch.ghost.remove();
+        openTemplatePicker({
+          parent: parent && !parent.isTemplate ? parent : null,
+          onPick: (clone) => {
+            if (!clone || blockView !== view) return;
+            placeChildBlock(view, clone, rect, frameId);
+            if (blockView === view) sizeBlockCanvas(view);
+          },
+          onClose: () => {
+            if (blockView === view) sizeBlockCanvas(view);
+          },
+        });
+        return;
+      }
       // Reference: the ghost stays marked out while DotSearchModal is open, and the block takes its place.
       if (event.target.closest(`[data-space-add-block="${DOT_REF_TYPE}"]`)) {
         view.sketch = null;
@@ -12490,8 +12568,13 @@
       item.dataset.spaceAddChild = type;
       return item;
     });
+    const tplIcon = document.createElement("span");
+    tplIcon.setAttribute("aria-hidden", "true");
+    tplIcon.textContent = "\u25A1";
+    const fromTpl = blockMenuItem(tplIcon, "From Template\u2026");
+    fromTpl.dataset.spaceFromTemplate = "";
     pop.classList.remove("is-dot-search");
-    pop.replaceChildren(back, blockMenuRule(), link, blockMenuRule(), ...items);
+    pop.replaceChildren(back, blockMenuRule(), link, blockMenuRule(), ...items, blockMenuRule(), fromTpl);
   }
 
   // Link existing dot: the search over Space's dots, under a way back to the dot types.
@@ -13266,7 +13349,8 @@
     closeDotSearchModal();
     if (!followingRef) leaveRefTrail();
     el.detailModal.classList.add("hidden");
-    el.detailModal.classList.remove("is-closing", "is-horizontal", "is-board", "is-blocks");
+    el.detailModal.classList.remove("is-closing", "is-horizontal", "is-board", "is-blocks", "is-template-dot");
+    syncTemplateBanner(null);
     el.view.classList.remove("space-doc-open");
     stopMini(mini);
     mini.drag = null;
@@ -15316,8 +15400,10 @@
     else if (dot.type === "hub") renderHubDot(dot);
     else mountBlockDot(dot);
     renderDotTags();
+    syncTemplateBanner(dot);
     setDocOrigin(id);
     el.view.classList.add("space-doc-open");
+    el.detailModal.classList.toggle("is-template-dot", Boolean(dot.isTemplate));
     el.detailModal.classList.remove("hidden", "is-closing");
     renderConnections();
     startMini(mini);
@@ -15419,6 +15505,17 @@
     commitTitle();
     closeSpacePopovers();
     document.querySelectorAll(FORMAT_POPOVERS).forEach((pop) => pop.remove());
+    if (dot.isTemplate) {
+      el.deleteHeading.textContent = `Delete template \u201c${dot.title}\u201d?`;
+      el.deleteNote.textContent = "This can't be undone. Existing copies in Space are kept.";
+      el.deleteSingleNote.textContent = "Only this template is removed.";
+      el.deleteCascade.disabled = true;
+      el.deleteCascadeNote.textContent = "";
+      el.deleteModal.dataset.dotId = dot.id;
+      el.deleteModal.classList.remove("hidden");
+      el.deleteCancel.focus();
+      return;
+    }
     const { doomed, kept } = deletePlan(dot.id);
     const children = doomed.length + kept.length;
     el.deleteHeading.textContent = `Delete \u201c${dot.title}\u201d?`;
@@ -15502,6 +15599,13 @@
     const dot = id && id === openDotId ? findDot(id) : null;
     closeDeletePrompt(false);
     if (!dot) return;
+    if (dot.isTemplate) {
+      closeDetail(true);
+      deleteTemplate(id);
+      showToast(`Deleted template \u201c${dot.title}\u201d.`);
+      el.canvas.focus({ preventScroll: true });
+      return;
+    }
     const { doomed, kept } = deletePlan(id);
     closeDetail(true);
     const removed = removeDots(withChildren ? [id, ...doomed] : [id]);
@@ -15706,6 +15810,11 @@
         openTitlePrompt(item.dataset.spaceAdd);
         return;
       }
+      if (event.target.closest("[data-space-from-template]")) {
+        setAddMenu(false);
+        openTemplatePicker({ near: addSpot });
+        return;
+      }
       if (event.target.closest("[data-space-add-link]")) {
         showAddLinkSearch();
         return;
@@ -15729,6 +15838,12 @@
     });
     el.dotMenu.addEventListener("click", (event) => {
       if (!selectedId) return;
+    if (event.target.closest("[data-space-from-template]")) {
+      const parent = selectedId && findDot(selectedId);
+      closeMenus();
+      openTemplatePicker({ parent: parent && !parent.isTemplate ? parent : null });
+      return;
+    }
       const childType = event.target.closest("[data-space-child]")?.dataset.spaceChild;
       if (childType) {
         addChildDot(selectedId, childType);
@@ -15877,10 +15992,280 @@
   window.addEventListener("popstate", onRefPopState);
 
   window.renderDotContent = renderDotContent;
+  /* ---------- Dot templates: create, deep-clone, picker ---------- */
+
+  function createTemplate(type) {
+    if (!TEMPLATE_TYPES[type] || !store()?.uid) return null;
+    const now = new Date().toISOString();
+    const tpl = cleanTemplate({
+      id: newDotId(),
+      type,
+      title: `Untitled ${DOT_TYPES[type].label} template`,
+      property: DEFAULT_PROPERTY,
+      x: 0,
+      y: 0,
+      content: "",
+      parentId: null,
+      children: [],
+      appearance: { color: DOT_DEFAULT_COLOR, size: 1 },
+      tags: {},
+      linkedEvents: [],
+      createdAt: now,
+      updatedAt: now,
+      isTemplate: true,
+      templateLevel: TEMPLATE_LEVEL,
+    });
+    if (!tpl) return null;
+    spaceTemplates.push(tpl);
+    if (type === "board") store()?.setPage("board", tpl.id, { objects: [], background: null }, tpl.id);
+    if (type === "block") store()?.setPage("block", tpl.id, { grid: true, expand: "down", blocks: [] }, tpl.id);
+    saveTemplates();
+    scheduleSave();
+    return tpl;
+  }
+
+  function deleteTemplate(id) {
+    const tpl = findTemplate(id);
+    if (!tpl) return false;
+    spaceTemplates = spaceTemplates.filter((row) => row.id !== id);
+    dropDotData(tpl);
+    saveTemplates();
+    scheduleSave();
+    return true;
+  }
+
+  function remapBoardObjects(objects) {
+    if (!Array.isArray(objects)) return [];
+    const walk = (o) => {
+      if (!o || typeof o !== "object") return o;
+      if (o.type === "group" && Array.isArray(o.children)) {
+        return Object.assign({}, o, { id: newBoardObjectId(), children: o.children.map(walk) });
+      }
+      const copy = Object.assign({}, o, { id: newBoardObjectId() });
+      if (copy.block && typeof copy.block === "object") {
+        copy.block = Object.assign({}, copy.block, { id: newBoardBlockId() });
+      }
+      return copy;
+    };
+    return objects.map(walk);
+  }
+
+  function cloneTemplatePages(srcId, destId, type) {
+    if (type === "board") {
+      const saved = store()?.getPage("board", srcId);
+      if (!saved) {
+        store()?.setPage("board", destId, { objects: [], background: null }, destId);
+        return;
+      }
+      store()?.setPage("board", destId, {
+        objects: remapBoardObjects(readBoardObjects(saved)),
+        background: saved.background ?? null,
+        size: saved.size,
+      }, destId);
+      return;
+    }
+    if (type !== "block") return;
+    const saved = store()?.getPage("block", srcId);
+    if (!saved) {
+      store()?.setPage("block", destId, { grid: true, expand: "down", blocks: [] }, destId);
+      return;
+    }
+    const idMap = new Map();
+    const staged = [];
+    for (const item of Array.isArray(saved.blocks) ? saved.blocks : []) {
+      const block = item?.block && typeof item.block === "object" ? item.block : null;
+      if (!block?.type) continue;
+      const oldId = String(block.id || item.id || "");
+      const newId = newWidgetId();
+      if (oldId) idMap.set(oldId, newId);
+      const nextBlock = JSON.parse(JSON.stringify(block));
+      nextBlock.id = newId;
+      staged.push({
+        item: { ...item, id: newId, type: nextBlock.type, block: nextBlock },
+        oldParent: item.parentId ? String(item.parentId) : "",
+      });
+    }
+    const out = staged.map(({ item, oldParent }) => {
+      if (oldParent && idMap.has(oldParent)) item.parentId = idMap.get(oldParent);
+      else delete item.parentId;
+      return item;
+    });
+    for (const [oldId, newId] of idMap) {
+      const mini = store()?.getPage("block_board", oldId);
+      if (!mini) continue;
+      store()?.setPage("block_board", newId, {
+        ...mini,
+        objects: remapBoardObjects(Array.isArray(mini.objects) ? mini.objects : []),
+      }, destId);
+    }
+    store()?.setPage("block", destId, { ...saved, blocks: out }, destId);
+  }
+
+  function cloneFromTemplate(templateId, { parent = null, near = null } = {}) {
+    const tpl = findTemplate(templateId);
+    if (!tpl || !TEMPLATE_TYPES[tpl.type]) return null;
+    const now = new Date().toISOString();
+    const spot = parent ? childSpot(parent) : freeSpot(near || undefined);
+    const clone = {
+      id: newDotId(),
+      type: tpl.type,
+      title: tpl.title,
+      property: has(PROPERTY_LABELS, tpl.property) ? tpl.property : DEFAULT_PROPERTY,
+      x: spot.x,
+      y: spot.y,
+      content: typeof tpl.content === "string" ? tpl.content : "",
+      parentId: parent ? parent.id : null,
+      children: [],
+      appearance: cleanAppearance(tpl.appearance),
+      tags: cleanTags(tpl.tags),
+      linkedEvents: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    cloneTemplatePages(tpl.id, clone.id, clone.type);
+    spaceDots.push(clone);
+    if (parent) {
+      parent.children.push(clone.id);
+      parent.updatedAt = now;
+    }
+    saveDots();
+    return clone;
+  }
+
+  function openTemplateEditor(id) {
+    const tpl = findTemplate(id);
+    if (!tpl) return;
+    if (typeof window.showView === "function") window.showView("space");
+    openDot(tpl.id);
+  }
+
+  function syncTemplateBanner(dot) {
+    const page = el.detailModal?.querySelector?.(".space-doc-page");
+    if (!page) return;
+    let banner = page.querySelector("[data-template-banner]");
+    if (dot?.isTemplate) {
+      if (!banner) {
+        banner = document.createElement("div");
+        banner.className = "space-template-banner";
+        banner.dataset.templateBanner = "";
+        banner.setAttribute("role", "status");
+        banner.textContent = "\uD83D\uDEE0\uFE0F TEMPLATE EDITOR - Changes made here will apply to future copies.";
+        const head = page.querySelector(".space-doc-head");
+        if (head) page.insertBefore(banner, head);
+        else page.prepend(banner);
+      }
+      page.classList.add("is-template");
+    } else if (banner) {
+      banner.remove();
+      page.classList.remove("is-template");
+    } else {
+      page.classList.remove("is-template");
+    }
+  }
+
+  let templatePicker = null;
+
+  function closeTemplatePicker(picked = null) {
+    if (!templatePicker) return;
+    const { backdrop, onClose, opener } = templatePicker;
+    templatePicker = null;
+    backdrop.remove();
+    onClose?.(picked);
+    if (opener && typeof opener.focus === "function") {
+      try { opener.focus({ preventScroll: true }); } catch (_) { /* ignore */ }
+    }
+  }
+
+  function openTemplatePicker({ parent = null, near = null, onPick = null, onClose = null } = {}) {
+    closeTemplatePicker();
+    loadDots();
+    const opener = document.activeElement;
+    const backdrop = document.createElement("div");
+    backdrop.id = "template-picker-modal";
+    backdrop.className = "template-picker-modal";
+    backdrop.innerHTML = `
+      <div class="template-picker-dialog" role="dialog" aria-modal="true" aria-labelledby="template-picker-title">
+        <div class="template-picker-head">
+          <h2 id="template-picker-title" class="template-picker-heading">From Template\u2026</h2>
+          <button type="button" class="template-picker-close" data-tpl-close title="Close" aria-label="Close">\u2715</button>
+        </div>
+        <input type="search" class="template-picker-search" placeholder="Search templates\u2026" autocomplete="off" aria-label="Search templates" />
+        <div class="template-picker-list" role="listbox" aria-label="Templates"></div>
+        <p class="template-picker-empty" hidden>No templates yet. Create one in Collection \u2192 Templates.</p>
+      </div>`;
+    const list = backdrop.querySelector(".template-picker-list");
+    const empty = backdrop.querySelector(".template-picker-empty");
+    const search = backdrop.querySelector(".template-picker-search");
+    const paint = () => {
+      const q = search.value.trim().toLowerCase();
+      const rows = [...spaceTemplates]
+        .filter((tpl) => !q || tpl.title.toLowerCase().includes(q) || (DOT_TYPES[tpl.type]?.label || "").toLowerCase().includes(q))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      list.replaceChildren();
+      empty.hidden = rows.length > 0;
+      for (const tpl of rows) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "template-picker-item";
+        btn.setAttribute("role", "option");
+        btn.dataset.templateId = tpl.id;
+        btn.innerHTML = `<span class="space-type-dot" data-type="${escapeAttr(tpl.type)}" aria-hidden="true"></span>
+          <span class="template-picker-item-text"><span class="template-picker-item-name"></span><small></small></span>`;
+        btn.querySelector(".template-picker-item-name").textContent = tpl.title;
+        btn.querySelector("small").textContent = dotTypeBadge(tpl.type);
+        list.append(btn);
+      }
+    };
+    const pick = (id) => {
+      const clone = cloneFromTemplate(id, { parent, near });
+      if (!clone) return;
+      closeTemplatePicker(clone);
+      onPick?.(clone);
+      if (typeof window.showView === "function") window.showView("space");
+      openDot(clone.id);
+      render();
+    };
+    backdrop.addEventListener("click", (event) => {
+      if (event.target === backdrop || event.target.closest("[data-tpl-close]")) {
+        closeTemplatePicker(null);
+        return;
+      }
+      const item = event.target.closest("[data-template-id]");
+      if (item) pick(item.dataset.templateId);
+    });
+    search.addEventListener("input", paint);
+    backdrop.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeTemplatePicker(null);
+    });
+    document.body.append(backdrop);
+    templatePicker = { backdrop, onClose, opener };
+    paint();
+    search.focus({ preventScroll: true });
+  }
+
+
   window.FicusSpace = {
     setActive,
     openDot,
     renderDotContent,
+    createTemplate,
+    openTemplateEditor,
+    deleteTemplate,
+    cloneFromTemplate,
+    openTemplatePicker,
+    get templates() {
+      return spaceTemplates.map((dot) => ({
+        ...dot,
+        children: [],
+        appearance: { ...dot.appearance },
+        tags: Object.fromEntries(Object.entries(dot.tags || {}).map(([type, names]) => [type, [...names]])),
+        isTemplate: true,
+        templateLevel: TEMPLATE_LEVEL,
+      }));
+    },
     get dots() {
       return spaceDots.map((dot) => ({
         ...dot,
@@ -15905,6 +16290,10 @@
       dotRadius,
       typeLabel: (type) => DOT_TYPES[type]?.label || "Dot",
       propertyLabel: (property) => PROPERTY_LABELS[property] || PROPERTY_LABELS[DEFAULT_PROPERTY],
+      templates: () => spaceTemplates.slice(),
+      createTemplate,
+      openTemplateEditor,
+      deleteTemplate,
     },
   };
 })();

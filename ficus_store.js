@@ -11,9 +11,10 @@
  *     library,     { checklistTemplates, pads, stickers, palettes, gif } (answered by ficus_cloud.js)
  *     loggers,     tracking loggers' definitions (see ficus_loggers.js)
  *     logger_groups the groups Manage Loggers clusters them in
- *     log_entries } recorded values for input loggers (see ficus_log_entries.js)
- * Version 2 added loggers and logger_groups; version 3 added log_entries. A page still on an older version refuses
- * a newer file (parseMaster), so it can't save over them.
+ *     log_entries, recorded values for input loggers (see ficus_log_entries.js)
+ *     templates }  reusable master dots (space.js); same shape as a dot plus isTemplate / templateLevel
+ * Version 2 added loggers and logger_groups; version 3 added log_entries; version 4 added templates. A page still
+ * on an older version refuses a newer file (parseMaster), so it can't save over them.
  *
  * load(session) reads it once, at sign-in, and space.js and collection.js then read from memory without waiting.
  * Their saves change memory at once; a copy goes into IndexedDB on this device straight after, and 3 seconds after
@@ -24,7 +25,7 @@
   "use strict";
 
   const FORMAT = "ficus-master";
-  const VERSION = 3;
+  const VERSION = 4;
   const PAGE_KINDS = new Set(["board", "block", "block_board"]);
   const DRIVE_DELAY_MS = 3000;
   const DEVICE_DELAY_MS = 400;
@@ -66,6 +67,7 @@
   let loggers = [];
   let loggerGroups = [];
   let logEntries = [];
+  let templates = [];
 
   // The Drive file and the revision of it this device last read or wrote.
   let fileId = null;
@@ -99,6 +101,7 @@
       loggers,
       logger_groups: loggerGroups,
       log_entries: logEntries,
+      templates,
     };
   }
 
@@ -126,6 +129,7 @@
     loggers = list(master.loggers);
     loggerGroups = list(master.logger_groups);
     logEntries = list(master.log_entries);
+    templates = list(master.templates);
   }
 
   // The Drive file's text as a master object; throws (so nothing overwrites it) if it isn't one.
@@ -360,6 +364,7 @@
     loggers = [];
     loggerGroups = [];
     logEntries = [];
+    templates = [];
     setStatus();
   }
 
@@ -638,6 +643,14 @@
     saveLogEntries(next) {
       if (!uid || !Array.isArray(next)) return;
       logEntries = next;
+      changed();
+    },
+
+    // Master dot templates (space.js). Same shape as dots, plus isTemplate / templateLevel; pages use the template id.
+    getTemplates: () => templates,
+    saveTemplates(next) {
+      if (!uid || !Array.isArray(next)) return;
+      templates = next;
       changed();
     },
 
