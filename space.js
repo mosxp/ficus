@@ -404,6 +404,17 @@
     el.camera.style.transform = `translate(${camera.tx}px, ${camera.ty}px) scale(${z})`;
   }
 
+  /* Back to the default camera (origin, zoom 1) and drop the search glow / focus. */
+  function handleRecenter() {
+    camera.tx = 0;
+    camera.ty = 0;
+    camera.z = 1;
+    if (el.camera) el.camera.style.transform = "translate(0px, 0px) scale(1)";
+    hoverId = null;
+    el.nodes?.querySelectorAll(".is-search-hit").forEach((node) => node.classList.remove("is-search-hit"));
+    select(null);
+  }
+
   function pulseDot(id) {
     const node = nodeFor(id);
     if (!node) return;
@@ -16032,6 +16043,7 @@
       linkLayer: "space-link-layer",
       linksSvg: "space-links", addMenu: "space-add-menu", dotMenu: "space-dot-menu", toast: "space-toast",
       appearancePop: "space-appearance-pop", orbitLayer: "space-orbit-layer", viewBtn: "space-view-btn",
+      recenterBtn: "space-recenter-btn",
       bgBtn: "space-bg-btn", bgMenu: "space-bg-menu",
       titleModal: "space-title-modal", titleForm: "space-title-form", titleKicker: "space-title-kicker",
       titleInput: "space-title-input", titleCancel: "space-title-cancel",
@@ -16090,6 +16102,7 @@
     try { savedView = localStorage.getItem(VIEW_MODE_KEY); } catch (_) {}
     setViewMode(savedView, false);
     el.viewBtn.addEventListener("click", () => setViewMode(currentViewMode === "orbit" ? "graph" : "orbit"));
+    el.recenterBtn.addEventListener("click", handleRecenter);
     el.tagsBtn.addEventListener("click", openTagManager);
     el.tagManagerClose.addEventListener("click", () => closeTagManager());
     el.tagManager.addEventListener("keydown", onTagManagerKey);
