@@ -3628,8 +3628,10 @@
       face.append(title);
     } else {
       const back = document.createElement("div");
-      back.className = "fcards-back-page dot-read";
-      back.append(readingPage(dot, (id) => selectFlashcardDot(id), fc.reads));
+      back.className = "fcards-back-page dot-read w-full max-w-none";
+      const page = readingPage(dot, (id) => selectFlashcardDot(id), fc.reads);
+      page.classList.add("w-full", "max-w-none");
+      back.append(page);
       face.append(back);
     }
     card.append(face);

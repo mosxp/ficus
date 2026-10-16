@@ -21,7 +21,7 @@
     <script src="space.js?v=99" defer></script>
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
-    <script src="collection.js?v=25" defer></script>
+    <script src="collection.js?v=26" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
       const APP_STORAGE_EPOCH = "2026-10-03-clean";
@@ -724,8 +724,10 @@
         min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
       .fcards-expand {
+        position: relative; z-index: 2;
         display: inline-flex; flex-shrink: 0; margin-left: auto; align-items: center; justify-content: center;
-        width: 2rem; height: 2rem; border: 1px solid #e7e5e4; background: #fff; color: #57534e; cursor: pointer; padding: 0;
+        width: 2rem; height: 2rem; min-width: 2rem; min-height: 2rem;
+        border: 1px solid #e7e5e4; background: #fff; color: #57534e; cursor: pointer; padding: 0;
       }
       .fcards-expand svg { width: 15px; height: 15px; }
       .fcards-expand:hover, .fcards-expand:focus-visible { color: #1c1917; background: #fafaf9; outline: 2px solid #1c1917; outline-offset: 2px; }
@@ -753,10 +755,28 @@
         font-weight: 760; letter-spacing: -0.02em; line-height: 1.25; color: #1c1917; word-break: break-word;
       }
       .fcards-back-page {
-        flex: 1 1 auto; align-self: stretch; width: 100%; height: 100%; min-height: 0;
-        overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain;
+        flex: 1 1 auto; align-self: stretch; width: 100%; height: 100%; min-height: 0; max-width: none;
+        overflow-x: auto; overflow-y: auto; overscroll-behavior: contain;
+      }
+      /* Unlock reading-width caps from .dot-read-content.is-text .space-doc-body (max-width: 45rem). */
+      .fcards-back-page .dot-read-page,
+      .fcards-back-page .dot-read-content,
+      .fcards-back-page .dot-read-content.is-text,
+      .fcards-back-page .space-doc-body,
+      .fcards-back-page .note-edit-shell,
+      .fcards-back-page [data-note-editor] {
+        width: 100%; max-width: none; box-sizing: border-box;
       }
       .fcards-back-page .dot-read-page { margin: 0; }
+      .fcards-back-page .dot-read-content.is-text .space-doc-body {
+        width: 100%; max-width: none;
+      }
+      .fcards-back-page .space-doc-body [data-note-editor] {
+        width: 100%; max-width: none; padding-left: 0; padding-right: 0;
+      }
+      .fcards-back-page :is(table, .space-table) {
+        width: 100%; max-width: none; table-layout: auto;
+      }
       .fcards-hub-nav {
         align-items: center; justify-content: center; gap: 0.65rem; text-align: center; background: #fafaf9;
       }
@@ -4305,6 +4325,7 @@
       body:not(.ficus-locked) { --ficus-account-room: 168px; }
       .nb-shelf-bar, #collection-content.is-notebook-open .nb-header { padding-right: max(0px, calc(var(--ficus-account-room) - 32px)); }
       .ctags-preview-head { padding-right: max(16px, var(--ficus-account-room)); }
+      .fcards-main.is-expanded .fcards-engine-bar { padding-right: max(12px, calc(var(--ficus-account-room) + 12px)); }
       /* Phones: one 28px row (the sync dot, the picture and Sign Out; the sync words stay for screen readers), with
          Reconnect wrapping under it. An open dot's tab bar stops short of it, and Collection starts below it. */
       @media (max-width: 767px) {
