@@ -10,9 +10,10 @@
  *     notebooks,   Collection's notebooks, in Shelf order
  *     library,     { checklistTemplates, pads, stickers, palettes, gif } (answered by ficus_cloud.js)
  *     loggers,     tracking loggers' definitions (see ficus_loggers.js)
- *     logger_groups } the groups Manage Loggers clusters them in
- * Version 2 added loggers and logger_groups; a page still on version 1 refuses a version 2 file (parseMaster), so
- * it can't save over them.
+ *     logger_groups the groups Manage Loggers clusters them in
+ *     log_entries } recorded values for input loggers (see ficus_log_entries.js)
+ * Version 2 added loggers and logger_groups; version 3 added log_entries. A page still on an older version refuses
+ * a newer file (parseMaster), so it can't save over them.
  *
  * load(session) reads it once, at sign-in, and space.js and collection.js then read from memory without waiting.
  * Their saves change memory at once; a copy goes into IndexedDB on this device straight after, and 3 seconds after
@@ -23,7 +24,7 @@
   "use strict";
 
   const FORMAT = "ficus-master";
-  const VERSION = 2;
+  const VERSION = 3;
   const PAGE_KINDS = new Set(["board", "block", "block_board"]);
   const DRIVE_DELAY_MS = 3000;
   const DEVICE_DELAY_MS = 400;
@@ -64,6 +65,7 @@
   let library = emptyLibrary();
   let loggers = [];
   let loggerGroups = [];
+  let logEntries = [];
 
   // The Drive file and the revision of it this device last read or wrote.
   let fileId = null;
@@ -96,6 +98,7 @@
       library,
       loggers,
       logger_groups: loggerGroups,
+      log_entries: logEntries,
     };
   }
 
@@ -122,6 +125,7 @@
     };
     loggers = list(master.loggers);
     loggerGroups = list(master.logger_groups);
+    logEntries = list(master.log_entries);
   }
 
   // The Drive file's text as a master object; throws (so nothing overwrites it) if it isn't one.
@@ -355,6 +359,7 @@
     library = emptyLibrary();
     loggers = [];
     loggerGroups = [];
+    logEntries = [];
     setStatus();
   }
 

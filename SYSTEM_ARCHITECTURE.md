@@ -92,7 +92,7 @@ Appearance defaults to gray `#8C8C8C` at size 1, and the size slider runs from 0
 
 ### Loggers
 
-Loggers are the things a user tracks over time (weight, spending, steps…). So far only their definitions exist: nothing records values yet. They are kept in the master file as `loggers` and `logger_groups` (see "Storage"). `ficus_loggers.js` (`window.FicusLoggers`) holds the model and the Manage Loggers modal.
+Loggers are the things a user tracks over time (weight, spending, steps…). Definitions live in `loggers` / `logger_groups`; recorded values live in `log_entries` (see "Storage"). `ficus_loggers.js` (`window.FicusLoggers`) holds the model and Manage Loggers; `ficus_log_entries.js` (`window.FicusLogEntries`) holds entries and the universal LogEntryModal.
 - A group is `{ id, name }`. Group names are unique, ignoring case.
 - A logger is `{ id, name, icon, color, groupId, mode, kind, createdAt, updatedAt, goalConfig }` plus optional tree canvas `x` / `y` (numbers) and the fields of its mode. `icon` is either up to two graphemes (letters/emoji) or an image URL / `data:image…` from the sticker picker (same scrapbook auto-slicer as Space custom icons); `color` is the tile wash behind it:
   - `standard`: `inputType` (`currency`, `numeric`, `tally`, `boolean`, `timer`, `compound` or `rating`); `unit` for numeric, currency and tally; plus the active type's config only — `tallyConfig: { step }` (default 1), `booleanConfig: { trueLabel, falseLabel }` (default Yes/No), `timerConfig: { mode: "manual"|"stopwatch" }`, `compoundConfig: { fieldALabel, fieldAUnit, fieldBLabel, fieldBUnit }`, `ratingConfig: { max: 5|10, lowLabel, highLabel }`; and `attachmentConfig: { requirement: "none"|"optional"|"required", allowedTypes: ["photo"|"video"|"audio"|"file"|"album", …] }`. Logged `numeric` values must be `>= 0`; `currency` may be negative (`validateLoggedValue`).
@@ -102,7 +102,9 @@ Loggers are the things a user tracks over time (weight, spending, steps…). So 
   - `"input"` for `standard`: an **Input Logger**, the only kind a dot can record values into.
   - `"metric"` for `rollup`: a **Calculated Metric** (a report), read-only and worked out from its sources. Its tile has a small ƒ in the corner and its badge starts with ƒ.
 - A metric can be saved before its sources are connected: a multi-source roll-up with none, or a ratio missing A and/or B. `pendingOf` lists what's missing, its node in the tree is marked "Pending", and its value is `null`, shown as "—" (`formatValue`).
-- `calculate(loggers, id, values)` gives a logger's value: an input logger's from `values` (`{ [id]: number }`), a metric's worked out recursively from its sources (memoised for shared leaves). Nested roll-ups evaluate deepest-first via recursion. Empty or pending intermediates yield `null` (shown as "—"), not `NaN`. A ratio is A ÷ B (`null` if either is missing or B is 0).
+- `calculate(loggers, id, values)` gives a logger's value: an input logger's from `values` (`{ [id]: number }`), a metric's worked out recursively from its sources (memoised for shared leaves). Manage Loggers feeds `values` from `FicusLogEntries.latestValues()` (newest entry per input logger). Nested roll-ups evaluate deepest-first. Empty or pending intermediates yield `null` (shown as "—"), not `NaN`. A ratio is A ÷ B (`null` if either is missing or B is 0).
+- **Log entries:** `{ id, loggerId, dotId, timestamp, value, note, attachments[] }`. Only `mode: "standard"` loggers accept entries (roll-ups are hidden in the picker). `value` matches `inputType` (number, boolean, compound `{ fieldA, fieldB }`, timer seconds, …). Hard delete removes the row from `log_entries` entirely (no soft-delete flag) and refreshes roll-ups via `FicusLoggers.refreshValues`.
+- **LogEntryModal:** pick an input logger (grouped search), then date/time, dynamic value control, notes, and attachments when allowed. Opened from Text **+ Log**, Board Insert **Log**, or Block sketch **+ Log**. Text embeds a `.log-pill` (backspace hard-deletes); Board places a `log_entry` object (select then second tap / Interact edits; Delete hard-deletes); Block places a full-width `log_entry` widget (tap edits).
 - `icon` is at most 2 characters, an emoji or letters. Without one, the logger's tile shows the first letter of its name on its `color`.
 - `cleanLogger` keeps only the fields of the logger's mode, plus any fields it doesn't know. A `groupId` naming no group reads as no group. An old logger saved with `mode: "formula"` is read as a ratio roll-up (its A and B variables become the two targets).
 - A roll-up can't read from itself, directly or through other loggers (full DAG: parents and grandparents). Those ancestors are shown disabled in the source checklist with a "Circular reference" badge, left out of ratio dropdowns, and saving checks again (`readsFrom`).
@@ -181,7 +183,7 @@ Ficus has no database of its own: each user's work is kept in their own Google D
 | `uploads/` | Photos, files, audio and video from `/api/upload`, and the images of stickers and sticky pads. |
 | `ficus_master_backup (replaced …).json`, `(unsynced from a device …)` | Copies kept when two devices saved over each other (below). |
 
-The master file is `{ format: "ficus-master", version: 2, savedAt, dots, pages, tags, notebooks, library, loggers, logger_groups }`:
+The master file is `{ format: "ficus-master", version: 3, savedAt, dots, pages, tags, notebooks, library, loggers, logger_groups, log_entries }`:
 
 | Field | Holds | Replaces (localStorage, per user) |
 |-------|-------|-----------------------------------|
@@ -192,11 +194,12 @@ The master file is `{ format: "ficus-master", version: 2, savedAt, dots, pages, 
 | `library` | `{ checklistTemplates, pads, stickers, palettes, gif }` (see section 4). Stickers and pads keep their image's Drive `fileId` and `/drive-file/` `src`. | The Supabase tables of the same names |
 | `loggers` | The loggers' definitions (see "Loggers" above). | Nothing: new in version 2 |
 | `logger_groups` | The groups Manage Loggers sorts them into. | Nothing: new in version 2 |
+| `log_entries` | Recorded values for input loggers (see "Loggers" above). | Nothing: new in version 3 |
 
-Version 2 added `loggers` and `logger_groups`. A page still running version 1 code refuses a version 2 file when it loads it ("saved by a newer version of Ficus. Reload the page to update."), so it can't save over them. A version 1 tab that was already open saves as before; the file it replaces is kept as a copy (below).
+Version 2 added `loggers` and `logger_groups`; version 3 added `log_entries`. A page still running older code refuses a newer file when it loads it ("saved by a newer version of Ficus. Reload the page to update."), so it can't save over them.
 
 `ficus_store.js` (`window.FicusStore`) holds it in memory:
-- `load(session)` reads it once, at sign-in, while a spinner covers the app. From then on `space.js`, `collection.js` and `ficus_cloud.js` read from memory, synchronously. Their API is unchanged from the localStorage days (`getDots` / `saveDots`, `getPage` / `setPage` / `removePage`, `getTags` / `saveTagTypes` / `saveTagColors`, `getNotebooks` / `saveNotebooks`), plus `getLibrary` / `editLibrary` and `getLoggers` / `saveLoggers(loggers, groups)`.
+- `load(session)` reads it once, at sign-in, while a spinner covers the app. From then on `space.js`, `collection.js` and `ficus_cloud.js` read from memory, synchronously. Their API is unchanged from the localStorage days (`getDots` / `saveDots`, `getPage` / `setPage` / `removePage`, `getTags` / `saveTagTypes` / `saveTagColors`, `getNotebooks` / `saveNotebooks`), plus `getLibrary` / `editLibrary`, `getLoggers` / `saveLoggers(loggers, groups)`, and `getLogEntries` / `saveLogEntries`.
 - Saves change memory at once, so the UI never waits. A copy of everything goes into IndexedDB on this device 400ms later (`master:<user id>` in the `ficus` database, with the Drive file's id and revision and whether Drive is behind). 3 seconds after the last change, the whole object overwrites the Drive file (a `PATCH` upload).
 - Before each write it checks the file's `headRevisionId`. If it isn't the one this device last read or wrote, another device saved in between: that version is copied beside it as `… (replaced <local time>).json` before the overwrite. Nothing is merged.
 - A failed write is retried after 5, 15, 30, then every 60 seconds, and straight away when the browser comes back online. Hiding the tab writes what's waiting, and closing it asks first only if the device copy isn't written yet. An expired token isn't retried: it waits for Reconnect (see "Signing in" in section 4).

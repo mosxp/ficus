@@ -451,10 +451,10 @@
     return list.reduce((sum, n) => sum + n, 0);
   }
 
-  // Shape-check a value before it is written into a standard logger (logging UI will call this).
+  // Shape-check a value before it is written into a standard logger (LogEntryModal calls this).
   function validateLoggedValue(logger, value) {
     if (!logger || logger.mode !== "standard") return { ok: true, value };
-    if (logger.inputType === "numeric") {
+    if (logger.inputType === "numeric" || logger.inputType === "tally") {
       if (value == null || value === "") return { ok: false, error: "Enter a number.", value: null };
       const n = Number(value);
       if (!Number.isFinite(n)) return { ok: false, error: "Enter a number.", value: null };
@@ -466,6 +466,30 @@
       const n = Number(value);
       if (!Number.isFinite(n)) return { ok: false, error: "Enter an amount.", value: null };
       return { ok: true, value: n };
+    }
+    if (logger.inputType === "rating") {
+      const max = Number(logger.ratingConfig?.max) === 10 ? 10 : 5;
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 1 || n > max) return { ok: false, error: `Pick 1\u2013${max}.`, value: null };
+      return { ok: true, value: n };
+    }
+    if (logger.inputType === "boolean") {
+      if (value === true || value === false) return { ok: true, value };
+      return { ok: false, error: "Pick true or false.", value: null };
+    }
+    if (logger.inputType === "timer") {
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 0) return { ok: false, error: "Enter a duration.", value: null };
+      return { ok: true, value: n };
+    }
+    if (logger.inputType === "compound") {
+      const src = value && typeof value === "object" ? value : {};
+      const fieldA = Number(src.fieldA);
+      const fieldB = Number(src.fieldB);
+      if (!Number.isFinite(fieldA) || !Number.isFinite(fieldB)) {
+        return { ok: false, error: "Enter both fields.", value: null };
+      }
+      return { ok: true, value: { fieldA, fieldB } };
     }
     return { ok: true, value };
   }
@@ -779,8 +803,15 @@
   /** @type {{ pointerId: number, id: string, sx: number, sy: number, ox: number, oy: number, moved: boolean, card: HTMLElement } | null} */
   let nodeDrag = null;
 
-  // Logging values isn't built yet, so no input logger has a latest value and every node shows "—".
-  const latestValues = () => ({});
+  // Latest scalar per input logger from log_entries (for the tree and roll-up calculate).
+  const latestValues = () => window.FicusLogEntries?.latestValues?.() || {};
+
+  // Re-paint the open Manage Loggers tree after a log entry changes.
+  function refreshValues() {
+    if (!el || el.overlay.classList.contains("hidden")) return;
+    const { loggers, groups } = readAll();
+    renderTree(loggers, groups);
+  }
 
   function blankDraft(groupId = "") {
     return {
@@ -2780,6 +2811,8 @@
     edgePath,
     validateLoggedValue,
     isEligibleSource,
+    refreshValues,
+    latestValues,
     MODES: MODES.map(([id]) => id),
     KINDS: KINDS.map(([id]) => id),
     INPUT_TYPES: INPUT_TYPES.map(([id]) => id),

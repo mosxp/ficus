@@ -4098,6 +4098,11 @@
        board  an object on its sheet: { id, type: "dot_reference", targetDotId, title, x, y, w, h, rotation }
        block  { id, type: "dot_reference", targetDotId, title }, sized on the grid like any block */
   const DOT_REF_TYPE = "dot_reference";
+  const LOG_ENTRY_TYPE = "log_entry";
+  const LOG_PILL = ".log-pill[data-log-entry-id]";
+  const LOG_ENTRY_META = { symbol: "\u002b", label: "Log", menuLabel: "+ Log", type: LOG_ENTRY_TYPE };
+  const LOG_CARD_WIDTH = 200;
+  const LOG_CARD_HEIGHT = 96;
   const DOT_REF_PILL = ".dot-ref-pill[data-target-id]";
   const DOT_REF_GLYPH = "\u21E2";
   const DOT_REF_DELETED = "Deleted Dot";
@@ -4107,6 +4112,7 @@
   const DOT_REF_CARD_WIDTH = 220;
   const DOT_REF_CARD_HEIGHT = 90;
   const isRefBlock = (block) => block?.type === DOT_REF_TYPE;
+  const isLogBlock = (block) => block?.type === LOG_ENTRY_TYPE;
   // A dot type's badge: "Text", "Board", "Block" or "Hub".
   const dotTypeBadge = (type) => (DOT_TYPES[type]?.label || "Dot").replace(/ dot$/, "");
   let dotSearchModal = null;
@@ -4281,12 +4287,14 @@
         before = before.previousSibling;
       }
     }
-    if (!(before instanceof Element) || !before.matches(DOT_REF_PILL)) return false;
+    if (!(before instanceof Element) || !(before.matches(DOT_REF_PILL) || before.matches(LOG_PILL))) return false;
     const caret = document.createRange();
     caret.setStartBefore(before);
     caret.collapse(true);
     spacer?.deleteData(0, 1);
+    const logId = before.matches(LOG_PILL) ? before.dataset.logEntryId : "";
     before.remove();
+    if (logId) window.FicusLogEntries?.hardDelete?.(logId, { flush: true });
     placeCaret(caret);
     syncEditorContent();
     return true;
@@ -4295,6 +4303,41 @@
   // iPad and iPhone keyboards may send only beforeinput for Backspace.
   function onEditorBeforeInput(event) {
     if (event.inputType === "deleteContentBackward" && !readingText() && removeRefPillBeforeCaret()) event.preventDefault();
+  }
+
+  function openTextLogModal() {
+    if (readingText() || findDot(openDotId)?.type !== "text") return;
+    closeSpacePopovers();
+    window.FicusLogEntries?.openCreate?.({
+      dotId: openDotId,
+      onDone: (entry) => {
+        if (!entry || entry.deleted || readingText() || findDot(openDotId)?.type !== "text") return;
+        if (!restoreSelection()) return;
+        placeSolidAtCaret(window.FicusLogEntries.pillNode(entry));
+      },
+    });
+  }
+
+  function onLogPillClick(event) {
+    const pill = event.target.closest?.(LOG_PILL);
+    if (!pill) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const id = pill.dataset.logEntryId;
+    if (!id) return;
+    window.FicusLogEntries?.openEdit?.(id, {
+      onDone: (entry) => {
+        if (!entry) return;
+        if (entry.deleted) {
+          pill.remove();
+          if (!readingText()) syncEditorContent();
+          return;
+        }
+        const next = window.FicusLogEntries.pillNode(entry);
+        pill.replaceWith(next);
+        if (!readingText()) syncEditorContent();
+      },
+    });
   }
 
   /* A reference's card on a board or a block dot's grid: a ⇢ badge and the dot's type over its title, and ↗ Open
@@ -7167,7 +7210,16 @@
       refBtn.addEventListener("mousedown", (event) => event.preventDefault());
       refBtn.addEventListener("click", openTextRefModal);
       fmt.refBtn = refBtn;
-      btn.after(refBtn, ...embedBtns);
+      const logBtn = document.createElement("button");
+      logBtn.type = "button";
+      logBtn.className = `${btn.className.replace(/\bspace-child-btn\b/, "").trim()} space-log-btn`;
+      logBtn.title = "Log a value here";
+      logBtn.setAttribute("aria-haspopup", "dialog");
+      logBtn.textContent = "+ Log";
+      logBtn.addEventListener("mousedown", (event) => event.preventDefault());
+      logBtn.addEventListener("click", openTextLogModal);
+      fmt.logBtn = logBtn;
+      btn.after(logBtn, refBtn, ...embedBtns);
     }
     const tableToggle = toolbar.querySelector("[data-note-table-toggle]");
     if (tableToggle) fmt.tableBtn = ownToolbarButton(tableToggle, "space-table-btn", "Insert table", openTablePopover);
@@ -7218,6 +7270,7 @@
       root.addEventListener("mousedown", onEditorMouseDown);
       root.addEventListener("keydown", onEditorKeyDown);
       root.addEventListener("beforeinput", onEditorBeforeInput);
+      root.addEventListener("click", onLogPillClick);
       root.addEventListener("input", onEditorInput);
       root.addEventListener("click", onEditorClick);
       root.addEventListener("paste", onEditorPaste);
@@ -7650,7 +7703,8 @@
       const html = popoverHtml.call(this, kind);
       if (kind !== "insert") return html;
       const row = `<button type="button" class="sb-menu-item" data-space-board-child>${CHILD_DOT_ICON.replace("<svg ", '<svg class="sb-icon" ')}<span>Add child dot</span><small>Text · Board · Block · Hub</small></button>`
-        + `<button type="button" class="sb-menu-item" data-space-board-ref aria-haspopup="dialog"><span class="space-board-child-glyph" aria-hidden="true">${DOT_REF_GLYPH}</span><span>Reference</span><small>Link any dot</small></button>`;
+        + `<button type="button" class="sb-menu-item" data-space-board-ref aria-haspopup="dialog"><span class="space-board-child-glyph" aria-hidden="true">${DOT_REF_GLYPH}</span><span>Reference</span><small>Link any dot</small></button>`
+        + `<button type="button" class="sb-menu-item" data-space-board-log aria-haspopup="dialog"><span class="space-board-child-glyph" aria-hidden="true">+</span><span>Log</span><small>Record a value</small></button>`;
       const google = Object.entries(BOARD_ITEM_KINDS).map(([item, { symbol, label, hint }]) => (
         `<button type="button" class="sb-menu-item" data-space-board-google="${item}" aria-haspopup="dialog"><span class="space-board-child-glyph" aria-hidden="true">${symbol}</span><span>${label}</span><small>${hint}</small></button>`
       )).join("");
@@ -7673,6 +7727,7 @@
     b.popover.addEventListener("click", (event) => {
       if (event.target.closest("[data-space-board-child]")) b._openPopover("childDots");
       else if (event.target.closest("[data-space-board-ref]")) addBoardRef();
+      else if (event.target.closest("[data-space-board-log]")) addBoardLog();
       else if (event.target.closest("[data-space-board-link]")) b._openPopover("linkDots");
       else if (event.target.closest("[data-space-board-link-back]")) b._openPopover("childDots");
       else if (event.target.closest("[data-space-board-child-back]")) b._openPopover("insert");
@@ -7821,14 +7876,15 @@
   // Board object type → the type of the block it holds.
   const BOARD_ITEM_BLOCKS = { calendar_event: "calendar", google_task: "task" };
   const BOARD_ITEM_WIDTH = 280;
-  const isBoardItem = (o) => Boolean(o) && (o.type === DOT_REF_TYPE || has(BOARD_ITEM_BLOCKS, o.type));
-  const boardItemWidth = (o) => (o.type === DOT_REF_TYPE ? DOT_REF_CARD_WIDTH : BOARD_ITEM_WIDTH);
+  const isBoardItem = (o) => Boolean(o) && (o.type === DOT_REF_TYPE || o.type === LOG_ENTRY_TYPE || has(BOARD_ITEM_BLOCKS, o.type));
+  const boardItemWidth = (o) => (o.type === DOT_REF_TYPE ? DOT_REF_CARD_WIDTH : o.type === LOG_ENTRY_TYPE ? LOG_CARD_WIDTH : BOARD_ITEM_WIDTH);
   const newBoardBlockId = () => `blk_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
   const BOARD_INTERACT_ICON = '<svg class="sb-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 11.5V5a1.5 1.5 0 0 1 3 0v6" /><path d="M12 10V8.5a1.5 1.5 0 0 1 3 0V11" /><path d="M15 10.5a1.5 1.5 0 0 1 3 0V15a6 6 0 0 1-6 6h-.8a6 6 0 0 1-4.7-2.3L4.3 16a1.5 1.5 0 0 1 2.3-1.9L9 16.5" /></svg>';
 
   // Unscaled height of a new card: an event's date tile, or a task's title and due day (and two lines of notes).
   function boardItemHeight(o) {
     if (o.type === DOT_REF_TYPE) return DOT_REF_CARD_HEIGHT;
+    if (o.type === LOG_ENTRY_TYPE) return LOG_CARD_HEIGHT;
     if (o.type === "calendar_event") return 74;
     return String(o.block?.notes || "").trim() ? 92 : 62;
   }
@@ -8183,7 +8239,19 @@
     ctx.scale(k, k);
     ctx.translate(-w / 2, -h / 2);
     if (o.type === DOT_REF_TYPE) paintRefFace(ctx, o, w, h);
-    else if (o.block) paintGoogleFace(ctx, o.block, w, h);
+    else if (o.type === LOG_ENTRY_TYPE) {
+      const entry = window.FicusLogEntries?.find?.(o.logEntryId);
+      if (entry && typeof window.FicusLogEntries.paintCardFace === "function") window.FicusLogEntries.paintCardFace(ctx, entry, w, h);
+      else {
+        ctx.fillStyle = "#fff";
+        ctx.strokeStyle = "#e7e5e4";
+        ctx.strokeRect(0.5, 0.5, w - 1, h - 1);
+        ctx.fillRect(1, 1, w - 2, h - 2);
+        ctx.fillStyle = "#a8a29e";
+        ctx.font = "600 12px system-ui,sans-serif";
+        ctx.fillText("Deleted log", 12, 28);
+      }
+    } else if (o.block) paintGoogleFace(ctx, o.block, w, h);
     ctx.restore();
   }
 
@@ -8223,6 +8291,21 @@
     const b = view.board;
     const o = b?.objects.find((item) => item.id === id);
     if (!o || !isBoardItem(o) || isHiddenObject(o) || !view.itemLayer || view.interact?.id === id) return;
+    if (o.type === LOG_ENTRY_TYPE) {
+      const entryId = o.logEntryId;
+      if (!entryId) return;
+      window.FicusLogEntries?.openEdit?.(entryId, {
+        onDone: (entry) => {
+          if (entry?.deleted) {
+            b.objects = b.objects.filter((item) => item.id !== o.id);
+            b.selection.delete(o.id);
+            b.markDirty();
+          }
+          b._scheduleRedraw();
+        },
+      });
+      return;
+    }
     closeBoardItem(view, false);
     const node = document.createElement("div");
     node.className = "board-item-live";
@@ -8244,7 +8327,33 @@
     if (!o) return;
     const engine = window.UniversalBlockEngine;
     if (o.type === DOT_REF_TYPE) live.node.replaceChildren(refCardNode(o, findDot(o.targetDotId)));
-    else if (typeof engine?.render === "function") live.node.innerHTML = engine.render(o.block, { source: BOARD_ITEM_SOURCE, ownerId: view.dotId, hideTypeBadge: true });
+    else if (o.type === LOG_ENTRY_TYPE) {
+      const entry = window.FicusLogEntries?.find?.(o.logEntryId);
+      if (!entry) {
+        live.node.replaceChildren(Object.assign(document.createElement("div"), { className: "log-card", textContent: "Deleted log" }));
+        return;
+      }
+      const card = window.FicusLogEntries.cardNode(entry, {
+        selected: true,
+        onDelete: (id) => {
+          window.FicusLogEntries.hardDelete(id, { flush: true });
+          view.board.objects = view.board.objects.filter((item) => item.id !== o.id);
+          closeBoardItem(view);
+          view.board.markDirty();
+          view.board._scheduleRedraw();
+        },
+      });
+      card.addEventListener("click", (event) => {
+        if (event.target.closest(".log-card-delete")) return;
+        window.FicusLogEntries.openEdit(entry.id, {
+          onDone: () => {
+            fillBoardItem(view, live);
+            view.board._scheduleRedraw();
+          },
+        });
+      });
+      live.node.replaceChildren(card);
+    } else if (typeof engine?.render === "function") live.node.innerHTML = engine.render(o.block, { source: BOARD_ITEM_SOURCE, ownerId: view.dotId, hideTypeBadge: true });
   }
 
   // The open card over its face, following it as it's dragged, resized or turned; gone with it.
@@ -8283,6 +8392,19 @@
   // A board dot's engine opens its cards: Interact (Done once open) leads the selection bar of one card, and the
   // open card follows every repaint.
   function adaptBoardItems(b, view) {
+    if (!b._ficusLogDeleteWrapped && typeof b.deleteSelection === "function") {
+      b._ficusLogDeleteWrapped = true;
+      const deleteSelection = b.deleteSelection.bind(b);
+      b.deleteSelection = function (...args) {
+        const doomed = this.objects
+          .filter((o) => this.selection.has(o.id) && o.type === LOG_ENTRY_TYPE)
+          .map((o) => o.logEntryId)
+          .filter(Boolean);
+        const result = deleteSelection(...args);
+        for (const id of doomed) window.FicusLogEntries?.hardDelete?.(id, { flush: true });
+        return result;
+      };
+    }
     const syncSelbar = b._syncSelbar;
     b._syncSelbar = function (...args) {
       const live = view.interact;
@@ -8337,6 +8459,22 @@
         placeBoardObject({
           id: newBoardObjectId(), type: DOT_REF_TYPE, targetDotId, title,
           x: 0, y: 0, w: DOT_REF_CARD_WIDTH, h: DOT_REF_CARD_HEIGHT, rotation: 0,
+        });
+      },
+    });
+  }
+
+  function addBoardLog() {
+    const view = boardView;
+    if (!view?.editing || !board) return;
+    board._closePopover();
+    window.FicusLogEntries?.openCreate?.({
+      dotId: openDotId,
+      onDone: (entry) => {
+        if (!entry || entry.deleted || boardView !== view || !view.editing || !board) return;
+        placeBoardObject({
+          id: newBoardObjectId(), type: LOG_ENTRY_TYPE, logEntryId: entry.id,
+          x: 0, y: 0, w: LOG_CARD_WIDTH, h: LOG_CARD_HEIGHT, rotation: 0,
         });
       },
     });
@@ -9419,7 +9557,7 @@
   // The grid's Add Block menu, in groups split by a rule: Add child dot (which turns the menu into a pick of dot
   // types), Reference (DotSearchModal), frames and the two blocks you write or draw on, then the ones that hold a
   // link, file, media, calendar event or Google task. (Checklists live inside rich notes.)
-  const BLOCK_ADD_MENU = [["childdot", DOT_REF_TYPE, "frame", "note", "scrapboard"], ["link", "file", "photo", "album", "video", "audio", "calendar", "task"]];
+  const BLOCK_ADD_MENU = [["childdot", DOT_REF_TYPE, LOG_ENTRY_TYPE, "frame", "note", "scrapboard"], ["link", "file", "photo", "album", "video", "audio", "calendar", "task"]];
   const BLOCK_ADD_ICONS = {
     childdot: CHILD_DOT_ICON,
     frame: '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="14" height="14" rx="2.5" /><path d="M3 7.5h14" /></svg>',
@@ -9727,6 +9865,7 @@
   function blockTypeMeta(type) {
     if (type === CHILD_BLOCK) return CHILD_BLOCK_META;
     if (type === DOT_REF_TYPE) return DOT_REF_META;
+    if (type === LOG_ENTRY_TYPE) return LOG_ENTRY_META;
     return type === "frame" ? FRAME_META : window.UniversalBlockEngine.typeMeta(type);
   }
 
@@ -10188,6 +10327,38 @@
     widgetFor(view, block.id)?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
   }
 
+  function addBlockLog(view, entry, rect, frameId) {
+    if (blockView !== view || !view.editing || !entry?.id) return;
+    settleBlockEditing();
+    const frame = rect ? frameId || frameAt(view, rect) : null;
+    const block = { id: newWidgetId(), type: LOG_ENTRY_TYPE, logEntryId: entry.id };
+    view.blocks.push(block);
+    view.pendingRect = (frame && frameFillRect(view, frame)) || rect || null;
+    view.pendingParent = frame;
+    renderBlockWidgets();
+    saveBlockDot();
+    widgetFor(view, block.id)?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: reducedMotion() ? "auto" : "smooth" });
+  }
+
+  function buildLogBlockCard(view, block) {
+    const entry = window.FicusLogEntries?.find?.(block.logEntryId);
+    const card = entry
+      ? window.FicusLogEntries.cardNode(entry, {
+        onDelete: () => removeBlockWidget(view, block.id),
+      })
+      : Object.assign(document.createElement("div"), { className: "log-card", textContent: "Deleted log" });
+    card.addEventListener("click", (event) => {
+      if (event.target.closest(".log-card-delete") || !entry) return;
+      window.FicusLogEntries.openEdit(entry.id, {
+        onDone: (next) => {
+          if (next?.deleted) removeBlockWidget(view, block.id, { force: true });
+          else renderBlockWidgets();
+        },
+      });
+    });
+    return card;
+  }
+
   /* Its card follows its dot's title. ↗ Open follows it (see the grid's click handler), as does a double-click or
      double tap on the card and, reading, a tap anywhere on it; editing, a tap shows the block's controls instead. */
   function buildRefBlockCard(view, block) {
@@ -10229,12 +10400,13 @@
     widget.classList.toggle("controls-active", view.controlsId === id);
     widget.classList.toggle("child-dot-block", isChildBlock(block));
     widget.classList.toggle("dot-ref-block", isRefBlock(block));
+    widget.classList.toggle("log-entry-block", isLogBlock(block));
     const card = document.createElement("div");
     card.className = "grid-widget-card";
 
     const body = document.createElement("div");
     body.className = "grid-widget-body";
-    if (!isFrameBlock(block) && !isChildBlock(block) && !isRefBlock(block)) body.innerHTML = engine.render(block, { source: BLOCK_SOURCE, ownerId: view.dotId, index, hideTypeBadge: true });
+    if (!isFrameBlock(block) && !isChildBlock(block) && !isRefBlock(block) && !isLogBlock(block)) body.innerHTML = engine.render(block, { source: BLOCK_SOURCE, ownerId: view.dotId, index, hideTypeBadge: true });
     dropDisplayPencils(body);
     if (block.type === "note") stripNoteSettings(body, block);
     else if (block.type === "photo") stripPhotoSettings(body, block);
@@ -10247,6 +10419,7 @@
     else if (isFrameBlock(block)) body.append(buildFrameCard(view, block, index));
     else if (isChildBlock(block)) body.append(buildChildPortal(view, block));
     else if (isRefBlock(block)) body.append(buildRefBlockCard(view, block));
+    else if (isLogBlock(block)) body.append(buildLogBlockCard(view, block));
 
     const actions = document.createElement("div");
     actions.className = "block-controls grid-widget-actions";
@@ -10275,6 +10448,10 @@
     } else if (isRefBlock(block)) {
       remove.title = "Remove reference";
       remove.setAttribute("aria-label", `Remove the reference to ${block.title || "a dot"} (the dot stays in Space)`);
+      actions.append(remove);
+    } else if (isLogBlock(block)) {
+      remove.title = "Delete log";
+      remove.setAttribute("aria-label", "Delete this log entry");
       actions.append(remove);
     } else {
       actions.append(remove, edit);
@@ -11859,13 +12036,14 @@
     }
   }
 
-  function removeBlockWidget(view, id) {
+  function removeBlockWidget(view, id, { force = false } = {}) {
     if (!id || blockView !== view) return;
     const found = view.blocks.find((block) => String(block.id) === id);
     const question = isChildBlock(found) ? "Remove this child dot from the block? The dot stays in Space; only its link to this block goes."
+      : isLogBlock(found) ? "Delete this log entry permanently?"
       : isRefBlock(found) ? "Remove this reference? The dot it points to stays in Space."
       : "Delete this block?";
-    if (!window.confirm(question)) return;
+    if (!force && !window.confirm(question)) return;
     if (blockSettingsOpenFor(id)) window.UniversalBlockEngine.flushSettings(".block-dot");
     const index = view.blocks.findIndex((block) => String(block.id) === id);
     if (index < 0) return;
@@ -11873,6 +12051,7 @@
     const [block] = view.blocks.splice(index, 1);
     view.rects.delete(id);
     view.parents.delete(id);
+    if (isLogBlock(block) && block.logEntryId) window.FicusLogEntries?.hardDelete?.(block.logEntryId, { flush: true });
     renderBlockWidgets();
     // Its mini board has let go (saving as it did); the drawing goes with the block.
     if (block.type === "scrapboard") {
@@ -12181,6 +12360,22 @@
           onClose: () => {
             sketch.ghost.remove();
             if (blockView === view) sizeBlockCanvas(view);
+          },
+        });
+        return;
+      }
+      if (event.target.closest(`[data-space-add-block="${LOG_ENTRY_TYPE}"]`)) {
+        view.sketch = null;
+        closeSpacePopovers();
+        window.FicusLogEntries?.openCreate?.({
+          dotId: view.dotId,
+          onDone: (entry) => {
+            sketch.ghost.remove();
+            if (!entry || entry.deleted || blockView !== view) {
+              if (blockView === view) sizeBlockCanvas(view);
+              return;
+            }
+            addBlockLog(view, entry, sketch.rect, sketch.frameId);
           },
         });
         return;

@@ -18,8 +18,9 @@
     <script src="canvas-editor.js?v=2"></script>
     <script src="scrapboard.js?v=26"></script>
     <script src="quick_line.js?v=2"></script>
-    <script src="space.js?v=92" defer></script>
-    <script src="ficus_loggers.js?v=11" defer></script>
+    <script src="space.js?v=93" defer></script>
+    <script src="ficus_loggers.js?v=12" defer></script>
+    <script src="ficus_log_entries.js?v=1" defer></script>
     <script src="collection.js?v=19" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -41,7 +42,7 @@
     <!-- Bump ?v= whenever these change so browsers never pair them with a different index.html. -->
     <script src="ficus_drive.js?v=6"></script>
     <script src="ficus_cloud.js?v=15"></script>
-    <script src="ficus_store.js?v=3"></script>
+    <script src="ficus_store.js?v=4"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -1733,6 +1734,121 @@
       .logger-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .logger-stage { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
       .logger-canvas-wrap { position: relative; flex: 1; min-height: 0; }
+
+      /* ---------- Log entry modal + pills / cards ---------- */
+      .log-entry-sheet {
+        display: flex; flex-direction: column; width: min(28rem, calc(100vw - 1.5rem)); max-height: min(40rem, calc(100vh - 2rem));
+        border: 1px solid #e7e5e4; background: #fff; box-shadow: 0 18px 40px rgba(28, 25, 23, 0.18);
+      }
+      .log-entry-head {
+        display: flex; align-items: center; gap: 0.5rem; padding: 0.75rem 0.75rem 0.5rem 1rem; border-bottom: 1px solid #f5f5f4;
+      }
+      .log-entry-body { min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; padding: 0.85rem 1rem 1rem; }
+      .log-entry-step { display: flex; flex-direction: column; gap: 0.75rem; }
+      .log-entry-hint, .log-entry-empty { margin: 0; font-size: 0.8rem; color: #78716c; }
+      .log-entry-search, .log-entry-input {
+        box-sizing: border-box; width: 100%; min-height: 2.75rem; padding: 0.55rem 0.7rem; border: 1px solid #e7e5e4;
+        background: #fff; font: inherit; font-size: 1rem; color: #1c1917;
+      }
+      .log-entry-input.is-tall { min-height: 2.75rem; }
+      .log-entry-input.is-large { min-height: 3.25rem; font-size: 1.35rem; font-weight: 700; text-align: center; }
+      .log-entry-note { min-height: 5rem; resize: vertical; }
+      .log-entry-search:focus, .log-entry-input:focus { outline: 2px solid #1c1917; outline-offset: -1px; }
+      .log-entry-group-label {
+        margin: 0.35rem 0 0.2rem; font-size: 0.68rem; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: #a8a29e;
+      }
+      .log-entry-list { display: flex; flex-direction: column; border: 1px solid #e7e5e4; }
+      .log-entry-pick {
+        display: flex; align-items: center; gap: 0.55rem; min-height: 2.75rem; padding: 0.35rem 0.6rem; border: 0; border-top: 1px solid #f5f5f4;
+        background: #fff; font: inherit; text-align: left; cursor: pointer;
+      }
+      .log-entry-pick:first-child { border-top: 0; }
+      .log-entry-pick:hover, .log-entry-pick:focus-visible { background: #fafaf9; outline: none; }
+      .log-entry-pick-text { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 0.05rem; }
+      .log-entry-pick-name { overflow: hidden; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+      .log-entry-pick small { color: #a8a29e; font-size: 0.72rem; }
+      .log-entry-tile {
+        display: inline-flex; width: 1.7rem; height: 1.7rem; flex-shrink: 0; align-items: center; justify-content: center;
+        background: var(--swatch, #8BA888); color: #fff; font-size: 0.75rem; font-weight: 700; overflow: hidden;
+      }
+      .log-entry-tile img { width: 100%; height: 100%; object-fit: cover; }
+      .log-entry-logger { display: flex; align-items: center; gap: 0.6rem; }
+      .log-entry-logger strong { display: block; font-size: 0.95rem; }
+      .log-entry-logger small { color: #a8a29e; font-size: 0.72rem; }
+      .log-entry-field { display: flex; flex-direction: column; gap: 0.3rem; }
+      .log-entry-label { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: #78716c; }
+      .log-entry-tally, .log-entry-number, .log-entry-timer-manual, .log-entry-stopwatch-actions {
+        display: flex; align-items: center; gap: 0.45rem;
+      }
+      .log-entry-stepper {
+        display: inline-flex; width: 2.75rem; height: 2.75rem; align-items: center; justify-content: center; border: 1px solid #e7e5e4;
+        background: #fafaf9; font-size: 1.35rem; font-weight: 700; cursor: pointer;
+      }
+      .log-entry-unit { color: #78716c; font-size: 0.85rem; font-weight: 600; }
+      .log-entry-toggle {
+        display: flex; min-height: 2.75rem; align-items: center; gap: 0.65rem; padding: 0.35rem 0.75rem; border: 1px solid #e7e5e4;
+        background: #fafaf9; font: inherit; font-weight: 600; cursor: pointer;
+      }
+      .log-entry-toggle-knob {
+        width: 2.4rem; height: 1.35rem; border-radius: 999px; background: #d6d3d1; position: relative;
+      }
+      .log-entry-toggle-knob::after {
+        content: ""; position: absolute; top: 0.15rem; left: 0.15rem; width: 1.05rem; height: 1.05rem; border-radius: 999px; background: #fff;
+      }
+      .log-entry-toggle.is-on { background: #ecfccb; border-color: #84cc16; }
+      .log-entry-toggle.is-on .log-entry-toggle-knob { background: #65a30d; }
+      .log-entry-toggle.is-on .log-entry-toggle-knob::after { left: 1.2rem; }
+      .log-entry-compound { display: grid; grid-template-columns: 1fr 1fr; gap: 0.55rem; }
+      .log-entry-mini { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.75rem; font-weight: 600; color: #78716c; }
+      .log-entry-rating { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+      .log-entry-star {
+        width: 2.4rem; height: 2.4rem; border: 1px solid #e7e5e4; background: #fff; color: #d6d3d1; font-size: 1.25rem; cursor: pointer;
+      }
+      .log-entry-star.is-on { color: #ca8a04; background: #fffbeb; border-color: #fbbf24; }
+      .log-entry-stopwatch-time { font-size: 1.75rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+      .log-entry-thumbs { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.45rem; }
+      .log-entry-thumb {
+        position: relative; width: 64px; height: 64px; padding: 0; border: 1px solid #e7e5e4; background: #f5f5f4; border-radius: 0.35rem; overflow: hidden; cursor: default;
+      }
+      .log-entry-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+      .log-entry-thumb-x {
+        position: absolute; top: 0; right: 0; display: inline-flex; width: 1.25rem; height: 1.25rem; align-items: center; justify-content: center;
+        background: rgba(28,25,23,0.72); color: #fff; font-size: 0.8rem; cursor: pointer;
+      }
+      .log-entry-error { margin: 0; color: #b91c1c; font-size: 0.8rem; font-weight: 600; }
+      .log-entry-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; padding-top: 0.35rem; }
+      .log-entry-foot-spacer { flex: 1; min-width: 0.5rem; }
+      .log-entry-primary, .log-entry-secondary, .log-entry-danger {
+        display: inline-flex; min-height: 2.75rem; align-items: center; justify-content: center; padding: 0 0.9rem; border: 1px solid #e7e5e4;
+        background: #fff; font: inherit; font-weight: 600; cursor: pointer;
+      }
+      .log-entry-primary { background: #1c1917; border-color: #1c1917; color: #fff; }
+      .log-entry-danger { border-color: #fecaca; background: #fef2f2; color: #b91c1c; }
+      .log-pill {
+        display: inline-flex; align-items: center; gap: 0.3rem; margin: 0 0.1rem; padding: 0.15rem 0.45rem; border: 1px solid #e7e5e4;
+        background: #f5f5f4; border-radius: 0.25rem; vertical-align: baseline; cursor: pointer; -webkit-user-select: none; user-select: none;
+      }
+      .log-pill .log-entry-tile { width: 1.15rem; height: 1.15rem; font-size: 0.65rem; }
+      .log-pill-value { font-size: 0.82rem; font-weight: 600; color: #1c1917; }
+      .log-pill-clip { font-size: 0.7rem; }
+      .log-card {
+        box-sizing: border-box; width: 100%; border: 1px solid #e7e5e4; border-top: 3px solid #8BA888; background: #fff;
+        box-shadow: 0 1px 3px rgba(28,25,23,0.08); padding: 0.65rem 0.75rem; cursor: pointer; touch-action: none;
+      }
+      .log-card.selected { border-color: #1c1917; box-shadow: 0 0 0 1px #1c1917, 0 8px 18px rgba(28,25,23,0.16); }
+      .log-card-head { display: flex; align-items: center; gap: 0.45rem; margin-bottom: 0.25rem; }
+      .log-card-name { flex: 1; min-width: 0; overflow: hidden; font-size: 0.75rem; font-weight: 700; color: #78716c; text-overflow: ellipsis; white-space: nowrap; }
+      .log-card-delete {
+        display: inline-flex; width: 1.75rem; height: 1.75rem; align-items: center; justify-content: center; border: 0; background: transparent;
+        color: #a8a29e; cursor: pointer;
+      }
+      .log-card-delete:hover, .log-card-delete:focus-visible { color: #b91c1c; outline: none; }
+      .log-card-value { font-size: 1.35rem; font-weight: 700; color: #1c1917; font-variant-numeric: tabular-nums; }
+      .log-card-meta { display: flex; align-items: center; gap: 0.45rem; margin-top: 0.35rem; font-size: 0.72rem; color: #a8a29e; }
+      @media (hover: none), (pointer: coarse) {
+        .log-entry-primary, .log-entry-secondary, .log-entry-danger, .log-entry-stepper, .log-entry-star, .log-entry-pick { min-height: 2.75rem; }
+      }
+
       /* Transform pan/zoom on .logger-world; hit-testing stays on the transformed nodes. */
       .logger-canvas {
         position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: grab;
@@ -4243,6 +4359,17 @@
                   <ul id="space-tag-names" class="space-tag-list"></ul>
                 </section>
               </div>
+            </div>
+          </div>
+
+
+          <div id="log-entry-modal" class="space-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="log-entry-title">
+            <div class="log-entry-sheet" data-log-sheet tabindex="-1">
+              <div class="log-entry-head">
+                <h2 id="log-entry-title" class="space-tag-sheet-title" data-log-title>Log entry</h2>
+                <button type="button" class="space-tag-sheet-close" data-log-close aria-label="Close" title="Close">✕</button>
+              </div>
+              <div class="log-entry-body" data-log-body></div>
             </div>
           </div>
 
