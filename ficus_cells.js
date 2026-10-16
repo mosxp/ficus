@@ -1,18 +1,19 @@
 /* FICUS Cells: Collection → memory palace.
  *
- * Maps live in the master backup as `memory_maps`:
- *   [{ id, title, cells: [{ id, coordinates: { x, y, z }, items: [Item] }] }]
+ * Palaces live in the master backup as `memory_palaces`:
+ *   [{ id, title, rootCellId, cells: { [cellId]: { id, items } } }]
  * Item: { id, type: sticker|drawing|door|ladder,
  *         position: { isoX, isoY, wall: floor|left|right },
- *         targetDotId?, targetCellId?, assetUrl? }
+ *         targetDotId?, linkedCellId?, direction?: up|down, assetUrl? }
+ * A door or ladder grows a new room the first time it is opened.
  * Wired from collection.js via window.FicusCells.
  */
 (function () {
   "use strict";
 
+  const SVG_NS = "http://www.w3.org/2000/svg";
   const WALLS = ["floor", "left", "right"];
   const TYPES = ["sticker", "drawing", "door", "ladder"];
-  const CELL = 64;
 
   const store = () => window.FicusStore;
   const isObject = (value) => Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -22,30 +23,20 @@
 
   const ui = {
     root: null,
-    main: null,
-    bar: null,
     stage: null,
-    titleInput: null,
-    mapSelect: null,
-    zSlider: null,
-    zReadout: null,
-    backBtn: null,
-    tools: null,
-    linkBtn: null,
-    removeBtn: null,
-    deleteBtn: null,
+    palaceSelect: null,
+    fab: null,
+    menu: null,
     fileInput: null,
     linkDialog: null,
     drawDialog: null,
-    drawCanvas: null,
-    maps: [],
-    mapId: null,
-    mode: "macro",
+    palaces: [],
+    palaceId: null,
     cellId: null,
-    z: 0,
     selectedItemId: null,
     preview: null,
     viewKey: "",
+    menuOpen: false,
   };
 
   function allDots() {
@@ -64,18 +55,14 @@
     return allDots().find((dot) => String(dot.id) === String(id)) || null;
   }
 
-  function activeMap() {
-    return ui.maps.find((map) => map.id === ui.mapId) || null;
+  function activePalace() {
+    return ui.palaces.find((palace) => palace.id === ui.palaceId) || null;
   }
 
   function activeCell() {
-    const map = activeMap();
-    if (!map) return null;
-    return map.cells.find((cell) => cell.id === ui.cellId) || null;
-  }
-
-  function findCell(map, id) {
-    return map?.cells.find((cell) => cell.id === id) || null;
+    const palace = activePalace();
+    if (!palace || !ui.cellId) return null;
+    return palace.cells[ui.cellId] || null;
   }
 
   /* ---------- Schema ---------- */
@@ -92,65 +79,86 @@
       type,
       position: {
         isoX: Number.isFinite(isoX) ? clamp(isoX, 0, 100) : 50,
-        isoY: Number.isFinite(isoY) ? clamp(isoY, 0, 100) : 50,
-        wall,
+        isoY: Number.isFinite(isoY) ? clamp(isoY, 0, 100) : (type === "door" ? 58 : 62),
+        wall: type === "ladder" ? "floor" : (type === "door" && wall === "floor" ? "left" : wall),
       },
     };
     if (typeof raw.targetDotId === "string" && raw.targetDotId) item.targetDotId = raw.targetDotId;
-    if (typeof raw.targetCellId === "string" && raw.targetCellId) item.targetCellId = raw.targetCellId;
+    const link = raw.linkedCellId || raw.targetCellId;
+    if (typeof link === "string" && link) item.linkedCellId = link;
+    if (type === "ladder") item.direction = raw.direction === "down" ? "down" : "up";
     if (typeof raw.assetUrl === "string" && raw.assetUrl.startsWith("data:image/")) item.assetUrl = raw.assetUrl;
     return item;
   }
 
-  function normalizeCell(raw) {
-    if (!isObject(raw) || typeof raw.id !== "string") return null;
-    const coordinates = isObject(raw.coordinates) ? raw.coordinates : {};
-    const axis = (value) => {
-      const n = Number(value);
-      return Number.isFinite(n) ? Math.round(n) : 0;
-    };
+  function normalizeCell(raw, fallbackId) {
+    const id = typeof raw?.id === "string" ? raw.id : (typeof fallbackId === "string" ? fallbackId : "");
+    if (!id) return null;
     return {
-      id: raw.id,
-      coordinates: { x: axis(coordinates.x), y: axis(coordinates.y), z: axis(coordinates.z) },
-      items: Array.isArray(raw.items) ? raw.items.map(normalizeItem).filter(Boolean) : [],
+      id,
+      items: Array.isArray(raw?.items) ? raw.items.map(normalizeItem).filter(Boolean) : [],
     };
   }
 
-  function normalizeMap(raw) {
+  function normalizePalace(raw) {
     if (!isObject(raw) || typeof raw.id !== "string") return null;
+    const cells = {};
+    if (Array.isArray(raw.cells)) {
+      for (const cell of raw.cells) {
+        const next = normalizeCell(cell);
+        if (next) cells[next.id] = next;
+      }
+    } else if (isObject(raw.cells)) {
+      for (const [key, cell] of Object.entries(raw.cells)) {
+        const next = normalizeCell(cell, key);
+        if (next) cells[next.id] = next;
+      }
+    }
+    let rootCellId = typeof raw.rootCellId === "string" ? raw.rootCellId : "";
+    if (!cells[rootCellId]) rootCellId = Object.keys(cells)[0] || "";
+    if (!rootCellId) {
+      rootCellId = newId("cell");
+      cells[rootCellId] = { id: rootCellId, items: [] };
+    }
     return {
       id: raw.id,
       title: String(raw.title || "").trim() || "Memory palace",
-      cells: Array.isArray(raw.cells) ? raw.cells.map(normalizeCell).filter(Boolean) : [],
+      rootCellId,
+      cells,
     };
   }
 
-  function loadMaps() {
+  function loadPalaces() {
     let list = [];
-    try { list = store()?.getMemoryMaps?.() || []; } catch (_) { list = []; }
-    ui.maps = (Array.isArray(list) ? list : []).map(normalizeMap).filter(Boolean);
-    if (ui.mapId && !ui.maps.some((map) => map.id === ui.mapId)) ui.mapId = ui.maps[0]?.id || null;
-    if (!ui.mapId && ui.maps[0]) ui.mapId = ui.maps[0].id;
+    try { list = store()?.getMemoryPalaces?.() || []; } catch (_) { list = []; }
+    ui.palaces = (Array.isArray(list) ? list : []).map(normalizePalace).filter(Boolean);
+    if (ui.palaceId && !ui.palaces.some((palace) => palace.id === ui.palaceId)) ui.palaceId = null;
+    if (!ui.palaceId && ui.palaces[0]) ui.palaceId = ui.palaces[0].id;
+    const palace = activePalace();
+    if (palace && !palace.cells[ui.cellId]) ui.cellId = palace.rootCellId;
   }
 
   function persist() {
-    try { store()?.saveMemoryMaps?.(ui.maps); } catch (err) { console.error("Couldn't save memory maps", err); }
+    try { store()?.saveMemoryPalaces?.(ui.palaces); } catch (err) { console.error("Couldn't save memory palaces", err); }
   }
 
-  function ensureCell(map, x, y, z) {
-    let cell = map.cells.find((entry) => entry.coordinates.x === x && entry.coordinates.y === y && entry.coordinates.z === z);
-    if (!cell) {
-      cell = { id: newId("cell"), coordinates: { x, y, z }, items: [] };
-      map.cells.push(cell);
-    }
-    return cell;
-  }
-
-  function neighborCoords(cell, wall) {
-    const { x, y, z } = cell.coordinates;
-    if (wall === "left") return { x: x - 1, y, z };
-    if (wall === "right") return { x, y: y - 1, z };
-    return { x, y, z };
+  function createPalace() {
+    const cellId = newId("cell");
+    const count = ui.palaces.length + 1;
+    const palace = {
+      id: newId("palace"),
+      title: count === 1 ? "Memory palace" : `Memory palace ${count}`,
+      rootCellId: cellId,
+      cells: { [cellId]: { id: cellId, items: [] } },
+    };
+    ui.palaces.push(palace);
+    ui.palaceId = palace.id;
+    ui.cellId = cellId;
+    ui.selectedItemId = null;
+    ui.preview?.close({ refocus: false });
+    persist();
+    renderStage();
+    syncChrome();
   }
 
   /* ---------- Preview ---------- */
@@ -190,6 +198,12 @@
   function closeDialogs() {
     ui.linkDialog?.close?.();
     ui.drawDialog?.classList.add("hidden");
+  }
+
+  function setMenu(open) {
+    ui.menuOpen = Boolean(open);
+    if (ui.menu) ui.menu.hidden = !ui.menuOpen;
+    ui.fab?.setAttribute("aria-expanded", ui.menuOpen ? "true" : "false");
   }
 
   function buildDrawDialog() {
@@ -238,22 +252,17 @@
         y: ((pt.y - rect.top) / (rect.height || 1)) * canvas.height,
       };
     };
-    const ink = () => {
-      ctx.lineWidth = 4;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.strokeStyle = "#1c1917";
-    };
-    const wipe = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-    };
+    const wipe = () => ctx.clearRect(0, 0, canvas.width, canvas.height);
     canvas.addEventListener("pointerdown", (event) => {
       if (event.button != null && event.button !== 0) return;
       event.preventDefault();
       canvas.setPointerCapture(event.pointerId);
       drawing = true;
       const pt = local(event);
-      ink();
+      ctx.lineWidth = 3;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      ctx.strokeStyle = "#000";
       ctx.beginPath();
       ctx.moveTo(pt.x, pt.y);
     });
@@ -273,19 +282,19 @@
     clearBtn.addEventListener("click", wipe);
     cancelBtn.addEventListener("click", () => dialog.classList.add("hidden"));
     saveBtn.addEventListener("click", () => {
-      const blank = !canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data.some((value, index) => index % 4 === 3 && value !== 0);
+      const blank = !ctx.getImageData(0, 0, canvas.width, canvas.height).data.some((value, index) => index % 4 === 3 && value !== 0);
       dialog.classList.add("hidden");
       if (blank) return;
       addItem("drawing", { assetUrl: canvas.toDataURL("image/png") });
     });
     dialog.wipe = wipe;
-    ui.drawCanvas = canvas;
     ui.drawDialog = dialog;
     return dialog;
   }
 
   function openDrawDialog() {
     if (!activeCell()) return;
+    setMenu(false);
     ui.drawDialog?.wipe?.();
     ui.drawDialog?.classList.remove("hidden");
   }
@@ -354,7 +363,6 @@
             persist();
             ui.selectedItemId = item.id;
             renderStage();
-            syncSelectionChrome();
           }
           dialog.classList.add("hidden");
         });
@@ -369,7 +377,6 @@
         delete item.targetDotId;
         persist();
         renderStage();
-        syncSelectionChrome();
       }
       dialog.classList.add("hidden");
     });
@@ -397,17 +404,16 @@
 
   function openLinkDialog(item) {
     if (!item) return;
+    setMenu(false);
     ui.selectedItemId = item.id;
-    syncSelectionChrome();
     ui.linkDialog?.openFor(item.id);
   }
 
   /* ---------- Items ---------- */
 
   function addItem(type, extra = {}) {
-    const map = activeMap();
     const cell = activeCell();
-    if (!map || !cell) return null;
+    if (!cell) return null;
     const item = {
       id: newId("item"),
       type,
@@ -417,21 +423,16 @@
         wall: extra.wall || (type === "door" ? "left" : "floor"),
       },
     };
-    if (extra.assetUrl) item.assetUrl = extra.assetUrl;
-    if (type === "door") {
-      const spot = neighborCoords(cell, item.position.wall);
-      item.targetCellId = ensureCell(map, spot.x, spot.y, spot.z).id;
-    } else if (type === "ladder") {
-      const dir = extra.dir === "down" ? -1 : 1;
-      const { x, y, z } = cell.coordinates;
-      item.targetCellId = ensureCell(map, x, y, z + dir).id;
+    if (type === "ladder") {
       item.position.wall = "floor";
+      item.direction = extra.direction === "down" ? "down" : "up";
     }
+    if (type === "door" && item.position.wall === "floor") item.position.wall = "left";
+    if (extra.assetUrl) item.assetUrl = extra.assetUrl;
     cell.items.push(item);
     ui.selectedItemId = item.id;
     persist();
     renderStage();
-    syncSelectionChrome();
     return item;
   }
 
@@ -444,16 +445,36 @@
     ui.preview?.close({ refocus: false });
     persist();
     renderStage();
-    syncSelectionChrome();
   }
 
-  function retargetDoor(item) {
-    const map = activeMap();
-    const cell = activeCell();
-    if (!map || !cell || item.type !== "door") return;
-    if (item.position.wall === "floor") item.position.wall = "left";
-    const spot = neighborCoords(cell, item.position.wall);
-    item.targetCellId = ensureCell(map, spot.x, spot.y, spot.z).id;
+  function returnPortal(item, backToId) {
+    const door = item.type === "door";
+    const back = {
+      id: newId("item"),
+      type: door ? "door" : "ladder",
+      position: {
+        isoX: 50,
+        isoY: door ? 58 : 38,
+        wall: door ? (item.position.wall === "right" ? "left" : "right") : "floor",
+      },
+      linkedCellId: backToId,
+    };
+    if (!door) back.direction = item.direction === "down" ? "up" : "down";
+    return back;
+  }
+
+  function openPortal(item) {
+    const palace = activePalace();
+    const here = ui.cellId;
+    if (!palace || !here) return;
+    let nextId = item.linkedCellId;
+    if (!nextId || !palace.cells[nextId]) {
+      nextId = newId("cell");
+      palace.cells[nextId] = { id: nextId, items: [returnPortal(item, here)] };
+      item.linkedCellId = nextId;
+      persist();
+    }
+    enterCell(nextId);
   }
 
   function localPercent(surface, clientX, clientY) {
@@ -490,6 +511,35 @@
     node.style.top = `${item.position.isoY}%`;
   }
 
+  function portalSvg(kind) {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", kind === "door" ? "0 0 40 56" : "0 0 36 64");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "#000");
+    svg.setAttribute("stroke-width", "1.5");
+    svg.setAttribute("stroke-linecap", "square");
+    svg.setAttribute("stroke-linejoin", "miter");
+    svg.setAttribute("aria-hidden", "true");
+    const path = document.createElementNS(SVG_NS, "path");
+    if (kind === "door") {
+      path.setAttribute("d", "M6 4h28v48H6zM20 4v48");
+      const knob = document.createElementNS(SVG_NS, "circle");
+      knob.setAttribute("cx", "26");
+      knob.setAttribute("cy", "30");
+      knob.setAttribute("r", "1.4");
+      knob.setAttribute("fill", "#000");
+      knob.setAttribute("stroke", "none");
+      svg.append(path, knob);
+      return svg;
+    }
+    const up = kind === "ladder-up";
+    path.setAttribute("d", up
+      ? "M8 14v46M28 14v46M8 24h20M8 34h20M8 44h20M8 54h20M18 14l0-6 6 6"
+      : "M8 4v46M28 4v46M8 14h20M8 24h20M8 34h20M8 44h20M12 50l6 6 6-6");
+    svg.append(path);
+    return svg;
+  }
+
   function itemFace(item) {
     const face = document.createElement("span");
     face.className = `fcell-glyph fcell-glyph-${item.type}`;
@@ -501,14 +551,8 @@
       face.append(img);
       return face;
     }
-    if (item.type === "door") {
-      face.textContent = "Door";
-      return face;
-    }
-    const target = findCell(activeMap(), item.targetCellId);
-    const here = activeCell();
-    const up = target && here ? target.coordinates.z >= here.coordinates.z : true;
-    face.textContent = up ? "Ladder up" : "Ladder down";
+    const kind = item.type === "door" ? "door" : (item.direction === "down" ? "ladder-down" : "ladder-up");
+    face.append(portalSvg(kind));
     return face;
   }
 
@@ -522,6 +566,7 @@
       const start = pointOf(event);
       const snapshot = { ...item.position };
       let dragging = false;
+      ui.selectedItemId = item.id;
       const onMove = (move) => {
         if (move.pointerId !== pointerId) return;
         const pt = pointOf(move);
@@ -553,14 +598,11 @@
           return;
         }
         if (item.type === "ladder") item.position.wall = "floor";
-        retargetDoor(item);
-        if (node.parentElement?.dataset.wall !== item.position.wall) {
-          renderStage();
-        }
+        if (item.type === "door" && item.position.wall === "floor") item.position.wall = snapshot.wall === "right" ? "right" : "left";
         persist();
         ui.selectedItemId = item.id;
-        syncSelectionChrome();
-        if (snapshot.wall !== item.position.wall) renderStage();
+        if (node.parentElement?.dataset.wall !== item.position.wall || snapshot.wall !== item.position.wall) renderStage();
+        else markSelected();
       };
       node.addEventListener("pointermove", onMove);
       node.addEventListener("pointerup", onUp);
@@ -572,17 +614,23 @@
     });
   }
 
-  function activateItem(item) {
-    ui.selectedItemId = item.id;
-    syncSelectionChrome();
+  function markSelected() {
     ui.stage?.querySelectorAll(".fcell-item").forEach((node) => {
-      const on = node.dataset.itemId === item.id;
+      const on = node.dataset.itemId === ui.selectedItemId;
       node.classList.toggle("is-selected", on);
       if (on) node.setAttribute("aria-current", "true");
       else node.removeAttribute("aria-current");
     });
-    if ((item.type === "door" || item.type === "ladder") && item.targetCellId) {
-      enterCell(item.targetCellId);
+    ui.menu?.querySelectorAll("[data-needs-item]").forEach((button) => {
+      button.disabled = !selectedItem();
+    });
+  }
+
+  function activateItem(item) {
+    ui.selectedItemId = item.id;
+    markSelected();
+    if (item.type === "door" || item.type === "ladder") {
+      openPortal(item);
       return;
     }
     if (item.targetDotId) {
@@ -596,33 +644,17 @@
     node.className = "fcell-item";
     node.tabIndex = 0;
     node.setAttribute("role", "button");
-    if (item.id === ui.selectedItemId) {
-      node.classList.add("is-selected");
-      node.setAttribute("aria-current", "true");
-    }
     node.dataset.itemId = item.id;
     const dot = dotById(item.targetDotId);
     const label = item.type === "door"
-      ? "Door to the next room"
+      ? (item.linkedCellId ? "Open the next room" : "Open a new room")
       : item.type === "ladder"
-        ? "Ladder to another level"
+        ? (item.direction === "down" ? "Ladder down" : "Ladder up")
         : (dot?.title ? `Open ${dot.title}` : item.type);
     node.setAttribute("aria-label", label);
     node.title = dot?.title || label;
     placeNode(node, item);
     node.append(itemFace(item));
-    const link = document.createElement("button");
-    link.type = "button";
-    link.className = "fcell-item-link";
-    link.textContent = "Link";
-    link.title = "Attach a dot";
-    link.setAttribute("aria-label", "Attach a dot");
-    link.addEventListener("pointerdown", (event) => event.stopPropagation());
-    link.addEventListener("click", (event) => {
-      event.stopPropagation();
-      openLinkDialog(item);
-    });
-    node.append(link);
     if (item.targetDotId) {
       const mark = document.createElement("span");
       mark.className = "fcell-link-mark";
@@ -656,26 +688,31 @@
     return surface;
   }
 
-  /* ---------- Views ---------- */
-
-  function renderMicro() {
-    const cell = activeCell();
+  function renderRoom() {
     const scene = document.createElement("div");
     scene.className = "fcells-scene";
-    if (!cell) {
-      const empty = document.createElement("p");
+    const palace = activePalace();
+    const cell = activeCell();
+    if (!palace || !cell) {
+      const empty = document.createElement("div");
       empty.className = "fcells-empty";
-      empty.textContent = "This room is missing.";
+      const note = document.createElement("p");
+      note.textContent = "Start from a root room.";
+      const create = document.createElement("button");
+      create.type = "button";
+      create.className = "fcells-btn is-primary";
+      create.textContent = "New palace";
+      create.addEventListener("click", createPalace);
+      empty.append(note, create);
       scene.append(empty);
       return scene;
     }
     const room = document.createElement("div");
     room.className = "fcells-room";
+    room.setAttribute("aria-label", palace.title);
     const floor = makeSurface("floor", "Floor");
     const left = makeSurface("left", "Left wall");
     const right = makeSurface("right", "Right wall");
-    const { x, y, z } = cell.coordinates;
-    room.setAttribute("aria-label", `Room ${x}, ${y}, level ${z}`);
     for (const item of cell.items) {
       const host = item.position.wall === "left" ? left : item.position.wall === "right" ? right : floor;
       host.append(renderItem(item));
@@ -685,205 +722,31 @@
     return scene;
   }
 
-  function renderMacro() {
-    const map = activeMap();
-    const scene = document.createElement("div");
-    scene.className = "fcells-scene";
-    if (!map) {
-      const empty = document.createElement("div");
-      empty.className = "fcells-empty";
-      const note = document.createElement("p");
-      note.textContent = "No memory maps yet.";
-      const create = document.createElement("button");
-      create.type = "button";
-      create.className = "fcells-btn is-primary";
-      create.textContent = "Create a memory map";
-      create.addEventListener("click", createMap);
-      empty.append(note, create);
-      scene.append(empty);
-      return scene;
-    }
-    const onLevel = map.cells.filter((cell) => cell.coordinates.z === ui.z);
-    const xs = onLevel.map((cell) => cell.coordinates.x);
-    const ys = onLevel.map((cell) => cell.coordinates.y);
-    const minX = Math.min(-1, ...xs) - 1;
-    const maxX = Math.max(1, ...xs) + 1;
-    const minY = Math.min(-1, ...ys) - 1;
-    const maxY = Math.max(1, ...ys) + 1;
-    const plane = document.createElement("div");
-    plane.className = "fcells-plane";
-    plane.style.width = `${(maxX - minX + 1) * CELL}px`;
-    plane.style.height = `${(maxY - minY + 1) * CELL}px`;
-    plane.setAttribute("role", "list");
-    plane.setAttribute("aria-label", `Level ${ui.z}`);
-    for (let x = minX; x <= maxX; x += 1) {
-      for (let y = minY; y <= maxY; y += 1) {
-        const cell = onLevel.find((entry) => entry.coordinates.x === x && entry.coordinates.y === y);
-        const left = (x - minX) * CELL;
-        const top = (y - minY) * CELL;
-        if (!cell) {
-          const slot = document.createElement("button");
-          slot.type = "button";
-          slot.className = "fcell-slot";
-          slot.style.left = `${left}px`;
-          slot.style.top = `${top}px`;
-          slot.setAttribute("aria-label", `Add a room at ${x}, ${y}, level ${ui.z}`);
-          slot.title = "Add a room";
-          slot.addEventListener("click", () => {
-            const made = ensureCell(map, x, y, ui.z);
-            ui.cellId = made.id;
-            persist();
-            renderStage();
-            syncChrome();
-          });
-          plane.append(slot);
-          continue;
-        }
-        const cube = document.createElement("button");
-        cube.type = "button";
-        cube.className = "fcell-cube";
-        cube.style.left = `${left}px`;
-        cube.style.top = `${top}px`;
-        cube.setAttribute("role", "listitem");
-        const count = cell.items.length;
-        cube.setAttribute("aria-label", `Room ${x}, ${y}, level ${ui.z}, ${count} ${count === 1 ? "item" : "items"}`);
-        cube.title = "Open room";
-        for (const face of ["top", "left", "right"]) {
-          const span = document.createElement("span");
-          span.className = `fcell-face fcell-face-${face}`;
-          cube.append(span);
-        }
-        if (count) {
-          const badge = document.createElement("span");
-          badge.className = "fcell-count";
-          badge.textContent = String(count);
-          cube.append(badge);
-        }
-        cube.addEventListener("click", () => enterCell(cell.id));
-        plane.append(cube);
-      }
-    }
-    scene.append(plane);
-    return scene;
-  }
-
   function renderStage() {
     if (!ui.stage) return;
-    const key = `${ui.mapId}:${ui.mode}:${ui.cellId}:${ui.z}`;
+    const key = `${ui.palaceId}:${ui.cellId}`;
     const switched = key !== ui.viewKey;
     ui.viewKey = key;
-    const next = ui.mode === "micro" ? renderMicro() : renderMacro();
-    ui.stage.replaceChildren(next);
+    const next = renderRoom();
+    const current = ui.stage.querySelector(":scope > .fcells-scene");
+    if (current) current.replaceWith(next);
+    else ui.stage.prepend(next);
     if (switched && !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
       next.classList.add("is-entering");
       requestAnimationFrame(() => next.classList.remove("is-entering"));
     }
+    markSelected();
+    if (ui.fab) ui.fab.hidden = !activeCell();
   }
 
   function enterCell(id) {
-    const map = activeMap();
-    const cell = findCell(map, id);
-    if (!cell) return;
-    ui.mode = "micro";
-    ui.cellId = cell.id;
-    ui.z = cell.coordinates.z;
+    const palace = activePalace();
+    if (!palace?.cells[id]) return;
+    ui.cellId = id;
     ui.selectedItemId = null;
     ui.preview?.close({ refocus: false });
+    setMenu(false);
     renderStage();
-    syncChrome();
-  }
-
-  function showMacro() {
-    ui.mode = "macro";
-    ui.selectedItemId = null;
-    ui.preview?.close({ refocus: false });
-    renderStage();
-    syncChrome();
-  }
-
-  /* ---------- Chrome ---------- */
-
-  function zBounds(map) {
-    const levels = map?.cells.map((cell) => cell.coordinates.z) || [0];
-    return { min: Math.min(0, ...levels) - 1, max: Math.max(0, ...levels) + 1 };
-  }
-
-  function syncSelectionChrome() {
-    const item = ui.mode === "micro" ? selectedItem() : null;
-    if (ui.linkBtn) ui.linkBtn.hidden = !item || item.type === "door" || item.type === "ladder";
-    if (ui.removeBtn) ui.removeBtn.hidden = !item;
-    if (ui.tools) ui.tools.hidden = ui.mode !== "micro" || !activeCell();
-  }
-
-  function syncChrome() {
-    const map = activeMap();
-    const cell = activeCell();
-    if (ui.titleInput && document.activeElement !== ui.titleInput) ui.titleInput.value = map?.title || "";
-    if (ui.titleInput) ui.titleInput.hidden = !map;
-    if (ui.deleteBtn) ui.deleteBtn.hidden = !map;
-    if (ui.mapSelect) {
-      ui.mapSelect.hidden = ui.maps.length < 2;
-      if (ui.maps.length >= 2) {
-        ui.mapSelect.replaceChildren(...ui.maps.map((entry) => {
-          const option = document.createElement("option");
-          option.value = entry.id;
-          option.textContent = entry.title;
-          return option;
-        }));
-        ui.mapSelect.value = map?.id || "";
-      }
-    }
-    if (ui.backBtn) ui.backBtn.hidden = ui.mode !== "micro";
-    const bounds = zBounds(map);
-    if (ui.zSlider) {
-      ui.zSlider.hidden = !map || ui.mode !== "macro";
-      ui.zSlider.min = String(bounds.min);
-      ui.zSlider.max = String(bounds.max);
-      ui.zSlider.value = String(clamp(ui.z, bounds.min, bounds.max));
-      ui.z = Number(ui.zSlider.value);
-    }
-    if (ui.zReadout) {
-      ui.zReadout.hidden = !map;
-      if (ui.mode === "micro" && cell) {
-        ui.zReadout.textContent = `${cell.coordinates.x}, ${cell.coordinates.y} · level ${cell.coordinates.z}`;
-      } else {
-        ui.zReadout.textContent = `Level ${ui.z}`;
-      }
-    }
-    syncSelectionChrome();
-  }
-
-  function createMap() {
-    const map = {
-      id: newId("map"),
-      title: "Memory palace",
-      cells: [{ id: newId("cell"), coordinates: { x: 0, y: 0, z: 0 }, items: [] }],
-    };
-    ui.maps.push(map);
-    ui.mapId = map.id;
-    ui.mode = "macro";
-    ui.cellId = map.cells[0].id;
-    ui.z = 0;
-    persist();
-    renderStage();
-    syncChrome();
-    ui.titleInput?.focus();
-    ui.titleInput?.select();
-  }
-
-  function deleteMap() {
-    const map = activeMap();
-    if (!map) return;
-    if (!window.confirm(`Delete “${map.title}”? Its rooms stay out of the backup.`)) return;
-    ui.maps = ui.maps.filter((entry) => entry.id !== map.id);
-    ui.mapId = ui.maps[0]?.id || null;
-    ui.mode = "macro";
-    ui.cellId = null;
-    ui.selectedItemId = null;
-    ui.preview?.close({ refocus: false });
-    persist();
-    renderStage();
-    syncChrome();
   }
 
   function readSticker(file) {
@@ -905,6 +768,78 @@
     reader.readAsDataURL(file);
   }
 
+  function runMenuAction(action) {
+    setMenu(false);
+    if (action === "sticker") {
+      ui.fileInput?.click();
+      return;
+    }
+    if (action === "draw") {
+      openDrawDialog();
+      return;
+    }
+    if (action === "door-left") addItem("door", { wall: "left" });
+    else if (action === "door-right") addItem("door", { wall: "right" });
+    else if (action === "ladder-up") addItem("ladder", { direction: "up" });
+    else if (action === "ladder-down") addItem("ladder", { direction: "down" });
+    else if (action === "link") openLinkDialog(selectedItem());
+    else if (action === "remove") removeSelected();
+  }
+
+  function syncChrome() {
+    const select = ui.palaceSelect;
+    if (!select) return;
+    const current = select.value;
+    select.replaceChildren();
+    for (const palace of ui.palaces) {
+      const option = document.createElement("option");
+      option.value = palace.id;
+      option.textContent = palace.title;
+      select.append(option);
+    }
+    const create = document.createElement("option");
+    create.value = "__new__";
+    create.textContent = "New palace";
+    select.append(create);
+    const palace = activePalace();
+    if (palace && document.activeElement !== select) select.value = palace.id;
+    else if (!palace) select.value = "__new__";
+    else if (current && [...select.options].some((option) => option.value === current)) select.value = current;
+    if (ui.fab) ui.fab.hidden = !activeCell();
+  }
+
+  function buildMenu() {
+    const menu = document.createElement("div");
+    menu.className = "fcells-fab-menu";
+    menu.hidden = true;
+    menu.setAttribute("role", "menu");
+    menu.setAttribute("aria-label", "Add to this room");
+    const groups = [
+      ["Item", [["sticker", "Sticker"], ["draw", "Draw"]]],
+      ["Door", [["door-left", "Left wall"], ["door-right", "Right wall"]]],
+      ["Ladder", [["ladder-up", "Up"], ["ladder-down", "Down"]]],
+      ["Dot", [["link", "Link dot", true], ["remove", "Remove", true]]],
+    ];
+    for (const [label, actions] of groups) {
+      const head = document.createElement("p");
+      head.className = "fcells-menu-label";
+      head.textContent = label;
+      menu.append(head);
+      for (const [action, text, needsItem] of actions) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "fcells-menu-item";
+        button.setAttribute("role", "menuitem");
+        button.dataset.action = action;
+        button.textContent = text;
+        if (needsItem) button.dataset.needsItem = "true";
+        button.addEventListener("click", () => runMenuAction(action));
+        menu.append(button);
+      }
+    }
+    return menu;
+  }
+
   function buildPage() {
     const root = document.createElement("div");
     root.className = "fcells";
@@ -912,75 +847,36 @@
     main.className = "fcells-main";
     const bar = document.createElement("header");
     bar.className = "fcells-bar";
-
-    const title = document.createElement("h1");
-    title.className = "fcells-heading";
-    title.textContent = "Cells";
-
-    const titleInput = document.createElement("input");
-    titleInput.className = "fcells-title";
-    titleInput.type = "text";
-    titleInput.maxLength = 80;
-    titleInput.setAttribute("aria-label", "Map title");
-    titleInput.addEventListener("change", () => {
-      const map = activeMap();
-      if (!map) return;
-      map.title = titleInput.value.trim() || "Memory palace";
-      titleInput.value = map.title;
-      persist();
-      syncChrome();
-    });
-
-    const mapSelect = document.createElement("select");
-    mapSelect.className = "fcells-select";
-    mapSelect.setAttribute("aria-label", "Memory map");
-    mapSelect.addEventListener("change", () => {
-      ui.mapId = mapSelect.value;
-      ui.mode = "macro";
-      ui.cellId = activeMap()?.cells[0]?.id || null;
-      ui.z = activeMap()?.cells[0]?.coordinates.z || 0;
+    const select = document.createElement("select");
+    select.className = "fcells-select";
+    select.setAttribute("aria-label", "Memory palace");
+    select.addEventListener("change", () => {
+      if (select.value === "__new__") {
+        createPalace();
+        return;
+      }
+      ui.palaceId = select.value;
+      ui.cellId = activePalace()?.rootCellId || null;
       ui.selectedItemId = null;
       ui.preview?.close({ refocus: false });
+      setMenu(false);
       renderStage();
       syncChrome();
     });
 
-    const newBtn = document.createElement("button");
-    newBtn.type = "button";
-    newBtn.className = "fcells-btn";
-    newBtn.textContent = "New map";
-    newBtn.addEventListener("click", createMap);
-
-    const deleteBtn = document.createElement("button");
-    deleteBtn.type = "button";
-    deleteBtn.className = "fcells-btn";
-    deleteBtn.textContent = "Delete map";
-    deleteBtn.addEventListener("click", deleteMap);
-    ui.deleteBtn = deleteBtn;
-
-    const backBtn = document.createElement("button");
-    backBtn.type = "button";
-    backBtn.className = "fcells-btn";
-    backBtn.textContent = "Map";
-    backBtn.addEventListener("click", showMacro);
-
-    const zReadout = document.createElement("span");
-    zReadout.className = "fcells-level";
-
-    const zSlider = document.createElement("input");
-    zSlider.type = "range";
-    zSlider.className = "fcells-z";
-    zSlider.step = "1";
-    zSlider.setAttribute("aria-label", "Z level");
-    zSlider.addEventListener("input", () => {
-      ui.z = Number(zSlider.value);
-      ui.mode = "macro";
-      renderStage();
-      syncChrome();
-    });
-
-    const tools = document.createElement("div");
-    tools.className = "fcells-tools";
+    const stage = document.createElement("div");
+    stage.className = "fcells-stage";
+    const fab = document.createElement("button");
+    fab.type = "button";
+    fab.className = "fcells-fab";
+    fab.textContent = "+";
+    fab.setAttribute("aria-label", "Add");
+    fab.setAttribute("aria-haspopup", "menu");
+    fab.setAttribute("aria-expanded", "false");
+    fab.setAttribute("aria-controls", "fcells-add-menu");
+    const menu = buildMenu();
+    menu.id = "fcells-add-menu";
+    fab.addEventListener("click", () => setMenu(!ui.menuOpen));
 
     const fileInput = document.createElement("input");
     fileInput.type = "file";
@@ -992,71 +888,21 @@
       if (file) readSticker(file);
     });
 
-    const stickerBtn = document.createElement("button");
-    stickerBtn.type = "button";
-    stickerBtn.className = "fcells-btn";
-    stickerBtn.textContent = "Sticker";
-    stickerBtn.addEventListener("click", () => fileInput.click());
-
-    const drawBtn = document.createElement("button");
-    drawBtn.type = "button";
-    drawBtn.className = "fcells-btn";
-    drawBtn.textContent = "Draw";
-    drawBtn.addEventListener("click", openDrawDialog);
-
-    const doorBtn = document.createElement("button");
-    doorBtn.type = "button";
-    doorBtn.className = "fcells-btn";
-    doorBtn.textContent = "Door";
-    doorBtn.title = "Door on the left wall, to the room beside it";
-    doorBtn.addEventListener("click", () => addItem("door", { wall: "left" }));
-
-    const upBtn = document.createElement("button");
-    upBtn.type = "button";
-    upBtn.className = "fcells-btn";
-    upBtn.textContent = "Ladder up";
-    upBtn.title = "Ladder on the floor to the level above";
-    upBtn.addEventListener("click", () => addItem("ladder", { dir: "up", wall: "floor" }));
-
-    const downBtn = document.createElement("button");
-    downBtn.type = "button";
-    downBtn.className = "fcells-btn";
-    downBtn.textContent = "Ladder down";
-    downBtn.title = "Ladder on the floor to the level below";
-    downBtn.addEventListener("click", () => addItem("ladder", { dir: "down", wall: "floor" }));
-
-    const linkBtn = document.createElement("button");
-    linkBtn.type = "button";
-    linkBtn.className = "fcells-btn";
-    linkBtn.textContent = "Link dot";
-    linkBtn.addEventListener("click", () => openLinkDialog(selectedItem()));
-
-    const removeBtn = document.createElement("button");
-    removeBtn.type = "button";
-    removeBtn.className = "fcells-btn";
-    removeBtn.textContent = "Remove";
-    removeBtn.addEventListener("click", removeSelected);
-
-    tools.append(stickerBtn, drawBtn, doorBtn, upBtn, downBtn, linkBtn, removeBtn, fileInput);
-
-    bar.append(title, titleInput, mapSelect, newBtn, deleteBtn, backBtn, zReadout, zSlider, tools);
-    const stage = document.createElement("div");
-    stage.className = "fcells-stage";
+    bar.append(select);
+    stage.append(fab, menu);
     main.append(bar, stage);
-    root.append(main, buildDrawDialog(), buildLinkDialog());
+    root.append(main, buildDrawDialog(), buildLinkDialog(), fileInput);
+    root.addEventListener("pointerdown", (event) => {
+      if (!ui.menuOpen) return;
+      if (fab.contains(event.target) || menu.contains(event.target)) return;
+      setMenu(false);
+    });
 
     ui.root = root;
-    ui.main = main;
-    ui.bar = bar;
     ui.stage = stage;
-    ui.titleInput = titleInput;
-    ui.mapSelect = mapSelect;
-    ui.zSlider = zSlider;
-    ui.zReadout = zReadout;
-    ui.backBtn = backBtn;
-    ui.tools = tools;
-    ui.linkBtn = linkBtn;
-    ui.removeBtn = removeBtn;
+    ui.palaceSelect = select;
+    ui.fab = fab;
+    ui.menu = menu;
     ui.fileInput = fileInput;
     ensurePreview();
   }
@@ -1064,8 +910,15 @@
   function onKey(event) {
     if (!document.getElementById("collection-content")?.classList.contains("is-cells")) return;
     if (event.key === "Escape") {
-      const dialogOpen = ui.linkDialog && !ui.linkDialog.classList.contains("hidden")
-        || ui.drawDialog && !ui.drawDialog.classList.contains("hidden");
+      if (ui.menuOpen) {
+        event.preventDefault();
+        event.stopPropagation();
+        setMenu(false);
+        ui.fab?.focus();
+        return;
+      }
+      const dialogOpen = (ui.linkDialog && !ui.linkDialog.classList.contains("hidden"))
+        || (ui.drawDialog && !ui.drawDialog.classList.contains("hidden"));
       if (dialogOpen) {
         event.preventDefault();
         event.stopPropagation();
@@ -1088,14 +941,14 @@
       document.addEventListener("keydown", onKey, true);
     }
     if (!host.contains(ui.root)) host.replaceChildren(ui.root);
-    loadMaps();
-    if (ui.mode === "micro" && !activeCell()) ui.mode = "macro";
+    loadPalaces();
     ensurePreview();
     renderStage();
     syncChrome();
   }
 
   function hide() {
+    setMenu(false);
     closeDialogs();
     ui.preview?.close({ refocus: false });
   }
