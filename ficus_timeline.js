@@ -21,12 +21,15 @@
 
   const ui = {
     root: null,
+    main: null,
     modeGroup: null,
     rangeLabel: null,
     stage: null,
+    previewPanel: null,
     mode: "week",
     anchor: startOfDay(new Date()),
     items: [],
+    selectedTimelineItem: null,
   };
 
   /* ---------- Dates ---------- */
@@ -353,12 +356,73 @@
     return addMonths(anchor, dir);
   }
 
-  /* ---------- Open parent ---------- */
+  /* ---------- Selection / preview ---------- */
 
-  function openParent(dotId) {
+  function openInSpace(dotId) {
     if (!dotId || typeof window.showView !== "function") return;
     window.showView("space");
     window.FicusSpace?.openDot?.(dotId);
+  }
+
+  function setSelectedTimelineItem(item) {
+    ui.selectedTimelineItem = item || null;
+    const dotId = item?.parentDotId || null;
+    if (dotId) ui.previewPanel?.open(dotId);
+    else ui.previewPanel?.close({ refocus: false });
+    markSelected();
+  }
+
+  function markSelected() {
+    const id = ui.selectedTimelineItem?.id || "";
+    ui.stage?.querySelectorAll("[data-ftime-item]").forEach((node) => {
+      if (node.dataset.ftimeItem === id) node.setAttribute("aria-current", "true");
+      else node.removeAttribute("aria-current");
+    });
+  }
+
+  function itemFromTarget(node) {
+    const pick = node?.closest?.("[data-ftime-item]");
+    if (!pick) return null;
+    const id = pick.dataset.ftimeItem;
+    return ui.items.find((row) => row.id === id) || null;
+  }
+
+  function ensurePreviewPanel() {
+    if (ui.previewPanel || !ui.root) return;
+    const create = window.FicusDotPreview?.create;
+    if (typeof create !== "function") return;
+    const byId = () => {
+      const dots = store()?.getDots?.() || [];
+      return new Map(dots.map((dot) => [dot.id, dot]));
+    };
+    ui.previewPanel = create({
+      host: ui.root,
+      reservedLeft: 0,
+      getDot: (id) => byId().get(id) || null,
+      getDots: () => store()?.getDots?.() || [],
+      childrenOf: (dot) => {
+        const map = byId();
+        return (dot.children || []).map((id) => map.get(id)).filter(Boolean);
+      },
+      openInSpace,
+      onOpenDot: (id) => {
+        ui.selectedTimelineItem = ui.selectedTimelineItem && ui.selectedTimelineItem.parentDotId === id
+          ? ui.selectedTimelineItem
+          : { id: `dot:${id}`, parentDotId: id, kind: "event", title: "" };
+        ui.previewPanel?.open(id);
+        markSelected();
+      },
+      isActive: () => Boolean(document.getElementById("collection-content")?.classList.contains("is-time")),
+      onChange: (id) => {
+        if (!id) ui.selectedTimelineItem = null;
+        markSelected();
+      },
+      onClosed: () => {
+        ui.selectedTimelineItem = null;
+        markSelected();
+      },
+    });
+    ui.root.append(ui.previewPanel.el);
   }
 
   /* ---------- Shell ---------- */
@@ -367,20 +431,22 @@
     const root = document.createElement("div");
     root.className = "ftime";
     root.innerHTML = `
-      <header class="ftime-toolbar">
-        <div class="ftime-toolbar-start">
-          <h1 id="collection-title" class="ftime-heading">Time</h1>
-          <div class="ftime-toolbar-divider" aria-hidden="true"></div>
-          <div class="ftime-modes" role="tablist" aria-label="Calendar mode"></div>
-        </div>
-        <div class="ftime-nav" aria-label="Date navigation">
-          <button type="button" class="ftime-btn" data-ftime-nav="prev" aria-label="Previous">‹ Prev</button>
-          <button type="button" class="ftime-btn is-quiet" data-ftime-nav="today">Today</button>
-          <button type="button" class="ftime-btn" data-ftime-nav="next" aria-label="Next">Next ›</button>
-          <p class="ftime-range" data-ftime-range></p>
-        </div>
-      </header>
-      <div class="ftime-stage" data-ftime-stage tabindex="-1"></div>`;
+      <div class="ftime-main">
+        <header class="ftime-toolbar">
+          <div class="ftime-toolbar-start">
+            <h1 id="collection-title" class="ftime-heading">Time</h1>
+            <div class="ftime-toolbar-divider" aria-hidden="true"></div>
+            <div class="ftime-modes" role="tablist" aria-label="Calendar mode"></div>
+          </div>
+          <div class="ftime-nav" aria-label="Date navigation">
+            <button type="button" class="ftime-btn" data-ftime-nav="prev" aria-label="Previous">‹ Prev</button>
+            <button type="button" class="ftime-btn is-quiet" data-ftime-nav="today">Today</button>
+            <button type="button" class="ftime-btn" data-ftime-nav="next" aria-label="Next">Next ›</button>
+            <p class="ftime-range" data-ftime-range></p>
+          </div>
+        </header>
+        <div class="ftime-stage" data-ftime-stage tabindex="-1"></div>
+      </div>`;
 
     const modeGroup = root.querySelector(".ftime-modes");
     for (const mode of MODES) {
@@ -396,21 +462,24 @@
     root.addEventListener("click", onRootClick);
     root.addEventListener("keydown", (event) => {
       if (event.key === "Enter" || event.key === " ") {
-        const card = event.target.closest("[data-ftime-dot]");
-        if (card && root.contains(card)) {
+        const card = event.target.closest("[data-ftime-item]");
+        if (card && root.contains(card) && !card.closest(".ctags-preview")) {
           event.preventDefault();
-          openParent(card.dataset.ftimeDot);
+          setSelectedTimelineItem(itemFromTarget(card));
         }
       }
     });
 
     ui.root = root;
+    ui.main = root.querySelector(".ftime-main");
     ui.modeGroup = modeGroup;
     ui.rangeLabel = root.querySelector("[data-ftime-range]");
     ui.stage = root.querySelector("[data-ftime-stage]");
+    ensurePreviewPanel();
   }
 
   function onRootClick(event) {
+    if (event.target.closest(".ctags-preview")) return;
     const modeBtn = event.target.closest("[data-ftime-mode]");
     if (modeBtn) {
       setMode(modeBtn.dataset.ftimeMode);
@@ -430,9 +499,9 @@
       if (ui.mode === "timeline") scrollTimelineToDay(dayKey(ui.anchor));
       return;
     }
-    const pick = event.target.closest("[data-ftime-dot]");
+    const pick = event.target.closest("[data-ftime-item]");
     if (pick) {
-      openParent(pick.dataset.ftimeDot);
+      setSelectedTimelineItem(itemFromTarget(pick));
     }
   }
 
@@ -453,7 +522,13 @@
 
   function render() {
     if (!ui.root) return;
+    ensurePreviewPanel();
     ui.items = useTemporalData();
+    if (ui.selectedTimelineItem) {
+      const still = ui.items.find((row) => row.id === ui.selectedTimelineItem.id);
+      ui.selectedTimelineItem = still || null;
+      if (!still) ui.previewPanel?.close({ refocus: false });
+    }
     syncChrome();
     const { start, end } = rangeForMode(ui.mode, ui.anchor);
     const scoped = ui.mode === "timeline" ? ui.items : itemsInRange(ui.items, start, end);
@@ -463,6 +538,9 @@
     else if (ui.mode === "month") renderMonth(scoped);
     else if (ui.mode === "year") renderYear(scoped);
     else renderTimeline(ui.items);
+    markSelected();
+    const keepId = ui.selectedTimelineItem?.parentDotId;
+    if (keepId && ui.previewPanel?.getId() !== keepId) ui.previewPanel.open(keepId);
   }
 
   /* ---------- Shared event chip ---------- */
@@ -472,7 +550,7 @@
     const kind = item.kind === "task" ? "task" : "event";
     const done = item.status === "completed" ? " is-done" : "";
     const deleted = item.status === "deleted" ? " is-deleted" : "";
-    return `<button type="button" class="ftime-chip ftime-chip--${kind}${done}${deleted}" data-ftime-dot="${escapeHtml(item.parentDotId)}" title="${escapeHtml(item.title)} · ${escapeHtml(item.parentTitle)}">
+    return `<button type="button" class="ftime-chip ftime-chip--${kind}${done}${deleted}" data-ftime-item="${escapeHtml(item.id)}" data-ftime-dot="${escapeHtml(item.parentDotId)}" title="${escapeHtml(item.title)} · ${escapeHtml(item.parentTitle)}">
       <span class="ftime-chip-title">${escapeHtml(item.title)}</span>
       ${compact ? "" : `<span class="ftime-chip-meta">${escapeHtml(time)}${time ? " · " : ""}${escapeHtml(item.parentTitle)}</span>`}
     </button>`;
@@ -585,6 +663,7 @@
         const block = document.createElement("button");
         block.type = "button";
         block.className = "ftime-block";
+        block.dataset.ftimeItem = item.id;
         block.dataset.ftimeDot = item.parentDotId;
         block.style.top = `${top}px`;
         block.style.height = `${height}px`;
@@ -637,7 +716,7 @@
         <div class="ftime-month-items">${dayItems.slice(0, 3).map((item) => chipHtml(item, { compact: true })).join("")}
         ${dayItems.length > 3 ? `<span class="ftime-month-more">+${dayItems.length - 3}</span>` : ""}</div>`;
       cell.addEventListener("click", (event) => {
-        if (event.target.closest("[data-ftime-dot]")) return;
+        if (event.target.closest("[data-ftime-item]")) return;
         ui.anchor = startOfDay(day);
         ui.mode = "day";
         render();
@@ -753,6 +832,7 @@
     card.className = "ftime-card" + (item.kind === "task" ? " ftime-card--task" : " ftime-card--event")
       + (item.status === "completed" ? " is-done" : "")
       + (item.status === "deleted" ? " is-deleted" : "");
+    card.dataset.ftimeItem = item.id;
     card.dataset.ftimeDot = item.parentDotId;
     const media = item.coverImage
       ? `<div class="ftime-card-media"><img src="${escapeHtml(item.coverImage)}" alt="" loading="lazy" /></div>`
@@ -781,12 +861,14 @@
     const host = document.getElementById("collection-content");
     if (!host) return;
     if (!ui.root) buildPage();
+    else ensurePreviewPanel();
     if (!host.contains(ui.root)) host.replaceChildren(ui.root);
     render();
   }
 
   function hide() {
-    // Keep DOM for fast return; collection clears host when switching pages.
+    ui.previewPanel?.close({ refocus: false });
+    ui.selectedTimelineItem = null;
   }
 
   window.FicusTimeline = {

@@ -278,7 +278,7 @@
 
   const tags = {
     root: null, explorer: null, search: null, tree: null, toolbar: null, heading: null, stage: null,
-    preview: null, previewBody: null, resizeHandle: null, modeButtons: [],
+    preview: null, previewBody: null, resizeHandle: null, previewPanel: null, modeButtons: [],
     /* The picked tag ({ type, name }), the viewport's mode, the dot in the preview, the graph while it's shown, the
        preview's width as chosen, the cards whose children are showing in the list, and what the preview's page runs. */
     selected: null, mode: "list", previewId: null, graph: null, previewWidth: PREVIEW_WIDTH.initial, expanded: new Set(),
@@ -335,7 +335,10 @@
       const name = type && tags.all[type].find((known) => sameTag(known, tags.selected.name));
       tags.selected = name ? { type, name } : null;
     }
-    if (tags.previewId && !space.byId.has(tags.previewId)) tags.previewId = null;
+    if (tags.previewId && !space.byId.has(tags.previewId)) {
+      tags.previewId = null;
+      tags.previewPanel?.close({ refocus: false });
+    }
     return true;
   }
 
@@ -377,20 +380,7 @@
           <div class="ctags-heading" aria-live="polite"></div>
         </div>
         <div class="ctags-stage"></div>
-      </section>
-      <aside class="ctags-preview" aria-label="Dot preview">
-        <div class="resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize the preview" title="Drag to resize"
-          tabindex="0" aria-valuemin="${PREVIEW_WIDTH.min}" aria-valuemax="${PREVIEW_WIDTH.max}"></div>
-        <div class="ctags-preview-clip">
-          <div class="ctags-preview-inner">
-            <div class="ctags-preview-head">
-              <button type="button" class="ctags-preview-btn" data-preview-open>${ICONS.open}<span>Open in Space</span></button>
-              <button type="button" class="ctags-preview-btn" data-preview-close title="Close the preview">${ICONS.close}<span>Close</span></button>
-            </div>
-            <div class="ctags-preview-body dot-read"></div>
-          </div>
-        </div>
-      </aside>`;
+      </section>`;
     Object.assign(tags, {
       root,
       explorer: root.querySelector(".ctags-explorer"),
@@ -398,10 +388,38 @@
       tree: root.querySelector(".ctags-tree"),
       heading: root.querySelector(".ctags-heading"),
       stage: root.querySelector(".ctags-stage"),
-      preview: root.querySelector(".ctags-preview"),
-      previewBody: root.querySelector(".ctags-preview-body"),
-      resizeHandle: root.querySelector(".resize-handle"),
       modeButtons: [...root.querySelectorAll("[data-view-mode]")],
+    });
+    tags.previewPanel = createDotPreviewPanel({
+      host: root,
+      reservedLeft: () => tags.explorer?.offsetWidth || 0,
+      getDot: (id) => space.byId.get(id) || null,
+      getDots: () => space.dots,
+      childrenOf,
+      openInSpace,
+      onOpenDot: (id) => openPreview(id),
+      pickTags: true,
+      onPickTag: (type, name) => {
+        tags.search.value = "";
+        renderExplorer();
+        selectTag(type, name);
+      },
+      isActive: () => active && currentPage === "tags",
+      onChange: (id) => { tags.previewId = id; },
+      onClosed: ({ id, hadFocus }) => {
+        markCurrent(null);
+        tags.graph?.setSelected(null);
+        if (!hadFocus) return;
+        const back = [...tags.stage.querySelectorAll(`${DOT_PICKS}, .cgraph-node`)]
+          .find((node) => node.dataset.dotId === id && !node.closest(".ctags-children:not(.is-open)"));
+        (back || tags.modeButtons.find((button) => button.getAttribute("aria-pressed") === "true"))?.focus({ preventScroll: true });
+      },
+    });
+    root.append(tags.previewPanel.el);
+    Object.assign(tags, {
+      preview: tags.previewPanel.el,
+      previewBody: tags.previewPanel.el.querySelector(".ctags-preview-body"),
+      resizeHandle: tags.previewPanel.el.querySelector(".resize-handle"),
     });
     tags.search.addEventListener("input", renderExplorer);
     tags.tree.addEventListener("click", (event) => {
@@ -421,34 +439,9 @@
       const pick = event.target.closest(DOT_PICKS);
       if (pick) openPreview(pick.dataset.dotId);
     });
-    tags.resizeHandle.addEventListener("mousedown", onResizeStart);
-    tags.resizeHandle.addEventListener("touchstart", onResizeStart, { passive: false });
-    tags.resizeHandle.addEventListener("keydown", onResizeKey);
-    window.FicusInput.onDoubleActivate(tags.resizeHandle, () => setPreviewWidth(PREVIEW_WIDTH.initial, true));
-    // The preview keeps to the room there is as the window changes size.
-    if (typeof ResizeObserver === "function") {
-      new ResizeObserver(() => {
-        if (tags.previewId) applyPreviewWidth();
-      }).observe(root);
-    }
-    root.querySelector("[data-preview-close]").addEventListener("click", () => closePreview(true));
-    root.querySelector("[data-preview-open]").addEventListener("click", () => openInSpace(tags.previewId));
-    tags.previewBody.addEventListener("click", onPreviewClick);
-    document.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || event.defaultPrevented || !active || currentPage !== "tags" || !tags.previewId) return;
-      if (event.target === tags.search || event.target.closest?.("[role='dialog'], dialog")) return;
-      event.preventDefault();
-      closePreview(true);
-    });
     let saved = null;
-    let savedWidth = NaN;
-    try {
-      saved = localStorage.getItem(TAGS_VIEW_KEY);
-      savedWidth = Number(localStorage.getItem(PREVIEW_WIDTH_KEY));
-    } catch (_) {}
+    try { saved = localStorage.getItem(TAGS_VIEW_KEY); } catch (_) {}
     tags.mode = VIEW_MODES.includes(saved) ? saved : "list";
-    tags.previewWidth = Number.isFinite(savedWidth) && savedWidth > 0 ? clampWidth(savedWidth) : PREVIEW_WIDTH.initial;
-    applyPreviewWidth();
     return root;
   }
 
@@ -467,8 +460,8 @@
   function hideTagsPage() {
     tags.graph?.destroy();
     tags.graph = null;
+    tags.previewPanel?.close({ refocus: false });
     releaseReads(tags.reads);
-    tags.previewBody?.replaceChildren();
   }
 
   function hint(text) {
@@ -767,10 +760,7 @@
   /* ---------- Tags: preview ---------- */
 
   function openPreview(id) {
-    if (!space.byId.has(id)) return;
-    tags.previewId = id;
-    renderPreview();
-    tags.preview.querySelector(".ctags-preview-inner").scrollTop = 0;
+    if (!tags.previewPanel?.open(id)) return;
     markCurrent(id);
     tags.graph?.setSelected(id);
   }
@@ -782,120 +772,21 @@
     });
   }
 
-  /* Focus left inside the closing preview goes back to the dot it showed (its card, a child showing under one, or its
-     node), else to the view's mode button. */
   function closePreview(refocus) {
-    const id = tags.previewId;
-    if (!id) return;
-    const hadFocus = tags.preview.contains(document.activeElement);
-    tags.previewId = null;
-    renderPreview();
-    markCurrent(null);
-    tags.graph?.setSelected(null);
-    if (!refocus || !hadFocus) return;
-    const back = [...tags.stage.querySelectorAll(`${DOT_PICKS}, .cgraph-node`)]
-      .find((node) => node.dataset.dotId === id && !node.closest(".ctags-children:not(.is-open)"));
-    (back || tags.modeButtons.find((button) => button.getAttribute("aria-pressed") === "true"))?.focus({ preventScroll: true });
+    tags.previewPanel?.close({ refocus: Boolean(refocus) });
   }
 
-  /* ---------- Tags: preview width ---------- */
-
-  /* The preview's width is dragged by the handle on its left edge (or set with the arrow keys there), from 300 to
-     800px, and remembered. Beside the viewport it also leaves the viewport some room; over it (narrow windows), it
-     can cover all of it. */
-  const clampWidth = (width) => Math.round(Math.min(Math.max(width, PREVIEW_WIDTH.min), PREVIEW_WIDTH.max));
-
-  function widthRoom() {
-    if (!tags.root?.clientWidth) return PREVIEW_WIDTH.max;
-    const overlaid = getComputedStyle(tags.preview).position === "absolute";
-    const room = tags.root.clientWidth - tags.explorer.offsetWidth - (overlaid ? 0 : PREVIEW_WIDTH.viewportMin);
-    return Math.max(PREVIEW_WIDTH.min, Math.min(PREVIEW_WIDTH.max, room));
-  }
-
-  function applyPreviewWidth() {
-    if (!tags.root) return;
-    const width = Math.min(tags.previewWidth, widthRoom());
-    tags.root.style.setProperty("--ctags-preview-width", `${width}px`);
-    tags.resizeHandle.setAttribute("aria-valuenow", String(width));
-    tags.resizeHandle.setAttribute("aria-valuetext", `${width} pixels wide`);
-  }
-
-  function setPreviewWidth(width, save) {
-    tags.previewWidth = Math.min(clampWidth(width), widthRoom());
-    applyPreviewWidth();
-    if (!save) return;
-    try { localStorage.setItem(PREVIEW_WIDTH_KEY, String(tags.previewWidth)); } catch (_) {}
-  }
-
-  // Dragging left widens the preview, with the mouse or a finger. The width follows the pointer without easing until
-  // the button or the finger is let go; the finger's touchmoves are cancelled so the page doesn't scroll under it.
-  function onResizeStart(event) {
-    const touch = event.type === "touchstart";
-    if ((!touch && event.button !== 0) || (touch && event.touches.length > 1) || !tags.previewId) return;
-    event.preventDefault();
-    const touchId = touch ? event.changedTouches[0].identifier : null;
-    const startX = getCoordinates(event).x;
-    const startWidth = tags.preview.getBoundingClientRect().width;
-    tags.root.classList.add("is-resizing");
-    tags.resizeHandle.classList.add("is-active");
-    document.documentElement.classList.add("ctags-resizing");
-    const onMove = (move) => {
-      if (touch && move.cancelable) move.preventDefault();
-      setPreviewWidth(startWidth + (startX - getCoordinates(move, touchId).x), false);
-    };
-    const onUp = (up) => {
-      if (touch && ![...up.changedTouches].some((t) => t.identifier === touchId)) return;
-      document.removeEventListener(touch ? "touchmove" : "mousemove", onMove);
-      document.removeEventListener(touch ? "touchend" : "mouseup", onUp);
-      if (touch) document.removeEventListener("touchcancel", onUp);
-      // The last width is laid out before the slide's easing comes back, so it isn't eased into.
-      void tags.preview.offsetWidth;
-      tags.root.classList.remove("is-resizing");
-      tags.resizeHandle.classList.remove("is-active");
-      document.documentElement.classList.remove("ctags-resizing");
-      setPreviewWidth(tags.previewWidth, true);
-    };
-    if (touch) {
-      document.addEventListener("touchmove", onMove, { passive: false });
-      document.addEventListener("touchend", onUp);
-      document.addEventListener("touchcancel", onUp);
-    } else {
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-    }
-  }
-
-  function onResizeKey(event) {
-    const now = Math.min(tags.previewWidth, widthRoom());
-    const widths = {
-      ArrowLeft: now + PREVIEW_WIDTH.step,
-      ArrowRight: now - PREVIEW_WIDTH.step,
-      Home: PREVIEW_WIDTH.min,
-      End: PREVIEW_WIDTH.max,
-    };
-    if (!has(widths, event.key)) return;
-    event.preventDefault();
-    setPreviewWidth(widths[event.key], true);
-  }
-
-  // The dot's reading view, then its parents and children (each opening in the preview).
   function renderPreview() {
-    const dot = tags.previewId ? space.byId.get(tags.previewId) : null;
-    tags.root.classList.toggle("has-preview", Boolean(dot));
-    releaseReads(tags.reads);
-    if (!dot) {
-      tags.previewBody.replaceChildren();
+    if (tags.previewId && !space.byId.has(tags.previewId)) {
+      tags.previewPanel?.close({ refocus: false });
       return;
     }
-    applyPreviewWidth();
-    const parts = readingView(dot, { pickTags: true, onOpenDot: openPreview, reads: tags.reads });
-    const parents = space.dots.filter((other) => other.children.includes(dot.id));
-    const family = document.createElement("div");
-    family.className = "dot-read-family";
-    family.append(...familySection("Parents", parents));
-    if (dot.type !== "hub") family.append(...familySection("Children", childrenOf(dot)));
-    parts.push(family);
-    tags.previewBody.replaceChildren(...parts);
+    if (!tags.previewId) {
+      tags.previewPanel?.render();
+      return;
+    }
+    if (tags.previewPanel?.getId() === tags.previewId) tags.previewPanel.render();
+    else tags.previewPanel?.open(tags.previewId);
   }
 
   /* ---------- Reading view ---------- */
@@ -1023,7 +914,232 @@
     return [head, list];
   }
 
+  /* ---------- Dot preview panel (shared by Tags and Time) ---------- */
+
+  /* Resizable right-hand reading pane: Open in Space / Close, drag handle, Escape to dismiss.
+     `host` receives --ctags-preview-width, .has-preview and .is-resizing (same CSS as Tags). */
+  function createDotPreviewPanel(options = {}) {
+    const {
+      host,
+      reservedLeft = 0,
+      getDot,
+      getDots = () => [],
+      childrenOf: childDots = () => [],
+      openInSpace: openSpace = () => {},
+      onOpenDot = null,
+      pickTags = false,
+      onPickTag = null,
+      isActive = () => true,
+      onClosed = null,
+      onChange = null,
+    } = options;
+
+    const reads = [];
+    let previewId = null;
+    const clampPanelWidth = (width) => Math.round(Math.min(Math.max(width, PREVIEW_WIDTH.min), PREVIEW_WIDTH.max));
+    let previewWidth = PREVIEW_WIDTH.initial;
+    try {
+      const saved = Number(localStorage.getItem(PREVIEW_WIDTH_KEY));
+      if (Number.isFinite(saved) && saved > 0) previewWidth = clampPanelWidth(saved);
+    } catch (_) {}
+
+    const aside = document.createElement("aside");
+    aside.className = "ctags-preview";
+    aside.setAttribute("aria-label", "Dot preview");
+    aside.innerHTML = `
+      <div class="resize-handle" role="separator" aria-orientation="vertical" aria-label="Resize the preview" title="Drag to resize"
+        tabindex="0" aria-valuemin="${PREVIEW_WIDTH.min}" aria-valuemax="${PREVIEW_WIDTH.max}"></div>
+      <div class="ctags-preview-clip">
+        <div class="ctags-preview-inner">
+          <div class="ctags-preview-head">
+            <button type="button" class="ctags-preview-btn" data-preview-open>${ICONS.open}<span>Open in Space</span></button>
+            <button type="button" class="ctags-preview-btn" data-preview-close title="Close the preview">${ICONS.close}<span>Close</span></button>
+          </div>
+          <div class="ctags-preview-body dot-read"></div>
+        </div>
+      </div>`;
+
+    const body = aside.querySelector(".ctags-preview-body");
+    const handle = aside.querySelector(".resize-handle");
+    const inner = aside.querySelector(".ctags-preview-inner");
+
+    const leftReserve = () => (typeof reservedLeft === "function" ? Number(reservedLeft()) || 0 : Number(reservedLeft) || 0);
+
+    function widthRoom() {
+      if (!host?.clientWidth) return PREVIEW_WIDTH.max;
+      const overlaid = getComputedStyle(aside).position === "absolute";
+      const room = host.clientWidth - leftReserve() - (overlaid ? 0 : PREVIEW_WIDTH.viewportMin);
+      return Math.max(PREVIEW_WIDTH.min, Math.min(PREVIEW_WIDTH.max, room));
+    }
+
+    function applyWidth() {
+      if (!host) return;
+      const width = Math.min(previewWidth, widthRoom());
+      host.style.setProperty("--ctags-preview-width", `${width}px`);
+      handle.setAttribute("aria-valuenow", String(width));
+      handle.setAttribute("aria-valuetext", `${width} pixels wide`);
+    }
+
+    function setWidth(width, save) {
+      previewWidth = Math.min(clampPanelWidth(width), widthRoom());
+      applyWidth();
+      if (!save) return;
+      try { localStorage.setItem(PREVIEW_WIDTH_KEY, String(previewWidth)); } catch (_) {}
+    }
+
+    function render() {
+      const dot = previewId && typeof getDot === "function" ? getDot(previewId) : null;
+      host?.classList.toggle("has-preview", Boolean(dot));
+      releaseReads(reads);
+      if (!dot) {
+        body.replaceChildren();
+        return;
+      }
+      applyWidth();
+      const openLinked = (id) => {
+        if (typeof onOpenDot === "function") onOpenDot(id);
+        else open(id);
+      };
+      const parts = readingView(dot, { pickTags, onOpenDot: openLinked, reads });
+      const parents = (typeof getDots === "function" ? getDots() : []).filter((other) => other.children?.includes(dot.id));
+      const family = document.createElement("div");
+      family.className = "dot-read-family";
+      family.append(...familySection("Parents", parents));
+      if (dot.type !== "hub") family.append(...familySection("Children", childDots(dot)));
+      parts.push(family);
+      body.replaceChildren(...parts);
+    }
+
+    function open(id) {
+      if (!id || typeof getDot !== "function" || !getDot(id)) return false;
+      previewId = id;
+      if (typeof onChange === "function") onChange(previewId);
+      render();
+      inner.scrollTop = 0;
+      return true;
+    }
+
+    function close({ refocus = false } = {}) {
+      const id = previewId;
+      if (!id) return;
+      const hadFocus = aside.contains(document.activeElement);
+      previewId = null;
+      if (typeof onChange === "function") onChange(null);
+      render();
+      if (typeof onClosed === "function") onClosed({ id, hadFocus: refocus && hadFocus });
+    }
+
+    function onBodyClick(event) {
+      const pick = event.target.closest(".ctags-tag-pick");
+      if (pick && typeof onPickTag === "function") {
+        onPickTag(pick.dataset.type, pick.dataset.name);
+        return;
+      }
+      const linked = event.target.closest("[data-preview-dot]");
+      if (linked) {
+        if (typeof onOpenDot === "function") onOpenDot(linked.dataset.previewDot);
+        else open(linked.dataset.previewDot);
+        return;
+      }
+      const page = event.target.closest("[data-preview-open-page]");
+      if (page) openSpace(page.dataset.previewOpenPage);
+    }
+
+    function onResizePointerDown(event) {
+      if (event.button != null && event.button !== 0) return;
+      if (!previewId) return;
+      event.preventDefault();
+      handle.setPointerCapture(event.pointerId);
+      const startX = (typeof getCoordinates === "function" ? getCoordinates(event) : { x: event.clientX }).x;
+      const startWidth = aside.getBoundingClientRect().width;
+      host?.classList.add("is-resizing");
+      handle.classList.add("is-active");
+      document.documentElement.classList.add("ctags-resizing");
+
+      const onMove = (move) => {
+        if (!handle.hasPointerCapture(move.pointerId)) return;
+        const x = (typeof getCoordinates === "function" ? getCoordinates(move) : { x: move.clientX }).x;
+        setWidth(startWidth + (startX - x), false);
+      };
+      const onUp = (up) => {
+        if (!handle.hasPointerCapture(up.pointerId)) return;
+        try { handle.releasePointerCapture(up.pointerId); } catch (_) {}
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onUp);
+        handle.removeEventListener("pointercancel", onUp);
+        void aside.offsetWidth;
+        host?.classList.remove("is-resizing");
+        handle.classList.remove("is-active");
+        document.documentElement.classList.remove("ctags-resizing");
+        setWidth(previewWidth, true);
+      };
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onUp);
+      handle.addEventListener("pointercancel", onUp);
+    }
+
+    function onResizeKey(event) {
+      const now = Math.min(previewWidth, widthRoom());
+      const widths = {
+        ArrowLeft: now + PREVIEW_WIDTH.step,
+        ArrowRight: now - PREVIEW_WIDTH.step,
+        Home: PREVIEW_WIDTH.min,
+        End: PREVIEW_WIDTH.max,
+      };
+      if (!has(widths, event.key)) return;
+      event.preventDefault();
+      setWidth(widths[event.key], true);
+    }
+
+    function onEscape(event) {
+      if (event.key !== "Escape" || event.defaultPrevented || !previewId || !isActive()) return;
+      if (event.target.closest?.("[role='dialog'], dialog")) return;
+      if (event.target.matches?.("input, textarea, select") || event.target.isContentEditable) return;
+      event.preventDefault();
+      close({ refocus: true });
+    }
+
+    handle.addEventListener("pointerdown", onResizePointerDown);
+    handle.addEventListener("keydown", onResizeKey);
+    if (window.FicusInput?.onDoubleActivate) {
+      window.FicusInput.onDoubleActivate(handle, () => setWidth(PREVIEW_WIDTH.initial, true));
+    }
+    aside.querySelector("[data-preview-close]").addEventListener("click", () => close({ refocus: true }));
+    aside.querySelector("[data-preview-open]").addEventListener("click", () => openSpace(previewId));
+    body.addEventListener("click", onBodyClick);
+    document.addEventListener("keydown", onEscape);
+
+    let resizeObs = null;
+    if (typeof ResizeObserver === "function" && host) {
+      resizeObs = new ResizeObserver(() => {
+        if (previewId) applyWidth();
+      });
+      resizeObs.observe(host);
+    }
+
+    applyWidth();
+
+    return {
+      el: aside,
+      open,
+      close,
+      render,
+      applyWidth,
+      getId: () => previewId,
+      destroy() {
+        document.removeEventListener("keydown", onEscape);
+        resizeObs?.disconnect();
+        releaseReads(reads);
+        previewId = null;
+        host?.classList.remove("has-preview", "is-resizing");
+      },
+    };
+  }
+
+  window.FicusDotPreview = { create: createDotPreviewPanel };
+
   function onPreviewClick(event) {
+    // Kept for any leftover callers; the shared panel handles its own body clicks.
     const pick = event.target.closest(".ctags-tag-pick");
     if (pick) {
       tags.search.value = "";

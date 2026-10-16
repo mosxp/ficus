@@ -22,8 +22,8 @@
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
     <script src="ficus_dashboards.js?v=3" defer></script>
-    <script src="ficus_timeline.js?v=1" defer></script>
-    <script src="collection.js?v=28" defer></script>
+    <script src="ficus_timeline.js?v=2" defer></script>
+    <script src="collection.js?v=29" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
       const APP_STORAGE_EPOCH = "2026-10-03-clean";
@@ -846,7 +846,14 @@
       #collection-content.is-time { display: flex; padding: 0; overflow: hidden; }
 
       /* Collection → Time / Timeline */
-      .ftime { display: flex; height: 100%; width: 100%; min-height: 0; min-width: 0; flex-direction: column; background: #fcfcfc; }
+      .ftime {
+        --ctags-preview-width: 400px;
+        display: flex; flex-direction: row; height: 100%; width: 100%;
+        min-height: 0; min-width: 0; background: #fcfcfc; position: relative;
+      }
+      .ftime-main {
+        display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0;
+      }
       .ftime-toolbar {
         display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
         min-height: 57px; padding: 10px 16px; border-bottom: 1px solid #e5e5e5; background: #fff;
@@ -884,6 +891,9 @@
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
       }
       .ftime-stage { flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; position: relative; }
+      .ftime-chip[aria-current="true"], .ftime-block[aria-current="true"], .ftime-card[aria-current="true"] {
+        outline: 2px solid #1c1917; outline-offset: 1px;
+      }
       .ftime-empty {
         display: flex; align-items: center; justify-content: center; min-height: 12rem;
         margin: 0; padding: 2rem; color: #a8a29e; font-size: 0.9rem; text-align: center; line-height: 1.5;
@@ -1018,6 +1028,11 @@
         overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .ftime-card--task .ftime-card-kicker span:first-child { color: #6b8f6a; }
 
+      @media (max-width: 1100px) {
+        .ftime .ctags-preview { position: absolute; top: 0; right: 0; bottom: 0; z-index: 3; }
+        .ftime.has-preview .ctags-preview { width: min(var(--ctags-preview-width), 100%); box-shadow: -4px 0 12px rgba(0, 0, 0, 0.1); }
+        .ftime .ctags-preview-inner { width: min(calc(var(--ctags-preview-width) - 1px), calc(100vw - 65px)); }
+      }
       @media (max-width: 960px) {
         .ftime-year { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .ftime-month-cell { min-height: 5rem; }
