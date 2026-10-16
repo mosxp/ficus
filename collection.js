@@ -285,7 +285,7 @@
     collections: [], selectedId: null, selectedDotId: null,
     mode: "list", testMode: false, order: [],
     graph: null, expanded: new Set(), reads: [], isFlipped: false,
-    isFullscreen: false, engineHeight: FC_ENGINE_HEIGHT.initial, rendering: false,
+    isExpanded: false, engineHeight: FC_ENGINE_HEIGHT.initial, rendering: false,
   };
 
   function sameTag(a, b) {
@@ -3096,7 +3096,7 @@
   }
 
   function hideFlashcardsPage() {
-    if (fc.isFullscreen) setFcFullscreen(false);
+    if (fc.isExpanded) setFcExpanded(false);
     try {
       fc.graph?.destroy();
     } catch (_) {}
@@ -3189,15 +3189,15 @@
       const pick = event.target.closest(DOT_PICKS);
       if (pick) selectFlashcardDot(pick.dataset.dotId);
     });
-    fc.expandBtn.addEventListener("click", () => setFcFullscreen(!fc.isFullscreen));
+    fc.expandBtn.addEventListener("click", () => setFcExpanded(!fc.isExpanded));
     fc.splitHandle.addEventListener("pointerdown", onFcSplitStart);
     fc.splitHandle.addEventListener("keydown", onFcSplitKey);
     window.FicusInput.onDoubleActivate(fc.splitHandle, () => setFcEngineHeight(FC_ENGINE_HEIGHT.initial, true));
     document.addEventListener("keydown", (event) => {
-      if (event.key !== "Escape" || !fc.isFullscreen || !active || currentPage !== "flashcards") return;
+      if (event.key !== "Escape" || !fc.isExpanded || !active || currentPage !== "flashcards") return;
       if (event.target.closest?.("[role='dialog'], dialog, .fcards-modal")) return;
       event.preventDefault();
-      setFcFullscreen(false);
+      setFcExpanded(false);
     });
     let saved = null;
     let savedHeight = NaN;
@@ -3210,12 +3210,12 @@
       ? Math.min(Math.max(savedHeight, FC_ENGINE_HEIGHT.min), FC_ENGINE_HEIGHT.max)
       : FC_ENGINE_HEIGHT.initial;
     applyFcEngineHeight();
-    syncFcFullscreenUi();
+    syncFcExpandedUi();
     return root;
   }
 
   function applyFcEngineHeight() {
-    if (!fc.main || fc.isFullscreen) return;
+    if (!fc.main || fc.isExpanded) return;
     const height = Math.min(Math.max(fc.engineHeight, FC_ENGINE_HEIGHT.min), FC_ENGINE_HEIGHT.max);
     fc.main.style.setProperty("--fcards-engine-height", `${height}px`);
     fc.splitHandle?.setAttribute("aria-valuenow", String(height));
@@ -3230,7 +3230,7 @@
   }
 
   function onFcSplitStart(event) {
-    if (fc.isFullscreen) return;
+    if (fc.isExpanded) return;
     if (event.button != null && event.button !== 0) return;
     event.preventDefault();
     const handle = fc.splitHandle;
@@ -3257,7 +3257,7 @@
   }
 
   function onFcSplitKey(event) {
-    if (fc.isFullscreen) return;
+    if (fc.isExpanded) return;
     const step = 24;
     const map = { ArrowUp: fc.engineHeight + step, ArrowDown: fc.engineHeight - step, Home: FC_ENGINE_HEIGHT.max, End: FC_ENGINE_HEIGHT.min };
     if (!has(map, event.key)) return;
@@ -3265,20 +3265,22 @@
     setFcEngineHeight(map[event.key], true);
   }
 
-  function setFcFullscreen(on) {
-    fc.isFullscreen = Boolean(on);
-    syncFcFullscreenUi();
-    if (!fc.isFullscreen) applyFcEngineHeight();
+  function setFcExpanded(on) {
+    fc.isExpanded = Boolean(on);
+    syncFcExpandedUi();
+    if (!fc.isExpanded) applyFcEngineHeight();
   }
 
-  function syncFcFullscreenUi() {
-    fc.root?.classList.toggle("is-fc-fullscreen", fc.isFullscreen);
-    fc.enginePanel?.classList.toggle("is-fullscreen", fc.isFullscreen);
+  function syncFcExpandedUi() {
+    fc.main?.classList.toggle("is-expanded", fc.isExpanded);
+    fc.enginePanel?.classList.toggle("is-expanded", fc.isExpanded);
+    if (fc.splitHandle) fc.splitHandle.hidden = fc.isExpanded;
     if (!fc.expandBtn) return;
-    fc.expandBtn.setAttribute("aria-pressed", fc.isFullscreen ? "true" : "false");
-    fc.expandBtn.title = fc.isFullscreen ? "Minimize" : "Expand";
-    fc.expandBtn.setAttribute("aria-label", fc.isFullscreen ? "Minimize flashcard" : "Expand flashcard");
-    fc.expandBtn.innerHTML = fc.isFullscreen
+    fc.expandBtn.setAttribute("aria-pressed", fc.isExpanded ? "true" : "false");
+    fc.expandBtn.title = fc.isExpanded ? "Collapse" : "Expand";
+    fc.expandBtn.setAttribute("aria-label", fc.isExpanded ? "Collapse flashcard panel" : "Expand flashcard panel");
+    // Expand = outward corners; Collapse = inward corners (column-only, not a screen overlay).
+    fc.expandBtn.innerHTML = fc.isExpanded
       ? '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" aria-hidden="true"><path d="M3 6.5h3.5V3M10 3v3.5H13M13 10h-3.5V13M6.5 13v-3.5H3"/></svg>'
       : '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" aria-hidden="true"><path d="M3 6.5V3h3.5M10 3h3v3.5M13 10v3h-3.5M6.5 13H3v-3.5"/></svg>';
   }
@@ -3296,7 +3298,7 @@
       fc.isFlipped = false;
     }
     applyFcEngineHeight();
-    syncFcFullscreenUi();
+    syncFcExpandedUi();
     renderFcPage();
   }
 
