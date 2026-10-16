@@ -12,9 +12,11 @@
  *     loggers,     tracking loggers' definitions (see ficus_loggers.js)
  *     logger_groups the groups Manage Loggers clusters them in
  *     log_entries, recorded values for input loggers (see ficus_log_entries.js)
- *     templates }  reusable master dots (space.js); same shape as a dot plus isTemplate / templateLevel
- * Version 2 added loggers and logger_groups; version 3 added log_entries; version 4 added templates. A page still
- * on an older version refuses a newer file (parseMaster), so it can't save over them.
+ *     templates,   reusable master dots (space.js); same shape as a dot plus isTemplate / templateLevel
+ *     flashcard_collections }  Collection → Flashcards study sets (custom / tag / hub)
+ * Version 2 added loggers and logger_groups; version 3 added log_entries; version 4 added templates;
+ * version 5 added flashcard_collections. A page still on an older version refuses a newer file
+ * (parseMaster), so it can't save over them.
  *
  * load(session) reads it once, at sign-in, and space.js and collection.js then read from memory without waiting.
  * Their saves change memory at once; a copy goes into IndexedDB on this device straight after, and 3 seconds after
@@ -25,7 +27,7 @@
   "use strict";
 
   const FORMAT = "ficus-master";
-  const VERSION = 4;
+  const VERSION = 5;
   const PAGE_KINDS = new Set(["board", "block", "block_board"]);
   const DRIVE_DELAY_MS = 3000;
   const DEVICE_DELAY_MS = 400;
@@ -68,6 +70,7 @@
   let loggerGroups = [];
   let logEntries = [];
   let templates = [];
+  let flashcardCollections = [];
 
   // The Drive file and the revision of it this device last read or wrote.
   let fileId = null;
@@ -102,6 +105,7 @@
       logger_groups: loggerGroups,
       log_entries: logEntries,
       templates,
+      flashcard_collections: flashcardCollections,
     };
   }
 
@@ -130,6 +134,7 @@
     loggerGroups = list(master.logger_groups);
     logEntries = list(master.log_entries);
     templates = list(master.templates);
+    flashcardCollections = list(master.flashcard_collections);
   }
 
   // The Drive file's text as a master object; throws (so nothing overwrites it) if it isn't one.
@@ -365,6 +370,7 @@
     loggerGroups = [];
     logEntries = [];
     templates = [];
+    flashcardCollections = [];
     setStatus();
   }
 
@@ -651,6 +657,14 @@
     saveTemplates(next) {
       if (!uid || !Array.isArray(next)) return;
       templates = next;
+      changed();
+    },
+
+    // Collection → Flashcards study sets (custom / tag / hub groupings + per-dot studyData).
+    getFlashcardCollections: () => flashcardCollections,
+    saveFlashcardCollections(next) {
+      if (!uid || !Array.isArray(next)) return;
+      flashcardCollections = next;
       changed();
     },
 
