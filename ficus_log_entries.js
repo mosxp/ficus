@@ -24,7 +24,7 @@
   let el = null;
   let ui = {
     mode: "create", // create | edit
-    step: "pick", // pick | form
+    selectedLogger: null, // input logger chosen in the list (null = list view)
     entryId: null,
     dotId: "",
     loggerId: "",
@@ -292,33 +292,92 @@
     // Portal to <body> so it overlays the open dot (not trapped under .space-doc in #view-space).
     if (overlay.parentElement !== document.body) document.body.appendChild(overlay);
     overlay.classList.add("log-entry-overlay");
+    const head = overlay.querySelector(".log-entry-head");
+    const title = overlay.querySelector("[data-log-title]");
+    let back = overlay.querySelector("[data-log-back]");
+    if (!back && head && title) {
+      back = document.createElement("button");
+      back.type = "button";
+      back.className = "log-entry-back";
+      back.dataset.logBack = "";
+      back.setAttribute("aria-label", "Back to logger list");
+      back.title = "Back";
+      back.textContent = "\u2190 Back";
+      back.hidden = true;
+      head.insertBefore(back, title);
+      back.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        clearSelectedLogger();
+      });
+    }
     el = {
       overlay,
       sheet: overlay.querySelector("[data-log-sheet]"),
       body: overlay.querySelector("[data-log-body]"),
-      title: overlay.querySelector("[data-log-title]"),
+      title,
+      back,
     };
     overlay.querySelector("[data-log-close]")?.addEventListener("click", () => close());
+    // Only the dim backdrop dismisses; do not stopPropagation for sheet clicks (that blocked logger picks).
     overlay.addEventListener("pointerdown", (event) => {
-      if (event.target === overlay) close();
+      if (event.target !== overlay) return;
       event.stopPropagation();
+      close();
     });
     // Capture Escape before Space's document handler (which would close the open dot).
     overlay.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        close();
-      }
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (ui.mode === "create" && ui.selectedLogger) clearSelectedLogger();
+      else close();
     });
     return true;
+  }
+
+  function selectLogger(logger) {
+    if (!logger?.id || logger.mode !== "standard") return;
+    ui.selectedLogger = logger;
+    ui.loggerId = logger.id;
+    ui.value = defaultValue(logger);
+    ui.error = "";
+    syncChrome();
+    render();
+  }
+
+  function clearSelectedLogger() {
+    if (ui.mode === "edit") return;
+    stopStopwatch();
+    ui.selectedLogger = null;
+    ui.loggerId = "";
+    ui.value = null;
+    ui.error = "";
+    ui.stopwatch = null;
+    syncChrome();
+    render();
+  }
+
+  function syncChrome() {
+    if (!el) return;
+    const logger = ui.selectedLogger || loggerById(ui.loggerId);
+    if (el.back) {
+      el.back.hidden = !(ui.mode === "create" && ui.selectedLogger);
+    }
+    if (ui.mode === "edit") {
+      el.title.textContent = logger ? `Edit log \u2014 ${logger.name}` : "Edit log";
+    } else if (ui.selectedLogger) {
+      el.title.textContent = `Log entry \u2014 ${ui.selectedLogger.name}`;
+    } else {
+      el.title.textContent = "Log entry";
+    }
   }
 
   function openCreate({ dotId = "", onDone = null } = {}) {
     if (!ensureDom()) return;
     stopStopwatch();
     Object.assign(ui, {
-      mode: "create", step: "pick", entryId: null, dotId: String(dotId || ""), loggerId: "",
+      mode: "create", selectedLogger: null, entryId: null, dotId: String(dotId || ""), loggerId: "",
       search: "", timestamp: toLocalInput(), value: null, note: "", attachments: [], error: "",
       stopwatch: null, onDone,
     });
@@ -329,9 +388,10 @@
     if (!ensureDom()) return;
     const entry = findEntry(entryId);
     if (!entry) return;
+    const logger = loggerById(entry.loggerId);
     stopStopwatch();
     Object.assign(ui, {
-      mode: "edit", step: "form", entryId: entry.id, dotId: entry.dotId, loggerId: entry.loggerId,
+      mode: "edit", selectedLogger: logger, entryId: entry.id, dotId: entry.dotId, loggerId: entry.loggerId,
       search: "", timestamp: toLocalInput(entry.timestamp), value: entry.value, note: entry.note,
       attachments: [...entry.attachments], error: "", stopwatch: null, onDone,
     });
@@ -342,7 +402,7 @@
     if (el.overlay.parentElement !== document.body) document.body.appendChild(el.overlay);
     el.overlay.classList.add("log-entry-overlay");
     el.overlay.classList.remove("hidden");
-    el.title.textContent = ui.mode === "edit" ? "Edit log" : "Log entry";
+    syncChrome();
     render();
     el.sheet?.focus({ preventScroll: true });
   }
@@ -356,8 +416,10 @@
     stopStopwatch();
     const done = ui.onDone;
     ui.onDone = null;
+    ui.selectedLogger = null;
     el.overlay.classList.add("hidden");
     el.body.replaceChildren();
+    if (el.back) el.back.hidden = true;
     done?.(null);
   }
 
@@ -370,11 +432,14 @@
 
   function render() {
     if (!el) return;
-    el.body.replaceChildren(ui.step === "pick" ? renderPick() : renderForm());
+    syncChrome();
+    // List view when no logger is selected (create flow); form view once one is chosen (or edit).
+    el.body.replaceChildren(ui.selectedLogger ? renderForm() : renderPick());
   }
 
   function renderPick() {
     const { loggers, groups } = inputLoggers();
+    const byId = new Map(loggers.map((logger) => [logger.id, logger]));
     const q = ui.search.trim().toLowerCase();
     const filtered = loggers.filter((logger) => !q || logger.name.toLowerCase().includes(q));
     const byGroup = new Map();
@@ -391,14 +456,9 @@
       if (!rows.length) continue;
       const label = key ? (groups.find((group) => group.id === key)?.name || "Group") : "No group";
       const picks = rows.map((logger) => h("button", {
-        type: "button", class: "log-entry-pick",
-        onclick: () => {
-          ui.loggerId = logger.id;
-          ui.value = defaultValue(logger);
-          ui.step = "form";
-          ui.error = "";
-          render();
-        },
+        type: "button",
+        class: "log-entry-pick",
+        "data-logger-id": logger.id,
       },
       tile(logger),
       h("span", { class: "log-entry-pick-text" },
@@ -408,6 +468,28 @@
         h("p", { class: "log-entry-group-label", text: label }),
         h("div", { class: "log-entry-list" }, ...picks)));
     }
+    const groupsEl = sections.length
+      ? h("div", { class: "log-entry-groups" }, ...sections)
+      : h("p", { class: "log-entry-empty", text: loggers.length ? "No loggers match." : "No input loggers yet. Add one in Manage Loggers." });
+
+    // Delegated pick: pointerup (touch/pen) and click (keyboard / mouse fallback).
+    let picked = false;
+    const activate = (event) => {
+      const row = event.target.closest?.("[data-logger-id]");
+      if (!row || !groupsEl.contains?.(row)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (picked) return;
+      const logger = byId.get(row.dataset.loggerId);
+      if (!logger) return;
+      picked = true;
+      selectLogger(logger);
+    };
+    if (sections.length) {
+      groupsEl.addEventListener("pointerup", activate);
+      groupsEl.addEventListener("click", activate);
+    }
+
     return h("div", { class: "log-entry-step" },
       h("p", { class: "log-entry-hint", text: "Choose an Input Logger. Calculated roll-ups are hidden." }),
       h("input", {
@@ -424,8 +506,7 @@
           }
         },
       }),
-      sections.length ? h("div", { class: "log-entry-groups" }, ...sections)
-        : h("p", { class: "log-entry-empty", text: loggers.length ? "No loggers match." : "No input loggers yet. Add one in Manage Loggers." }));
+      groupsEl);
   }
 
   function tile(logger) {
@@ -449,11 +530,14 @@
   }
 
   function renderForm() {
-    const logger = loggerById(ui.loggerId);
+    const logger = ui.selectedLogger || loggerById(ui.loggerId);
     if (!logger) {
       return h("div", { class: "log-entry-step" },
         h("p", { class: "log-entry-empty", text: "That logger is gone." }),
-        h("button", { type: "button", class: "log-entry-secondary", text: "Back", onclick: () => { ui.step = "pick"; render(); } }));
+        ui.mode === "create" && h("button", {
+          type: "button", class: "log-entry-secondary", text: "\u2190 Back",
+          onclick: () => clearSelectedLogger(),
+        }));
     }
     if (ui.value == null) ui.value = defaultValue(logger);
     const attachReq = logger.attachmentConfig?.requirement || "none";
@@ -471,10 +555,6 @@
         },
       }),
       h("div", { class: "log-entry-foot-spacer" }),
-      ui.mode === "create" && h("button", {
-        type: "button", class: "log-entry-secondary", text: "Back",
-        onclick: () => { ui.step = "pick"; ui.error = ""; render(); },
-      }),
       h("button", { type: "button", class: "log-entry-secondary", text: "Cancel", onclick: () => close() }),
       h("button", {
         type: "button", class: "log-entry-primary", text: ui.mode === "edit" ? "Save" : "Log it",
