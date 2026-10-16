@@ -83,7 +83,8 @@
   }
 
   function loggerById(id) {
-    return inputLoggers().loggers.find((logger) => logger.id === id) || null;
+    const logger = resolveLoggerById(id);
+    return logger?.mode === "standard" ? logger : null;
   }
 
   function cleanAttachments(raw) {
@@ -132,17 +133,47 @@
     const loggerId = String(raw.loggerId || "");
     const timestamp = String(raw.timestamp || "");
     if (!loggerId || !timestamp || Number.isNaN(Date.parse(timestamp))) return null;
-    const logger = loggersApi()?.read?.().loggers?.find((row) => row.id === loggerId);
+    const logger = resolveLoggerById(loggerId);
     const value = logger?.mode === "standard" ? cleanValue(logger, raw.value) : (raw.value ?? null);
+    const loggerName = clip(raw.loggerName || logger?.name || "", NAME_MAX);
     return {
       id: String(raw.id),
       loggerId,
+      // Snapshot so pills/cards still show a title if the logger is renamed/removed later.
+      loggerName: loggerName || undefined,
       dotId: raw.dotId == null ? "" : String(raw.dotId),
       timestamp: new Date(timestamp).toISOString(),
       value,
       note: clip(raw.note, NOTE_MAX),
       attachments: cleanAttachments(raw.attachments),
     };
+  }
+
+  // Live logger from Manage Loggers / master backup; falls back to store if the API cache is cold.
+  function resolveLoggerById(id) {
+    if (!id) return null;
+    const fromApi = loggersApi()?.read?.().loggers?.find((row) => row.id === id);
+    if (fromApi) return fromApi;
+    const fromStore = store()?.getLoggers?.()?.loggers;
+    return (Array.isArray(fromStore) ? fromStore : []).find((row) => row.id === id) || null;
+  }
+
+  function entryLogger(entry) {
+    return resolveLoggerById(entry?.loggerId) || null;
+  }
+
+  function entryLoggerName(entry, logger = entryLogger(entry)) {
+    return clip(logger?.name || entry?.loggerName || "", NAME_MAX) || "Logger";
+  }
+
+  function shortDate(iso) {
+    const when = new Date(iso);
+    if (Number.isNaN(when.getTime())) return "";
+    return when.toLocaleDateString(undefined, { day: "numeric", month: "short" });
+  }
+
+  function entryNoteText(entry) {
+    return clip(entry?.note || "", NOTE_MAX);
   }
 
   // Latest finite scalar per input logger for roll-up calculate() / the tree.
@@ -180,7 +211,11 @@
   }
 
   function formatEntryValue(logger, value) {
-    if (!logger || value == null) return "\u2014";
+    if (value == null) return "\u2014";
+    if (!logger) {
+      if (isObject(value)) return `${value.fieldA ?? "\u2014"} \u00b7 ${value.fieldB ?? "\u2014"}`;
+      return String(value);
+    }
     const fmt = loggersApi()?.formatValue;
     if (logger.inputType === "boolean") {
       const labels = logger.booleanConfig || {};
@@ -253,6 +288,7 @@
     const entry = cleanLogEntry({
       id: partial.id || newId(),
       loggerId: logger.id,
+      loggerName: logger.name,
       dotId: partial.dotId || "",
       timestamp: partial.timestamp || new Date().toISOString(),
       value,
@@ -829,44 +865,81 @@
   /* ---------- Public render helpers for Space ---------- */
 
   function pillNode(entry) {
-    const logger = loggerById(entry.loggerId);
+    const logger = entryLogger(entry);
+    const name = entryLoggerName(entry, logger);
+    const valueText = formatEntryValue(logger, entry.value);
+    const note = entryNoteText(entry);
+    const dateText = shortDate(entry.timestamp);
+    const titleParts = [name, valueText];
+    if (note) titleParts.push(note);
+    if (dateText) titleParts.push(dateText);
     const pill = h("span", {
       class: "log-pill",
       contenteditable: "false",
       "data-log-entry-id": entry.id,
-      title: logger ? `${logger.name}: ${formatEntryValue(logger, entry.value)}` : "Log entry",
+      title: titleParts.join(" \u00b7 "),
     });
-    if (logger) pill.append(tile(logger));
-    pill.append(h("span", { class: "log-pill-value", text: formatEntryValue(logger, entry.value) }));
-    if (entry.attachments?.length) pill.append(h("span", { class: "log-pill-clip", text: "\u{1F4CE}", "aria-hidden": "true" }));
+    pill.append(logger ? tile(logger) : h("span", {
+      class: "log-entry-tile",
+      style: "--swatch:#a8a29e",
+      text: (name || "?").charAt(0).toUpperCase(),
+    }));
+    pill.append(h("span", { class: "log-pill-name", text: name }));
+    pill.append(h("span", { class: "log-pill-value", text: valueText }));
+    if (note) {
+      pill.append(h("span", { class: "log-pill-note", title: note, text: `(${note})` }));
+    }
+    if (dateText) {
+      pill.append(h("span", { class: "log-pill-sep", "aria-hidden": "true", text: "\u2022" }));
+      pill.append(h("span", { class: "log-pill-date", text: dateText }));
+    }
+    if (entry.attachments?.length) {
+      pill.append(h("span", { class: "log-pill-clip", title: "Has attachments", text: "\u{1F4CE}", "aria-hidden": "true" }));
+    }
     return pill;
   }
 
   function cardNode(entry, { selected = false, onDelete = null } = {}) {
-    const logger = loggerById(entry.loggerId);
-    const when = new Date(entry.timestamp);
-    const dateText = Number.isNaN(when.getTime()) ? "" : when.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const logger = entryLogger(entry);
+    const name = entryLoggerName(entry, logger);
+    const dateText = shortDate(entry.timestamp);
+    const note = entryNoteText(entry);
+    const hasAttach = Boolean(entry.attachments?.length);
+    const accent = logger?.color || "#8BA888";
+    const foot = (note || hasAttach)
+      ? h("div", { class: "log-card-foot" },
+        note ? h("span", { class: "log-card-note", title: note, text: note }) : null,
+        hasAttach ? h("span", { class: "log-card-clip", title: "Has attachments", "aria-hidden": "true", text: "\u{1F4CE}" }) : null)
+      : null;
     const card = h("div", {
       class: `log-card${selected ? " selected" : ""}`,
       "data-log-entry-id": entry.id,
+      style: `--log-accent:${accent}`,
     },
     h("div", { class: "log-card-head" },
-      logger && tile(logger),
-      h("span", { class: "log-card-name", text: logger?.name || "Logger" }),
-      onDelete && h("button", {
+      logger ? tile(logger) : h("span", {
+        class: "log-entry-tile",
+        style: `--swatch:${accent}`,
+        text: (name || "?").charAt(0).toUpperCase(),
+      }),
+      h("span", { class: "log-card-name", text: name }),
+      dateText ? h("span", { class: "log-card-date", text: dateText }) : null,
+      onDelete ? h("button", {
         type: "button", class: "log-card-delete", title: "Delete log", "aria-label": "Delete log", text: "\u232b",
         onclick: (event) => { event.stopPropagation(); onDelete(entry.id); },
-      })),
+      }) : null),
     h("div", { class: "log-card-value", text: formatEntryValue(logger, entry.value) }),
-    h("div", { class: "log-card-meta" },
-      h("span", { text: dateText }),
-      entry.note && h("span", { class: "log-card-note", title: entry.note, text: "\u{1F4DD}" }),
-      entry.attachments?.length && h("span", { title: "Has attachments", text: "\u{1F4CE}" })));
+    foot);
     return card;
   }
 
   function paintCardFace(ctx, entry, w, h) {
-    const logger = loggerById(entry.loggerId);
+    const logger = entryLogger(entry);
+    const name = entryLoggerName(entry, logger);
+    const valueText = formatEntryValue(logger, entry.value);
+    const dateText = shortDate(entry.timestamp);
+    const note = entryNoteText(entry);
+    const accent = logger?.color || "#8BA888";
     ctx.save();
     ctx.fillStyle = "#fff";
     ctx.strokeStyle = "#e7e5e4";
@@ -875,19 +948,43 @@
     ctx.rect(0.5, 0.5, w - 1, h - 1);
     ctx.fill();
     ctx.stroke();
-    ctx.fillStyle = logger?.color || "#8BA888";
+    ctx.fillStyle = accent;
     ctx.fillRect(0, 0, w, 4);
-    ctx.fillStyle = "#78716c";
-    ctx.font = "600 11px system-ui,sans-serif";
     ctx.textBaseline = "top";
-    ctx.fillText((logger?.name || "Log").slice(0, 28), 12, 14);
+    ctx.font = "600 11px system-ui,sans-serif";
+    ctx.fillStyle = "#78716c";
+    const nameMax = Math.max(40, w - (dateText ? 72 : 24));
+    let drawnName = name;
+    while (drawnName.length > 1 && ctx.measureText(drawnName).width > nameMax) drawnName = `${drawnName.slice(0, -2)}\u2026`;
+    ctx.fillText(drawnName, 12, 12);
+    if (dateText) {
+      ctx.fillStyle = "#a8a29e";
+      ctx.font = "600 10px system-ui,sans-serif";
+      const dw = ctx.measureText(dateText).width;
+      ctx.fillText(dateText, w - 12 - dw, 13);
+    }
     ctx.fillStyle = "#1c1917";
-    ctx.font = "700 22px system-ui,sans-serif";
-    ctx.fillText(formatEntryValue(logger, entry.value).slice(0, 18), 12, 34);
-    const when = new Date(entry.timestamp);
-    ctx.fillStyle = "#a8a29e";
-    ctx.font = "600 10px system-ui,sans-serif";
-    ctx.fillText(Number.isNaN(when.getTime()) ? "" : when.toLocaleDateString(), 12, h - 22);
+    ctx.font = "600 22px system-ui,sans-serif";
+    let drawnValue = valueText;
+    while (drawnValue.length > 1 && ctx.measureText(drawnValue).width > w - 24) drawnValue = `${drawnValue.slice(0, -2)}\u2026`;
+    ctx.fillText(drawnValue, 12, 34);
+    if (note) {
+      ctx.fillStyle = "#78716c";
+      ctx.font = "500 11px system-ui,sans-serif";
+      let drawnNote = note;
+      const noteMax = w - (entry.attachments?.length ? 36 : 24);
+      while (drawnNote.length > 1 && ctx.measureText(drawnNote).width > noteMax) drawnNote = `${drawnNote.slice(0, -2)}\u2026`;
+      ctx.fillText(drawnNote, 12, h - 22);
+      if (entry.attachments?.length) {
+        ctx.fillStyle = "#a8a29e";
+        ctx.font = "12px system-ui,sans-serif";
+        ctx.fillText("\u{1F4CE}", w - 22, h - 23);
+      }
+    } else if (entry.attachments?.length) {
+      ctx.fillStyle = "#a8a29e";
+      ctx.font = "12px system-ui,sans-serif";
+      ctx.fillText("\u{1F4CE}", 12, h - 22);
+    }
     ctx.restore();
   }
 

@@ -4102,7 +4102,7 @@
   const LOG_PILL = ".log-pill[data-log-entry-id]";
   const LOG_ENTRY_META = { symbol: "\u002b", label: "Log", menuLabel: "+ Log", type: LOG_ENTRY_TYPE };
   const LOG_CARD_WIDTH = 200;
-  const LOG_CARD_HEIGHT = 96;
+  const LOG_CARD_HEIGHT = 112;
   const DOT_REF_PILL = ".dot-ref-pill[data-target-id]";
   const DOT_REF_GLYPH = "\u21E2";
   const DOT_REF_DELETED = "Deleted Dot";
