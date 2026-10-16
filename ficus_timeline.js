@@ -787,6 +787,56 @@
 
   /* ---------- Timeline feed ---------- */
 
+  const MONTHS_SHORT = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
+  const WEEKDAYS_SHORT = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+
+  function dateBlockParts(day) {
+    if (!day) return { year: "————", monthDay: "NO DATE", weekday: "—" };
+    return {
+      year: String(day.getFullYear()),
+      monthDay: `${MONTHS_SHORT[day.getMonth()]} ${day.getDate()}`,
+      weekday: WEEKDAYS_SHORT[day.getDay()],
+    };
+  }
+
+  function dateBlockEl(day, { undated = false } = {}) {
+    const parts = undated
+      ? { year: "————", monthDay: "NO DATE", weekday: "—" }
+      : dateBlockParts(day);
+    const box = document.createElement("div");
+    box.className = "ftime-date-block";
+    box.setAttribute("aria-hidden", "true");
+    box.innerHTML = `
+      <span class="ftime-date-year">${escapeHtml(parts.year)}</span>
+      <span class="ftime-date-md">${escapeHtml(parts.monthDay)}</span>
+      <span class="ftime-date-wd">${escapeHtml(parts.weekday)}</span>`;
+    return box;
+  }
+
+  function feedDayRow(key, group, day, { undated = false } = {}) {
+    const section = document.createElement("section");
+    section.className = "ftime-feed-day";
+    section.dataset.ftimeDay = key;
+
+    const label = undated
+      ? "No date"
+      : (day
+        ? `${day.getFullYear()} ${MONTHS_SHORT[day.getMonth()]} ${day.getDate()} ${WEEKDAYS_SHORT[day.getDay()]}`
+        : key);
+    const heading = document.createElement("h2");
+    heading.className = "sr-only";
+    heading.textContent = label;
+    section.append(heading);
+
+    section.append(dateBlockEl(day, { undated }));
+
+    const list = document.createElement("div");
+    list.className = "ftime-feed-cards";
+    for (const item of group) list.append(feedCard(item));
+    section.append(list);
+    return section;
+  }
+
   function renderTimeline(items) {
     const wrap = document.createElement("div");
     wrap.className = "ftime-feed";
@@ -806,36 +856,11 @@
     }
 
     for (const [key, group] of groups) {
-      const day = parseTaskDue(key);
-      const section = document.createElement("section");
-      section.className = "ftime-feed-day";
-      section.dataset.ftimeDay = key;
-      const sticky = document.createElement("h2");
-      sticky.className = "ftime-feed-sticky";
-      sticky.textContent = day
-        ? day.toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", year: "numeric" })
-        : key;
-      section.append(sticky);
-      const list = document.createElement("div");
-      list.className = "ftime-feed-cards";
-      for (const item of group) list.append(feedCard(item));
-      section.append(list);
-      wrap.append(section);
+      wrap.append(feedDayRow(key, group, parseTaskDue(key)));
     }
 
     if (undated.length) {
-      const section = document.createElement("section");
-      section.className = "ftime-feed-day";
-      section.dataset.ftimeDay = "undated";
-      const sticky = document.createElement("h2");
-      sticky.className = "ftime-feed-sticky";
-      sticky.textContent = "No date";
-      section.append(sticky);
-      const list = document.createElement("div");
-      list.className = "ftime-feed-cards";
-      for (const item of undated) list.append(feedCard(item));
-      section.append(list);
-      wrap.append(section);
+      wrap.append(feedDayRow("undated", undated, null, { undated: true }));
     }
 
     ui.stage.append(wrap);

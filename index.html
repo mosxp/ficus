@@ -22,7 +22,7 @@
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
     <script src="ficus_dashboards.js?v=3" defer></script>
-    <script src="ficus_timeline.js?v=3" defer></script>
+    <script src="ficus_timeline.js?v=4" defer></script>
     <script src="collection.js?v=30" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -1001,14 +1001,33 @@
       .ftime-heat--3 { background: #78716c; }
       .ftime-heat--4 { background: #1c1917; }
 
-      .ftime-feed { max-width: 42rem; margin: 0 auto; padding: 16px 16px 48px; }
-      .ftime-feed-day { margin-bottom: 1.25rem; }
-      .ftime-feed-sticky {
-        position: sticky; top: 0; z-index: 2; margin: 0 0 0.65rem; padding: 0.55rem 0;
-        font-size: 0.78rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: #78716c;
-        background: linear-gradient(#fcfcfc 70%, rgba(252,252,252,0));
+      .ftime-feed {
+        max-width: 52rem; margin: 0 auto; padding: 20px 20px 48px;
+        display: flex; flex-direction: column; gap: 0; width: 100%; box-sizing: border-box;
       }
-      .ftime-feed-cards { display: flex; flex-direction: column; gap: 10px; }
+      .ftime-feed-day {
+        display: flex; flex-direction: row; align-items: flex-start; gap: 1.5rem;
+        width: 100%; margin: 0 0 2rem; box-sizing: border-box;
+      }
+      .ftime-date-block {
+        position: sticky; top: 12px; z-index: 1;
+        display: flex; flex: 0 0 8rem; width: 8rem; flex-direction: column; align-items: flex-start;
+        gap: 0.15rem; padding: 0.75rem; border: 2px solid #000; background: #fff;
+        box-sizing: border-box;
+      }
+      .ftime-date-year {
+        font-size: 0.8rem; font-weight: 700; letter-spacing: 0.12em; color: #6b7280; line-height: 1.2;
+      }
+      .ftime-date-md {
+        font-size: 1.25rem; font-weight: 800; letter-spacing: -0.02em; color: #000; line-height: 1.15;
+      }
+      .ftime-date-wd {
+        font-size: 0.8rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: #000; line-height: 1.2;
+      }
+      .ftime-feed-cards {
+        display: flex; flex: 1 1 auto; flex-direction: column; gap: 0.75rem;
+        min-width: 0;
+      }
       .ftime-card {
         display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: 0; width: 100%;
         border: 1px solid #e7e5e4; background: #fff; padding: 0; text-align: left; cursor: pointer;
@@ -1050,6 +1069,10 @@
         .ftime-grid { min-width: 560px; }
         .ftime-modes { width: 100%; }
         .ftime-mode { flex: 1 1 auto; text-align: center; }
+        .ftime-feed { padding: 12px 12px 40px; }
+        .ftime-feed-day { flex-direction: column; gap: 0.75rem; margin-bottom: 1.5rem; }
+        .ftime-date-block { position: static; flex-basis: auto; width: 100%; flex-direction: row; align-items: baseline; gap: 0.65rem; }
+        .ftime-date-md { font-size: 1.1rem; }
       }
 
       /* Collection → Logger Dashboards */
