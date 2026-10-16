@@ -23,7 +23,8 @@
     <script src="ficus_log_entries.js?v=6" defer></script>
     <script src="ficus_dashboards.js?v=3" defer></script>
     <script src="ficus_timeline.js?v=6" defer></script>
-    <script src="collection.js?v=30" defer></script>
+    <script src="ficus_cells.js?v=2" defer></script>
+    <script src="collection.js?v=31" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
       const APP_STORAGE_EPOCH = "2026-10-03-clean";
@@ -44,7 +45,7 @@
     <!-- Bump ?v= whenever these change so browsers never pair them with a different index.html. -->
     <script src="ficus_drive.js?v=6"></script>
     <script src="ficus_cloud.js?v=15"></script>
-    <script src="ficus_store.js?v=9"></script>
+    <script src="ficus_store.js?v=10"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -842,8 +843,146 @@
       }
 
 
+      #collection-content.is-cells { display: flex; padding: 0; overflow: auto; }
       #collection-content.is-dashboards { display: flex; padding: 0; overflow: hidden; }
       #collection-content.is-time { display: flex; padding: 0; overflow: hidden; }
+
+      /* Collection → Cells (memory palace) */
+      .fcells {
+        --ctags-preview-width: 400px;
+        display: flex; flex-direction: row; height: auto; min-height: 100%; width: 100%;
+        min-width: 0; overflow: visible; position: relative;
+        background: #f6f3ee; color: #1c1917;
+      }
+      .fcells-main { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 100%; }
+      .fcells.has-preview .ctags-preview {
+        width: var(--ctags-preview-width); border-left: 1px solid #e5e5e5; visibility: visible;
+        transition: width 0.3s ease;
+      }
+      .fcells.is-resizing .ctags-preview { transition: none; }
+      .fcells-bar {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem 0.65rem;
+        flex-shrink: 0; min-height: 57px; padding: 10px 16px 12px; border-bottom: 1px solid #e5e5e5; background: #fff;
+        padding-right: max(16px, calc(var(--ficus-account-room) + 12px));
+      }
+      .fcells-heading { margin: 0; font-size: 1.15rem; font-weight: 700; }
+      .fcells-title, .fcells-select, .fcells-search {
+        min-height: 32px; border: 1px solid #d6d3d1; border-radius: 999px; background: #fff; color: #1c1917;
+        font: inherit; font-size: 0.85rem; padding: 0.2rem 0.75rem;
+      }
+      .fcells-title { width: 11rem; max-width: 40vw; }
+      .fcells-btn {
+        min-height: 32px; padding: 0.2rem 0.75rem; border-radius: 999px; border: 1px solid #d6d3d1;
+        background: #fff; color: #1c1917; font: inherit; font-size: 0.82rem; font-weight: 650; cursor: pointer;
+      }
+      .fcells-btn.is-primary { background: #1c1917; color: #fff; border-color: #1c1917; }
+      .fcells-btn:focus-visible, .fcells-title:focus-visible, .fcells-select:focus-visible, .fcells-search:focus-visible, .fcells-z:focus-visible {
+        outline: 2px solid #1c1917; outline-offset: 2px;
+      }
+      .fcells-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; }
+      .fcells-level { font-size: 0.82rem; font-weight: 700; letter-spacing: 0.02em; color: #44403c; }
+      .fcells-z { width: 7.5rem; min-height: 32px; accent-color: #1c1917; touch-action: none; }
+      .fcells-stage { flex: 1 0 auto; min-height: 32rem; min-width: 0; position: relative; }
+      .fcells-scene {
+        position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+        overflow: auto; perspective: 1200px; padding: 4rem 2rem 6rem;
+        background: radial-gradient(ellipse at center, #fff 0%, #efeae3 72%);
+      }
+      .fcells-scene.is-entering { animation: fcells-in 180ms ease; }
+      @keyframes fcells-in { from { opacity: 0; } to { opacity: 1; } }
+      .fcells-empty { display: flex; flex-direction: column; align-items: center; gap: 0.75rem; text-align: center; color: #57534e; }
+      .fcells-plane, .fcells-room {
+        position: relative; transform: rotateX(60deg) rotateZ(-45deg); transform-style: preserve-3d; flex-shrink: 0;
+      }
+      .fcells-room { width: 200px; height: 200px; margin: 6.5rem auto 1.5rem; }
+      .fcell-slot, .fcell-cube {
+        position: absolute; width: 56px; height: 56px; padding: 0; border: 0; background: transparent;
+        transform-style: preserve-3d; cursor: pointer; touch-action: manipulation;
+      }
+      .fcell-slot {
+        background: rgba(255, 255, 255, 0.35); border: 1px dashed rgba(28, 25, 23, 0.35);
+      }
+      .fcell-slot:hover, .fcell-slot:focus-visible, .fcell-cube:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      .fcell-face { position: absolute; border: 1px solid #1c1917; }
+      .fcell-face-top { left: 0; top: 0; width: 56px; height: 56px; background: #faf7f2; transform: translateZ(32px); }
+      .fcell-face-left {
+        left: 0; top: -32px; width: 56px; height: 32px; background: #8d8378;
+        transform-origin: bottom center; transform: rotateX(-90deg);
+      }
+      .fcell-face-right {
+        top: 0; left: 56px; width: 32px; height: 56px; background: #c4b8a8;
+        transform-origin: left center; transform: rotateY(-90deg);
+      }
+      .fcell-count {
+        position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%) translateZ(33px);
+        min-width: 1.1rem; font-size: 0.68rem; font-weight: 800; pointer-events: none;
+      }
+      .fcell-surface { position: absolute; transform-style: preserve-3d; border: 1px solid #1c1917; }
+      .fcell-surface-floor {
+        inset: 0; background: #f4efe6;
+        background-image: linear-gradient(rgba(28, 25, 23, 0.08) 1px, transparent 1px), linear-gradient(90deg, rgba(28, 25, 23, 0.08) 1px, transparent 1px);
+        background-size: 25% 25%;
+      }
+      .fcell-surface-left {
+        left: 0; top: -120px; width: 100%; height: 120px; background: #e4ddd0;
+        transform-origin: bottom center; transform: rotateX(-90deg);
+      }
+      .fcell-surface-right {
+        top: 0; left: 100%; width: 120px; height: 100%; background: #efe8dc;
+        transform-origin: left center; transform: rotateY(-90deg);
+      }
+      .fcell-surface.is-hot { box-shadow: inset 0 0 0 3px #1c1917; }
+      .fcell-probe { position: absolute; width: 0; height: 0; pointer-events: none; }
+      .fcell-probe[data-probe="o"] { left: 0; top: 0; }
+      .fcell-probe[data-probe="x"] { left: 100%; top: 0; }
+      .fcell-probe[data-probe="y"] { left: 0; top: 100%; }
+      .fcell-item {
+        position: absolute; transform: translate(-50%, -50%); min-width: 28px; min-height: 28px;
+        display: flex; flex-direction: column; align-items: center; gap: 2px;
+        touch-action: none; cursor: grab; z-index: 1;
+      }
+      .fcell-item.is-selected { outline: 2px solid #1c1917; outline-offset: 3px; }
+      .fcell-item:focus-visible { outline: 2px solid #1c1917; outline-offset: 3px; }
+      .fcell-glyph { display: flex; align-items: center; justify-content: center; pointer-events: none; }
+      .fcell-glyph img { display: block; max-width: 96px; max-height: 96px; object-fit: contain; }
+      .fcell-glyph-door, .fcell-glyph-ladder {
+        min-width: 72px; min-height: 36px; padding: 0.35rem 0.5rem; border: 2px solid #1c1917;
+        background: #fff; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase;
+      }
+      .fcell-glyph-door { border-radius: 40px 40px 4px 4px; }
+      .fcell-item-link {
+        position: relative; min-width: 28px; min-height: 28px; padding: 0 0.45rem;
+        border-radius: 999px; border: 1px solid #1c1917; background: #fff; color: #1c1917;
+        font: inherit; font-size: 0.65rem; font-weight: 800; cursor: pointer;
+      }
+      .fcell-link-mark {
+        position: absolute; left: -4px; top: -4px; width: 8px; height: 8px; border-radius: 999px; background: #1c1917;
+      }
+      .fcells-modal {
+        position: absolute; inset: 0; z-index: 8; display: flex; align-items: center; justify-content: center;
+        background: rgba(28, 25, 23, 0.28); padding: 1rem;
+      }
+      .fcells-modal.hidden { display: none; }
+      .fcells-modal-card {
+        width: min(28rem, 100%); max-height: min(32rem, 100%); display: flex; flex-direction: column; gap: 0.75rem;
+        padding: 1rem; background: #fff; border: 1px solid #e5e5e5; box-shadow: 0 16px 40px rgba(28, 25, 23, 0.16);
+      }
+      .fcells-modal-title { margin: 0; font-size: 1rem; font-weight: 750; }
+      .fcells-modal-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.4rem; }
+      .fcells-search { width: 100%; }
+      .fcells-search-list { list-style: none; margin: 0; padding: 0; overflow: auto; min-height: 0; display: flex; flex-direction: column; gap: 0.25rem; }
+      .fcells-search-hit {
+        width: 100%; min-height: 36px; display: flex; align-items: center; justify-content: space-between; gap: 0.75rem;
+        padding: 0.35rem 0.7rem; border: 1px solid #e7e5e4; background: #fff; text-align: left; font: inherit; cursor: pointer;
+      }
+      .fcells-search-kind { font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: #78716c; }
+      .fcells-search-empty { padding: 0.5rem 0.2rem; color: #78716c; }
+      .fcells-draw { width: 100%; height: auto; touch-action: none; background: repeating-conic-gradient(#f5f5f4 0% 25%, #fff 0% 50%) 0 0 / 16px 16px; border: 1px solid #d6d3d1; cursor: crosshair; }
+      @media (hover: none), (pointer: coarse) {
+        .fcells-btn, .fcells-title, .fcells-select { min-height: 36px; }
+        .fcell-slot { border-width: 2px; }
+      }
+      @media (prefers-reduced-motion: reduce) { .fcells-scene.is-entering { animation: none; } }
 
       /* Collection → Time / Timeline */
       .ftime {
@@ -1573,8 +1712,11 @@
         #collection-content { padding: 24px 20px; }
         #collection-content.is-tags,
         #collection-content.is-flashcards,
+        #collection-content.is-cells,
         #collection-content.is-dashboards,
         #collection-content.is-time { padding: 0; }
+        .fcells .ctags-preview { position: absolute; top: 0; right: 0; bottom: 0; z-index: 4; }
+        .fcells.has-preview .ctags-preview { width: min(var(--ctags-preview-width), 100%); box-shadow: -4px 0 12px rgba(0, 0, 0, 0.1); }
         .ctags { flex-direction: column; }
         .ctags-explorer { width: 100%; max-height: 40%; border-right: 0; border-bottom: 1px solid #e5e5e5; }
         .ctags-viewport { min-height: 0; }
@@ -5409,9 +5551,10 @@
             </button>
             <div class="collection-tool-divider" role="separator"></div>
             <button type="button" class="collection-tool" data-collection-page="cells" aria-label="Cells" title="Cells">
-              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square" aria-hidden="true">
-                <path d="M2.5 2.5h11v11h-11z" />
-                <path d="M2.5 6.25h11M2.5 9.75h11M6.5 2.5v11" />
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="miter" aria-hidden="true">
+                <path d="M8 2.15 13.15 4.9v6.2L8 13.85 2.85 11.1V4.9Z" />
+                <path d="M2.85 4.9 8 7.65 13.15 4.9" />
+                <path d="M8 7.65v6.2" />
               </svg>
             </button>
             <button type="button" class="collection-tool" data-collection-page="templates" aria-label="Templates" title="Templates">

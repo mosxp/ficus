@@ -14,10 +14,14 @@
  *     log_entries, recorded values for input loggers (see ficus_log_entries.js)
  *     templates,   reusable master dots (space.js); same shape as a dot plus isTemplate / templateLevel
  *     flashcard_collections,  Collection → Flashcards study sets (custom / tag / hub)
- *     logger_dashboards }     Collection → Logger Dashboards (widgets over log_entries)
+ *     logger_dashboards,      Collection → Logger Dashboards (widgets over log_entries)
+ *     memory_maps }           Collection → Cells memory palaces
+ *                             [{ id, title, cells: [{ id, coordinates: { x, y, z },
+ *                                items: [{ id, type, position: { isoX, isoY, wall },
+ *                                          targetDotId, targetCellId, assetUrl }] }] }]
  * Version 2 added loggers and logger_groups; version 3 added log_entries; version 4 added templates;
- * version 5 added flashcard_collections; version 6 added logger_dashboards. A page still on an older
- * version refuses a newer file (parseMaster), so it can't save over them.
+ * version 5 added flashcard_collections; version 6 added logger_dashboards; version 7 added memory_maps.
+ * A page still on an older version refuses a newer file (parseMaster), so it can't save over them.
  *
  * load(session) reads it once, at sign-in, and space.js and collection.js then read from memory without waiting.
  * Their saves change memory at once; a copy goes into IndexedDB on this device straight after, and 3 seconds after
@@ -28,7 +32,7 @@
   "use strict";
 
   const FORMAT = "ficus-master";
-  const VERSION = 6;
+  const VERSION = 7;
   const PAGE_KINDS = new Set(["board", "block", "block_board"]);
   const DRIVE_DELAY_MS = 3000;
   const DEVICE_DELAY_MS = 400;
@@ -73,6 +77,7 @@
   let templates = [];
   let flashcardCollections = [];
   let loggerDashboards = [];
+  let memoryMaps = [];
 
   // The Drive file and the revision of it this device last read or wrote.
   let fileId = null;
@@ -109,6 +114,7 @@
       templates,
       flashcard_collections: flashcardCollections,
       logger_dashboards: loggerDashboards,
+      memory_maps: memoryMaps,
     };
   }
 
@@ -141,6 +147,8 @@
     if (!Array.isArray(flashcardCollections)) flashcardCollections = [];
     loggerDashboards = list(master.logger_dashboards);
     if (!Array.isArray(loggerDashboards)) loggerDashboards = [];
+    memoryMaps = list(master.memory_maps);
+    if (!Array.isArray(memoryMaps)) memoryMaps = [];
   }
 
   // The Drive file's text as a master object; throws (so nothing overwrites it) if it isn't one.
@@ -378,6 +386,7 @@
     templates = [];
     flashcardCollections = [];
     loggerDashboards = [];
+    memoryMaps = [];
     setStatus();
   }
 
@@ -681,6 +690,13 @@
       if (!uid) return;
       loggerDashboards = Array.isArray(next) ? next : [];
       changed();
+    },
+
+    // Collection → Cells memory palaces (isometric rooms linked to dots).
+    getMemoryMaps: () => (Array.isArray(memoryMaps) ? memoryMaps : []),
+    saveMemoryMaps(next) {
+      memoryMaps = Array.isArray(next) ? next : [];
+      if (uid) changed();
     },
 
     // The libraries ficus_cloud.js answers /api/checklist-templates and /api/scrapbook/... from. `edit` changes

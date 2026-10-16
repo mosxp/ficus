@@ -76,10 +76,12 @@
     el.content.classList.toggle("is-notebooks", currentPage === "notebooks");
     el.content.classList.toggle("is-templates", currentPage === "templates");
     el.content.classList.toggle("is-flashcards", currentPage === "flashcards");
+    el.content.classList.toggle("is-cells", currentPage === "cells");
     el.content.classList.toggle("is-dashboards", currentPage === "dashboards");
     el.content.classList.toggle("is-time", currentPage === "time");
     if (currentPage !== "tags") hideTagsPage();
     if (currentPage !== "flashcards") hideFlashcardsPage();
+    if (currentPage !== "cells") window.FicusCells?.hide?.();
     if (currentPage !== "dashboards") window.FicusDashboards?.hide?.();
     if (currentPage !== "time") window.FicusTimeline?.hide?.();
     if (currentPage !== "notebooks") {
@@ -100,6 +102,10 @@
     }
     if (currentPage === "flashcards") {
       if (active) showFlashcardsPage();
+      return;
+    }
+    if (currentPage === "cells") {
+      if (active) window.FicusCells?.show?.();
       return;
     }
     if (currentPage === "dashboards") {

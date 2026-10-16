@@ -183,7 +183,7 @@ Ficus has no database of its own: each user's work is kept in their own Google D
 | `uploads/` | Photos, files, audio and video from `/api/upload`, and the images of stickers and sticky pads. |
 | `ficus_master_backup (replaced …).json`, `(unsynced from a device …)` | Copies kept when two devices saved over each other (below). |
 
-The master file is `{ format: "ficus-master", version: 6, savedAt, dots, pages, tags, notebooks, library, loggers, logger_groups, log_entries, templates, flashcard_collections, logger_dashboards }`:
+The master file is `{ format: "ficus-master", version: 7, savedAt, dots, pages, tags, notebooks, library, loggers, logger_groups, log_entries, templates, flashcard_collections, logger_dashboards, memory_maps }`:
 
 | Field | Holds | Replaces (localStorage, per user) |
 |-------|-------|-----------------------------------|
@@ -198,11 +198,12 @@ The master file is `{ format: "ficus-master", version: 6, savedAt, dots, pages, 
 | `templates` | Master dot templates (same shape as a dot, plus `isTemplate` / `templateLevel`). Board/block page data is keyed by the template id. | Nothing: new in version 4 |
 | `flashcard_collections` | Collection → Flashcards sets: `{ id, title, type: custom\|tag\|hub, targetId, customDots, studyData }`. | Nothing: new in version 5 |
 | `logger_dashboards` | Collection → Logger Dashboards: `{ id, title, widgets: [{ id, type, loggerIds, title, layout }] }`. | Nothing: new in version 6 |
+| `memory_maps` | Collection → Cells: `{ id, title, cells: [{ id, coordinates: { x, y, z }, items: [{ id, type: sticker\|drawing\|door\|ladder, position: { isoX, isoY, wall: floor\|left\|right }, targetDotId?, targetCellId?, assetUrl? }] }] }`. | Nothing: new in version 7 |
 
-Version 2 added `loggers` and `logger_groups`; version 3 added `log_entries`; version 4 added `templates`; version 5 added `flashcard_collections`; version 6 added `logger_dashboards`. A page still running older code refuses a newer file when it loads it ("saved by a newer version of Ficus. Reload the page to update."), so it can't save over them.
+Version 2 added `loggers` and `logger_groups`; version 3 added `log_entries`; version 4 added `templates`; version 5 added `flashcard_collections`; version 6 added `logger_dashboards`; version 7 added `memory_maps`. A page still running older code refuses a newer file when it loads it ("saved by a newer version of Ficus. Reload the page to update."), so it can't save over them.
 
 `ficus_store.js` (`window.FicusStore`) holds it in memory:
-- `load(session)` reads it once, at sign-in, while a spinner covers the app. From then on `space.js`, `collection.js` and `ficus_cloud.js` read from memory, synchronously. Their API is unchanged from the localStorage days (`getDots` / `saveDots`, `getPage` / `setPage` / `removePage`, `getTags` / `saveTagTypes` / `saveTagColors`, `getNotebooks` / `saveNotebooks`), plus `getLibrary` / `editLibrary`, `getLoggers` / `saveLoggers(loggers, groups)`, `getLogEntries` / `saveLogEntries`, and `getTemplates` / `saveTemplates`, and `getFlashcardCollections` / `saveFlashcardCollections`, and `getLoggerDashboards` / `saveLoggerDashboards`.
+- `load(session)` reads it once, at sign-in, while a spinner covers the app. From then on `space.js`, `collection.js` and `ficus_cloud.js` read from memory, synchronously. Their API is unchanged from the localStorage days (`getDots` / `saveDots`, `getPage` / `setPage` / `removePage`, `getTags` / `saveTagTypes` / `saveTagColors`, `getNotebooks` / `saveNotebooks`), plus `getLibrary` / `editLibrary`, `getLoggers` / `saveLoggers(loggers, groups)`, `getLogEntries` / `saveLogEntries`, and `getTemplates` / `saveTemplates`, and `getFlashcardCollections` / `saveFlashcardCollections`, and `getLoggerDashboards` / `saveLoggerDashboards`, and `getMemoryMaps` / `saveMemoryMaps`.
 - Saves change memory at once, so the UI never waits. A copy of everything goes into IndexedDB on this device 400ms later (`master:<user id>` in the `ficus` database, with the Drive file's id and revision and whether Drive is behind). 3 seconds after the last change, the whole object overwrites the Drive file (a `PATCH` upload).
 - Before each write it checks the file's `headRevisionId`. If it isn't the one this device last read or wrote, another device saved in between: that version is copied beside it as `… (replaced <local time>).json` before the overwrite. Nothing is merged.
 - A failed write is retried after 5, 15, 30, then every 60 seconds, and straight away when the browser comes back online. Hiding the tab writes what's waiting, and closing it asks first only if the device copy isn't written yet. An expired token isn't retried: it waits for Reconnect (see "Signing in" in section 4).
