@@ -269,7 +269,8 @@
 
   function h(tag, attrs = {}, ...children) {
     const node = document.createElement(tag);
-    for (const [key, value] of Object.entries(attrs)) {
+    // Tolerate null/undefined attrs (Object.entries(null) would throw and leave the list stuck on screen).
+    for (const [key, value] of Object.entries(attrs || {})) {
       if (value == null || value === false) continue;
       if (key === "class") node.className = value;
       else if (key === "text") node.textContent = value;
@@ -305,10 +306,13 @@
       back.textContent = "\u2190 Back";
       back.hidden = true;
       head.insertBefore(back, title);
+    }
+    if (back && !back.dataset.logBackBound) {
+      back.dataset.logBackBound = "1";
       back.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        clearSelectedLogger();
+        setSelectedLogger(null);
       });
     }
     el = {
@@ -336,8 +340,20 @@
     return true;
   }
 
-  function selectLogger(logger) {
-    if (!logger?.id || logger.mode !== "standard") return;
+  function setSelectedLogger(logger) {
+    if (logger == null) {
+      if (ui.mode === "edit") return;
+      stopStopwatch();
+      ui.selectedLogger = null;
+      ui.loggerId = "";
+      ui.value = null;
+      ui.error = "";
+      ui.stopwatch = null;
+      syncChrome();
+      render();
+      return;
+    }
+    if (!logger?.id || (logger.mode && logger.mode !== "standard")) return;
     ui.selectedLogger = logger;
     ui.loggerId = logger.id;
     ui.value = defaultValue(logger);
@@ -346,16 +362,12 @@
     render();
   }
 
+  function selectLogger(logger) {
+    setSelectedLogger(logger);
+  }
+
   function clearSelectedLogger() {
-    if (ui.mode === "edit") return;
-    stopStopwatch();
-    ui.selectedLogger = null;
-    ui.loggerId = "";
-    ui.value = null;
-    ui.error = "";
-    ui.stopwatch = null;
-    syncChrome();
-    render();
+    setSelectedLogger(null);
   }
 
   function syncChrome() {
@@ -431,10 +443,22 @@
   }
 
   function render() {
-    if (!el) return;
+    if (!el?.body) return;
     syncChrome();
-    // List view when no logger is selected (create flow); form view once one is chosen (or edit).
-    el.body.replaceChildren(ui.selectedLogger ? renderForm() : renderPick());
+    // Strict toggle: list XOR form. Never leave the previous view in the body.
+    el.body.replaceChildren();
+    try {
+      if (ui.selectedLogger) el.body.append(renderForm());
+      else el.body.append(renderPick());
+    } catch (err) {
+      console.error("LogEntryModal render failed", err);
+      el.body.replaceChildren(h("div", { class: "log-entry-step" },
+        h("p", { class: "log-entry-error", role: "alert", text: "Could not open the entry form. Try another logger or reload." }),
+        ui.mode === "create" && h("button", {
+          type: "button", class: "log-entry-secondary", text: "\u2190 Back",
+          onclick: () => clearSelectedLogger(),
+        })));
+    }
   }
 
   function renderPick() {
@@ -555,29 +579,38 @@
         },
       }),
       h("div", { class: "log-entry-foot-spacer" }),
-      h("button", { type: "button", class: "log-entry-secondary", text: "Cancel", onclick: () => close() }),
       h("button", {
-        type: "button", class: "log-entry-primary", text: ui.mode === "edit" ? "Save" : "Log it",
+        type: "button", class: "log-entry-secondary", text: "Cancel",
+        onclick: () => {
+          if (ui.mode === "create" && ui.selectedLogger) clearSelectedLogger();
+          else close();
+        },
+      }),
+      h("button", {
+        type: "button", class: "log-entry-primary", text: "Save Log",
         onclick: () => saveForm(logger),
       }),
     ].filter(Boolean);
 
-    return h("div", { class: "log-entry-step" },
-      h("div", { class: "log-entry-logger" }, tile(logger), h("div", null,
+    const note = h("textarea", {
+      class: "log-entry-input log-entry-note", rows: "3", maxlength: String(NOTE_MAX),
+      placeholder: "Optional context",
+      oninput: (event) => { ui.note = event.target.value; },
+    });
+    note.value = ui.note || "";
+
+    return h("div", { class: "log-entry-step is-form", "data-log-form": "" },
+      h("div", { class: "log-entry-logger" }, tile(logger), h("div", {},
         h("strong", { text: logger.name }),
         h("small", { text: typeLabel(logger) }))),
       field("Date & time", h("input", {
-        type: "datetime-local", class: "log-entry-input is-tall", value: ui.timestamp,
+        type: "datetime-local", class: "log-entry-input is-tall", value: ui.timestamp || toLocalInput(),
         oninput: (event) => { ui.timestamp = event.target.value; },
       })),
       field("Value", valueControl(logger)),
-      field("Notes", h("textarea", {
-        class: "log-entry-input log-entry-note", rows: "3", maxlength: String(NOTE_MAX),
-        placeholder: "Optional context",
-        oninput: (event) => { ui.note = event.target.value; },
-      }, ui.note)),
-      allowAttach && attachBlock(logger),
-      ui.error && h("p", { class: "log-entry-error", role: "alert", text: ui.error }),
+      field("Notes", note),
+      allowAttach ? attachBlock(logger) : null,
+      ui.error ? h("p", { class: "log-entry-error", role: "alert", text: ui.error }) : null,
       h("div", { class: "log-entry-foot" }, ...foot));
   }
 
