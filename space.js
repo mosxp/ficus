@@ -1621,15 +1621,31 @@
   const SPACE_BG_COLORS = { white: "#FFFFFF", black: "#111111", gray: "#F3F4F6" };
   let themeColor = "white";
 
+  function themeHex(name) {
+    return SPACE_BG_COLORS[SPACE_BGS.includes(name) ? name : "white"];
+  }
+
+  function paintSpaceBackground(color) {
+    const scheme = color === SPACE_BG_COLORS.black ? "dark" : "light";
+    for (const node of [el.view, el.stage, el.backdrop, el.canvas, el.camera]) {
+      if (!node) continue;
+      node.style.setProperty("--space-bg", color);
+      node.style.setProperty("background-color", color, "important");
+      node.style.colorScheme = scheme;
+    }
+    if (el.canvas) el.canvas.style.backgroundColor = "transparent";
+    if (el.camera) el.camera.style.backgroundColor = "transparent";
+    document.documentElement.style.colorScheme = scheme;
+  }
+
   function applyBg(name) {
     themeColor = SPACE_BGS.includes(name) ? name : "white";
-    const color = SPACE_BG_COLORS[themeColor];
+    const color = themeHex(themeColor);
     el.view.dataset.spaceBg = themeColor;
-    el.view.style.backgroundColor = color;
-    if (el.canvas) el.canvas.style.backgroundColor = color;
+    paintSpaceBackground(color);
     const swatch = el.bgBtn?.querySelector(".space-bg-fab-swatch");
     if (swatch) swatch.style.background = color;
-    el.bgMenu.querySelectorAll("[data-space-bg-choice]").forEach((item) => {
+    el.bgMenu?.querySelectorAll("[data-space-bg-choice]").forEach((item) => {
       item.setAttribute("aria-checked", item.dataset.spaceBgChoice === themeColor ? "true" : "false");
     });
     return themeColor;
@@ -16012,7 +16028,7 @@
   function init() {
     if (ready) return true;
     const ids = {
-      view: "view-space", canvas: "space-canvas", camera: "space-camera", nodes: "space-nodes", emptyHint: "space-empty-hint",
+      view: "view-space", stage: "space-view", backdrop: "space-backdrop", canvas: "space-canvas", camera: "space-camera", nodes: "space-nodes", emptyHint: "space-empty-hint",
       linkLayer: "space-link-layer",
       linksSvg: "space-links", addMenu: "space-add-menu", dotMenu: "space-dot-menu", toast: "space-toast",
       appearancePop: "space-appearance-pop", orbitLayer: "space-orbit-layer", viewBtn: "space-view-btn",
@@ -16268,10 +16284,12 @@
       closeMenus();
       stopSimulation();
       hoverId = null;
+      document.documentElement.style.colorScheme = "";
       return;
     }
     const shown = !active;
     active = true;
+    applyBg(themeColor);
     loadDots();
     if (!openDotId) render();
     if (shown && !openDotId) scatterDots();

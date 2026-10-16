@@ -18,7 +18,7 @@
     <script src="canvas-editor.js?v=2"></script>
     <script src="scrapboard.js?v=26"></script>
     <script src="quick_line.js?v=2"></script>
-    <script src="space.js?v=101" defer></script>
+    <script src="space.js?v=102" defer></script>
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
     <script src="ficus_dashboards.js?v=3" defer></script>
@@ -1903,8 +1903,21 @@
         inset: 0;
         z-index: 20;
         overflow: hidden;
+        color-scheme: light;
         background-color: var(--space-bg, #ffffff);
         transition: background-color 240ms ease;
+      }
+      #space-view {
+        position: absolute;
+        inset: 0;
+        background: transparent;
+      }
+      .space-backdrop {
+        position: absolute;
+        inset: 0;
+        z-index: 0;
+        pointer-events: none;
+        background-color: var(--space-bg, #ffffff);
       }
       /* The one gray every dot (and every dot-type marker in the menus and page headers) starts as. */
       :root { --dot-default: #8c8c8c; }
@@ -1915,12 +1928,13 @@
       }
       #view-space[data-space-bg="gray"] { --space-bg: #F3F4F6; --space-hint: #8a8580; }
       #view-space[data-space-bg="black"] {
+        color-scheme: dark;
         --space-bg: #111111; --space-ink: #e7e5e4; --space-hint: #78716c;
         --space-line: rgba(255, 255, 255, 0.26); --space-line-lit: rgba(255, 255, 255, 0.7); --space-ring: #f5f5f4;
       }
       #view-space:not(.hidden) { animation: space-fade-in 200ms ease-out; }
       #view-space.hidden { display: none; }
-      .space-canvas { position: absolute; inset: 0; cursor: default; touch-action: none; user-select: none; }
+      .space-canvas { position: absolute; inset: 0; z-index: 1; background: transparent; cursor: default; touch-action: none; user-select: none; }
       .space-camera { position: absolute; inset: 0; transform-origin: 0 0; transition: transform 480ms ease; pointer-events: none; }
       .space-dot { pointer-events: auto; }
       .space-dot.is-search-hit .space-dot-core {
@@ -5149,6 +5163,7 @@
 
       <section id="view-space" class="hidden" aria-label="Space">
         <div id="space-view" class="view-panel">
+          <div id="space-backdrop" class="space-backdrop" aria-hidden="true"></div>
           <div id="space-canvas" class="space-canvas" role="application" tabindex="0" aria-label="Space canvas. Click empty space, or press Enter, to add a dot" aria-keyshortcuts="Enter Shift+F10">
             <p id="space-empty-hint" class="space-empty-hint">Click anywhere to place your first dot</p>
             <div id="space-camera" class="space-camera">
