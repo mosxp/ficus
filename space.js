@@ -3505,42 +3505,71 @@
     fmt.savedRange = range.cloneRange();
   }
 
-  /** Puts a card on its own line after the caret's block (or in place of an empty line), then moves the caret below it. */
+  /** Puts a bookmark/file card at the restored caret (including inside table cells), then moves the caret after it. */
   function insertCard(html) {
     if (!restoreSelection()) return null;
     const root = editorRoot();
-    const range = window.getSelection().getRangeAt(0);
+    const sel = window.getSelection();
+    if (!sel?.rangeCount) return null;
+    const range = sel.getRangeAt(0);
     range.collapse(false);
+    // Never nest inside another solid piece (a card, photo, or tag): land just after it.
+    const solid = (range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer : range.startContainer.parentElement)
+      ?.closest?.('[contenteditable="false"]');
+    if (solid && solid !== root && root.contains(solid)) range.setStartAfter(solid);
     const holder = document.createElement("div");
     holder.innerHTML = html;
     const card = holder.firstElementChild;
-    let top = range.startContainer;
-    if (top === root) {
-      root.insertBefore(card, root.childNodes[range.startOffset] || null);
-    } else {
-      while (top.parentNode !== root) top = top.parentNode;
-      if (top.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.test(top.tagName)) {
-        const blank = TEXT_BLOCKS.test(top.tagName) && !top.textContent.replace(/[\s\u200b\u00a0]/g, "") && !top.querySelector("img, [contenteditable='false']");
-        if (blank) top.replaceWith(card);
-        else top.after(card);
-      } else {
-        range.insertNode(card);
+    if (!card) return null;
+
+    const host = range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? range.startContainer
+      : range.startContainer.parentElement;
+    const cell = host?.closest?.("td, th");
+    const inCell = Boolean(cell && root.contains(cell));
+
+    // Empty text-block line outside a table: replace the blank block so the card keeps the caret's line.
+    let block = host;
+    while (block && block !== root && block !== cell && !TEXT_BLOCKS.test(block.tagName)) {
+      if (block.tagName === "TABLE" || block.tagName === "UL" || block.tagName === "OL") {
+        block = null;
+        break;
       }
+      block = block.parentElement;
     }
+    const blankBlock = !inCell && block && TEXT_BLOCKS.test(block.tagName) && root.contains(block)
+      && !block.textContent.replace(/[\s\u200b\u00a0]/g, "")
+      && !block.querySelector("img, [contenteditable='false']");
+
+    if (blankBlock) block.replaceWith(card);
+    else range.insertNode(card);
+
+    // Caret after the card; inside a cell keep an editable text sibling, elsewhere prefer a following paragraph.
     let next = card.nextSibling;
-    while (next?.nodeType === Node.TEXT_NODE && !next.nodeValue.trim() && next.nextSibling) next = next.nextSibling;
-    const usable = next && !next.matches?.(CARD_SELECTOR)
-      && (next.nodeType === Node.TEXT_NODE ? next.nodeValue.trim() : TEXT_BLOCKS.test(next.tagName));
-    if (!usable) {
-      next = document.createElement("p");
-      next.append(document.createElement("br"));
-      card.after(next);
+    if (inCell) {
+      if (next?.nodeType !== Node.TEXT_NODE || !next.nodeValue) {
+        next = document.createTextNode("\u00a0");
+        card.after(next);
+      }
+      const after = document.createRange();
+      after.setStart(next, next.nodeValue.startsWith("\u00a0") ? 1 : 0);
+      after.collapse(true);
+      placeCaret(after);
+    } else {
+      while (next?.nodeType === Node.TEXT_NODE && !next.nodeValue.trim() && next.nextSibling) next = next.nextSibling;
+      const usable = next && !next.matches?.(CARD_SELECTOR)
+        && (next.nodeType === Node.TEXT_NODE ? next.nodeValue.trim() : TEXT_BLOCKS.test(next.tagName));
+      if (!usable) {
+        next = document.createElement("p");
+        next.append(document.createElement("br"));
+        card.after(next);
+      }
+      const after = document.createRange();
+      if (next.nodeType === Node.TEXT_NODE) after.setStart(next, 0);
+      else after.selectNodeContents(next);
+      after.collapse(true);
+      placeCaret(after);
     }
-    const after = document.createRange();
-    if (next.nodeType === Node.TEXT_NODE) after.setStart(next, 0);
-    else after.selectNodeContents(next);
-    after.collapse(true);
-    placeCaret(after);
     card.scrollIntoView({ block: "nearest" });
     syncEditorContent();
     return card;
@@ -4702,19 +4731,23 @@
     const style = pop.dataset.style;
     let label = labelField.value.replace(/\s+/g, " ").trim();
     try { localStorage.setItem(LINK_STYLE_KEY, style); } catch (_) {}
+    // Freeze the caret before any async work / focus loss so the card lands where it was opened.
+    const lockedRange = rangeInEditor(fmt.savedRange) ? fmt.savedRange.cloneRange() : null;
     if (style !== "card") {
       closeSpacePopovers();
+      if (lockedRange) fmt.savedRange = lockedRange;
       insertInlineLink(url, label || displayUrl(url), existing);
       return;
     }
     const target = editor;
     if (!label) {
       button.disabled = true;
-      button.textContent = "Fetching title…";
+      button.textContent = "Fetching title\u2026";
       label = await previewTitle(url);
       if (!target || editor !== target) return;
     }
     closeSpacePopovers();
+    if (lockedRange && rangeInEditor(lockedRange)) fmt.savedRange = lockedRange;
     // A link turned into a card is replaced by it.
     if (existing?.isConnected) {
       const spot = document.createRange();
@@ -4726,17 +4759,29 @@
     insertCard(bookmarkCardHtml(url, label || hostOf(url)));
   }
 
-  function openLinkPopover(anchor) {
+  function captureEditorSelection() {
+    const sel = window.getSelection();
+    if (!sel?.rangeCount) return null;
+    const live = sel.getRangeAt(0);
+    if (!rangeInEditor(live)) return null;
+    fmt.savedRange = live.cloneRange();
+    return fmt.savedRange;
+  }
+
+  function openLinkPopover(anchor, { prefillUrl = "" } = {}) {
     const wasOpen = document.getElementById("space-link-pop");
     closeSpacePopovers();
     document.querySelectorAll(NOTE_POPOVERS).forEach((pop) => pop.remove());
-    if (wasOpen) return;
+    // Toolbar toggle: click again closes. Smart Paste always opens (even if a popover was up).
+    if (wasOpen && !prefillUrl) return;
+    captureEditorSelection();
     const range = rangeInEditor(fmt.savedRange) ? fmt.savedRange : null;
     const existing = range ? linkAt(range.startContainer) || linkAt(range.commonAncestorContainer) : null;
     const selected = range && !range.collapsed ? range.toString().replace(/\s+/g, " ").trim() : "";
     const selectedUrl = selected && /^\S+\.\S{2,}$/.test(selected) ? normalizeUrl(selected) : "";
-    const url = existing ? existing.getAttribute("href") || "" : selectedUrl ? selected : "";
-    const label = existing ? existing.textContent : selectedUrl ? "" : selected.slice(0, 200);
+    const pastedUrl = prefillUrl ? normalizeUrl(prefillUrl) : "";
+    const url = existing ? existing.getAttribute("href") || "" : pastedUrl || (selectedUrl ? selected : "");
+    const label = existing ? existing.textContent : (pastedUrl || selectedUrl) ? "" : selected.slice(0, 200);
     const style = existing ? "inline" : readLinkStyle();
     const pop = document.createElement("div");
     pop.id = "space-link-pop";
@@ -4791,7 +4836,7 @@
       if (event.target.matches(".space-field")) clearFieldError(event.target, linkStyleNote(pop.dataset.style));
     });
     placePopover(pop, anchor);
-    anchor.setAttribute("aria-expanded", "true");
+    if (anchor?.hasAttribute?.("aria-expanded")) anchor.setAttribute("aria-expanded", "true");
     const first = pop.querySelector(url ? "[data-space-link-label]" : "[data-space-link-url]");
     first?.focus();
     if (url) first?.select();
@@ -7087,8 +7132,19 @@
   }
 
   function onEditorPaste(event) {
+    if (!editorRoot() || readingText()) return;
+    const plain = String(event.clipboardData?.getData("text/plain") || "").trim();
+    // Smart Paste: a lone URL opens Insert link with the address filled in (no raw text dump).
+    if (plain && !/[\r\n]/.test(plain) && normalizeUrl(plain)) {
+      event.preventDefault();
+      deselectImage(true);
+      captureEditorSelection();
+      closeSpacePopovers();
+      openLinkPopover(fmt.linkBtn || editorRoot(), { prefillUrl: plain });
+      return;
+    }
     const html = event.clipboardData?.getData("text/html") || "";
-    if (!html || !looksLikeOfficeHtml(html) || !editorRoot() || readingText()) return;
+    if (!html || !looksLikeOfficeHtml(html)) return;
     event.preventDefault();
     deselectImage(true);
     closeSpacePopovers();
