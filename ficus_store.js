@@ -633,6 +633,14 @@
       changed();
     },
 
+    // Recorded values for input loggers (ficus_log_entries.js). Part of the master snapshot → Drive.
+    getLogEntries: () => logEntries,
+    saveLogEntries(next) {
+      if (!uid || !Array.isArray(next)) return;
+      logEntries = next;
+      changed();
+    },
+
     // The libraries ficus_cloud.js answers /api/checklist-templates and /api/scrapbook/... from. `edit` changes
     // them in place and its result is returned; they're saved with everything else.
     getLibrary: () => library,

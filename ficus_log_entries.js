@@ -58,11 +58,16 @@
 
   function writeEntries(list, { flush = false } = {}) {
     const saver = store();
-    if (!saver?.saveLogEntries) return false;
+    // Persist only when a signed-in session owns the in-memory master (same gate as saveLoggers / saveDots).
+    if (!saver?.uid || typeof saver.saveLogEntries !== "function") return false;
     saver.saveLogEntries(list);
     notify();
     if (flush) Promise.resolve(saver.flush?.()).catch(() => {});
     return true;
+  }
+
+  function isSignedIn() {
+    return Boolean(store()?.uid);
   }
 
   function findEntry(id) {
@@ -261,7 +266,11 @@
     const index = list.findIndex((row) => row.id === entry.id);
     if (index >= 0) list[index] = entry;
     else list.push(entry);
-    if (!writeEntries(list, { flush })) return { error: "Sign in to keep log entries." };
+    if (!writeEntries(list, { flush })) {
+      return { error: isSignedIn()
+        ? "Could not save this log entry. Try again."
+        : "Sign in to keep log entries." };
+    }
     return { entry };
   }
 
