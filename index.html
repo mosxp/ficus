@@ -21,7 +21,7 @@
     <script src="space.js?v=99" defer></script>
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
-    <script src="collection.js?v=22" defer></script>
+    <script src="collection.js?v=23" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
       const APP_STORAGE_EPOCH = "2026-10-03-clean";
@@ -42,7 +42,7 @@
     <!-- Bump ?v= whenever these change so browsers never pair them with a different index.html. -->
     <script src="ficus_drive.js?v=6"></script>
     <script src="ficus_cloud.js?v=15"></script>
-    <script src="ficus_store.js?v=7"></script>
+    <script src="ficus_store.js?v=8"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -626,9 +626,12 @@
       #collection-content.is-flashcards { display: flex; padding: 0; overflow: hidden; }
 
       /* Collection → Flashcards */
-      .fcards { display: flex; height: 100%; width: 100%; min-height: 0; background: #fcfcfc; }
+      .fcards {
+        display: flex; height: 100%; width: 100%; min-height: 0; min-width: 0;
+        background: #fcfcfc; align-items: stretch;
+      }
       .fcards-list {
-        display: flex; width: 260px; flex-shrink: 0; flex-direction: column; min-height: 0;
+        display: flex; width: 260px; flex: 0 0 260px; flex-direction: column; min-height: 0; min-width: 0;
         border-right: 1px solid #e5e5e5; background: #fff;
       }
       .fcards-list-head {
@@ -640,6 +643,12 @@
       }
       .fcards-list-body { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 8px; }
       .fcards-empty { margin: 16px 8px; font-size: 0.8rem; line-height: 1.5; color: #a8a29e; }
+      .fcards-empty-state, .fcards .empty-state {
+        display: flex; flex: 1 1 auto; align-items: center; justify-content: center;
+        box-sizing: border-box; width: 100%; min-height: 10rem; margin: 0; padding: 24px;
+        text-align: center; font-size: 0.85rem; line-height: 1.5; color: #a8a29e;
+      }
+      .fcards-list-body > .fcards-empty-state { min-height: 8rem; align-items: flex-start; justify-content: flex-start; padding: 16px 8px; text-align: left; }
       .fcards-items { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
       .fcards-items > li { display: flex; align-items: stretch; gap: 2px; }
       .fcards-item {
@@ -662,7 +671,9 @@
       }
       .fcards-item-del:hover, .fcards-item-del:focus-visible { color: #1c1917; background: rgba(0,0,0,0.05); outline: none; }
       .fcards-item-del svg { width: 14px; height: 14px; }
-      .fcards-viewport { display: flex; min-width: 0; flex: 1; flex-direction: column; background: #fcfcfc; }
+      .fcards-viewport { display: flex; min-width: 0; flex: 1 1 auto; flex-direction: column; background: #fcfcfc; }
+      .fcards-stage { display: flex; flex-direction: column; }
+      .fcards-stage > .fcards-empty-state { flex: 1; }
       .fcards-toolbar { gap: 10px; flex-wrap: wrap; }
       .fcards-heading { flex: 1; min-width: 0; }
       .fcards-heading-title { font-size: 0.9rem; font-weight: 650; color: #1c1917; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -673,10 +684,14 @@
       }
       .fcards-test input { width: 1rem; height: 1rem; accent-color: #1c1917; }
       .fcards-engine {
-        display: flex; width: min(380px, 38vw); flex-shrink: 0; flex-direction: column; min-height: 0;
-        border-left: 1px solid #e5e5e5; background: #fff;
+        display: flex; width: min(380px, 38vw); flex: 0 0 min(380px, 38vw); flex-direction: column;
+        min-height: 0; min-width: 0; border-left: 1px solid #e5e5e5; background: #fff;
       }
-      .fcards-engine-inner { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 20px 18px 28px; }
+      .fcards-engine-inner {
+        display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0;
+        overflow-y: auto; overscroll-behavior: contain; padding: 20px 18px 28px;
+      }
+      .fcards-engine-inner > .fcards-empty-state { flex: 1; }
       .fcards-study { display: flex; flex-direction: column; gap: 16px; min-height: 100%; }
       .fcards-card {
         display: flex; flex-direction: column; min-height: 22rem; border: 1px solid #e7e5e4; background: #fff;

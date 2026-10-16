@@ -111,7 +111,7 @@
     if (active) renderPage();
     else {
       tags.graph?.stop();
-      fc.graph?.stop();
+      try { fc.graph?.stop(); } catch (_) {}
     }
   }
 
@@ -271,6 +271,18 @@
        preview's width as chosen, the cards whose children are showing in the list, and what the preview's page runs. */
     selected: null, mode: "list", previewId: null, graph: null, previewWidth: PREVIEW_WIDTH.initial, expanded: new Set(),
     all: {}, reads: [],
+  };
+
+
+  const FC_VIEW_KEY = "ficus_collection_fc_view_v1";
+  const FC_MODE_LABELS = { list: "List", graph: "Graph", orbit: "Orbital" };
+  const fc = {
+    root: null, listEl: null, listBody: null, viewport: null, stage: null, heading: null,
+    engine: null, modeButtons: [], testToggle: null,
+    collections: [], selectedId: null, selectedDotId: null,
+    mode: "list", testMode: false, order: [],
+    graph: null, expanded: new Set(), reads: [], isFlipped: false,
+    rendering: false,
   };
 
   function sameTag(a, b) {
@@ -669,7 +681,8 @@
       }
       open.append(marker, main);
 
-      const children = childrenOf(dot).sort(byTitle);
+      const childIds = Array.isArray(dot.children) ? dot.children : [];
+      const children = childIds.map((id) => space.byId.get(id)).filter(Boolean).sort(fcByTitle);
       const shown = children.length > 0 && tags.expanded.has(dot.id);
       const nestId = `ctags-children-${index}`;
       const toggle = document.createElement("button");
@@ -2899,17 +2912,6 @@
 
   /* ---------- Flashcards ---------- */
 
-  const FC_VIEW_KEY = "ficus_collection_fc_view_v1";
-  const FC_MODE_LABELS = { list: "List", graph: "Graph", orbit: "Orbital" };
-
-  const fc = {
-    root: null, listEl: null, listBody: null, viewport: null, stage: null, heading: null,
-    engine: null, modeButtons: [], testToggle: null,
-    collections: [], selectedId: null, selectedDotId: null,
-    mode: "list", testMode: false, order: [],
-    graph: null, expanded: new Set(), reads: [], isFlipped: false,
-  };
-
   function fcNewId() {
     if (window.crypto?.randomUUID) return `fc_${window.crypto.randomUUID()}`;
     return `fc_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
@@ -2928,23 +2930,37 @@
 
   function loadFlashcardCollections() {
     const store = window.FicusStore;
-    const list = store?.getFlashcardCollections?.();
-    fc.collections = Array.isArray(list) ? list.map(normalizeFlashcardCollection).filter(Boolean) : [];
+    let list = [];
+    try {
+      list = store?.getFlashcardCollections?.() || [];
+    } catch (_) {
+      list = [];
+    }
+    if (!Array.isArray(list)) list = [];
+    fc.collections = list.map(normalizeFlashcardCollection).filter(Boolean);
+    if (!Array.isArray(fc.collections)) fc.collections = [];
     if (fc.selectedId && !fc.collections.some((c) => c.id === fc.selectedId)) {
       fc.selectedId = null;
       fc.selectedDotId = null;
+      fc.order = [];
+      fc.isFlipped = false;
     }
     return fc.collections;
   }
 
   function saveFlashcardCollections() {
-    window.FicusStore?.saveFlashcardCollections?.(fc.collections);
+    if (!Array.isArray(fc.collections)) fc.collections = [];
+    try {
+      window.FicusStore?.saveFlashcardCollections?.(fc.collections);
+    } catch (err) {
+      console.error("Couldn't save flashcard collections", err);
+    }
   }
 
   function normalizeFlashcardCollection(raw) {
     if (!raw || typeof raw !== "object" || typeof raw.id !== "string") return null;
     const type = raw.type === "tag" || raw.type === "hub" ? raw.type : "custom";
-    const study = raw.studyData && typeof raw.studyData === "object" ? raw.studyData : {};
+    const study = raw.studyData && typeof raw.studyData === "object" && !Array.isArray(raw.studyData) ? raw.studyData : {};
     const studyData = {};
     for (const [dotId, row] of Object.entries(study)) {
       if (!row || typeof row !== "object") continue;
@@ -2954,54 +2970,74 @@
         lastReviewed: typeof row.lastReviewed === "number" ? row.lastReviewed : (row.lastReviewed ? Date.parse(row.lastReviewed) || 0 : 0),
       };
     }
+    const customDots = Array.isArray(raw.customDots)
+      ? [...new Set(raw.customDots.filter((id) => typeof id === "string" && id))]
+      : [];
     return {
       id: raw.id,
       title: String(raw.title || "").trim() || "Untitled collection",
       type,
       targetId: raw.targetId == null || raw.targetId === "" ? null : String(raw.targetId),
-      customDots: Array.isArray(raw.customDots) ? [...new Set(raw.customDots.filter((id) => typeof id === "string"))] : [],
+      customDots,
       studyData,
     };
   }
 
-  /** Hub + every nested child/grandchild via `children` (Space's parent → child links). */
+  /** Hub + every nested child/grandchild via `children`. Uses a visited Set so A→B→A cannot freeze the page. */
   function getAllDescendants(hubId, allDots) {
+    if (!hubId) return [];
     const byId = allDots instanceof Map
       ? allDots
-      : new Map((Array.isArray(allDots) ? allDots : []).map((dot) => [dot.id, dot]));
+      : new Map((Array.isArray(allDots) ? allDots : []).filter((dot) => dot && typeof dot.id === "string").map((dot) => [dot.id, dot]));
     const out = [];
-    const seen = new Set();
+    const visited = new Set();
     const walk = (id) => {
-      if (!id || seen.has(id)) return;
+      if (!id || typeof id !== "string" || visited.has(id)) return;
+      visited.add(id);
       const dot = byId.get(id);
       if (!dot) return;
-      seen.add(id);
       out.push(dot);
-      for (const childId of dot.children || []) walk(childId);
+      const kids = Array.isArray(dot.children) ? dot.children : (Array.isArray(dot.childDots) ? dot.childDots : []);
+      for (const childId of kids) {
+        if (typeof childId === "string" && !visited.has(childId)) walk(childId);
+      }
     };
     walk(hubId);
     return out;
   }
 
+  function selectedFlashcardCollection() {
+    if (!fc.selectedId || !Array.isArray(fc.collections)) return null;
+    return fc.collections.find((c) => c.id === fc.selectedId) || null;
+  }
+
+  const fcByTitle = (a, b) => String(a?.title || "").localeCompare(String(b?.title || ""), undefined, { sensitivity: "base" });
+
   function queryCollectionDots(col) {
     if (!col) return [];
-    if (col.type === "custom") {
-      return col.customDots.map((id) => space.byId.get(id)).filter(Boolean).sort(byTitle);
-    }
-    if (col.type === "tag") {
-      const parsed = parseTagTarget(col.targetId);
-      if (!parsed) return [];
-      return taggedWith(parsed.type, parsed.name).sort(byTitle);
-    }
-    if (col.type === "hub") {
-      if (!col.targetId || !space.byId.has(col.targetId)) return [];
-      return getAllDescendants(col.targetId, space.byId);
+    try {
+      if (col.type === "custom") {
+        const ids = Array.isArray(col.customDots) ? col.customDots : [];
+        return ids.map((id) => space.byId.get(id)).filter(Boolean).sort(fcByTitle);
+      }
+      if (col.type === "tag") {
+        const parsed = parseTagTarget(col.targetId);
+        if (!parsed) return [];
+        return taggedWith(parsed.type, parsed.name).sort(fcByTitle);
+      }
+      if (col.type === "hub") {
+        if (!col.targetId || !space.byId?.has?.(col.targetId)) return [];
+        return getAllDescendants(col.targetId, space.byId);
+      }
+    } catch (err) {
+      console.error("Flashcard collection query failed", err);
+      return [];
     }
     return [];
   }
 
   function shuffleDots(dots) {
-    const next = dots.slice();
+    const next = Array.isArray(dots) ? dots.slice() : [];
     for (let i = next.length - 1; i > 0; i -= 1) {
       const j = Math.floor(Math.random() * (i + 1));
       [next[i], next[j]] = [next[j], next[i]];
@@ -3010,7 +3046,13 @@
   }
 
   function rebuildFcOrder(preserveId) {
-    const col = fc.collections.find((c) => c.id === fc.selectedId) || null;
+    const col = selectedFlashcardCollection();
+    if (!col) {
+      fc.order = [];
+      fc.selectedDotId = null;
+      fc.isFlipped = false;
+      return;
+    }
     const base = queryCollectionDots(col);
     fc.order = fc.testMode ? shuffleDots(base) : base;
     if (preserveId && fc.order.some((d) => d.id === preserveId)) fc.selectedDotId = preserveId;
@@ -3020,11 +3062,45 @@
     fc.isFlipped = false;
   }
 
+  function fcEmptyState(text) {
+    const note = document.createElement("div");
+    note.className = "fcards-empty-state empty-state";
+    note.textContent = text;
+    return note;
+  }
+
+  function ensureFcSpace() {
+    if (!readSpace()) {
+      space.dots = [];
+      space.byId = new Map();
+      return false;
+    }
+    if (!Array.isArray(space.dots)) space.dots = [];
+    if (!(space.byId instanceof Map)) space.byId = new Map(space.dots.map((dot) => [dot.id, dot]));
+    return true;
+  }
+
+  function renderFcPage() {
+    if (fc.rendering) return;
+    fc.rendering = true;
+    try {
+      renderFcList();
+      renderFcViewport();
+      renderFcEngine();
+    } finally {
+      fc.rendering = false;
+    }
+  }
+
   function hideFlashcardsPage() {
-    fc.graph?.destroy();
+    try {
+      fc.graph?.destroy();
+    } catch (_) {}
     fc.graph = null;
-    releaseReads(fc.reads);
-    fc.engine?.querySelector(".fcards-back-page")?.replaceChildren();
+    try {
+      releaseReads(fc.reads);
+    } catch (_) {}
+    if (!Array.isArray(fc.reads)) fc.reads = [];
   }
 
   function buildFlashcardsPage() {
@@ -3082,10 +3158,9 @@
       if (button) setFcViewMode(button.dataset.viewMode);
     });
     fc.testToggle.addEventListener("change", () => {
-      fc.testMode = fc.testToggle.checked;
+      fc.testMode = Boolean(fc.testToggle.checked);
       rebuildFcOrder(fc.selectedDotId);
-      renderFcViewport();
-      renderFcEngine();
+      renderFcPage();
     });
     fc.stage.addEventListener("click", (event) => {
       const toggle = event.target.closest(".ctags-card-toggle");
@@ -3105,27 +3180,23 @@
   function showFlashcardsPage() {
     if (!fc.root) buildFlashcardsPage();
     if (!el.content.contains(fc.root)) el.content.replaceChildren(fc.root);
-    readSpace();
+    ensureFcSpace();
     loadFlashcardCollections();
-    fc.testToggle.checked = fc.testMode;
-    if (fc.selectedId) rebuildFcOrder(fc.selectedDotId);
+    if (fc.testToggle) fc.testToggle.checked = Boolean(fc.testMode);
+    if (selectedFlashcardCollection()) rebuildFcOrder(fc.selectedDotId);
     else {
       fc.order = [];
       fc.selectedDotId = null;
       fc.isFlipped = false;
     }
-    renderFcList();
-    renderFcViewport();
-    renderFcEngine();
+    renderFcPage();
   }
 
   function renderFcList() {
-    const list = fc.collections.slice().sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+    if (!fc.listBody) return;
+    const list = (Array.isArray(fc.collections) ? fc.collections : []).slice().sort(fcByTitle);
     if (!list.length) {
-      const empty = document.createElement("p");
-      empty.className = "fcards-empty";
-      empty.textContent = "No collections yet. Press + to create one.";
-      fc.listBody.replaceChildren(empty);
+      fc.listBody.replaceChildren(fcEmptyState("No collections yet. Press + to create one."));
       return;
     }
     const ul = document.createElement("ul");
@@ -3167,7 +3238,7 @@
       const hub = col.targetId ? space.byId.get(col.targetId) : null;
       return hub ? `Hub · ${hub.title}` : "Hub";
     }
-    return `Custom · ${countOf(col.customDots.length, "dot")}`;
+    return `Custom · ${countOf((col.customDots || []).length, "dot")}`;
   }
 
   function selectFlashcardCollection(id) {
@@ -3175,9 +3246,7 @@
     fc.selectedId = id;
     fc.expanded.clear();
     rebuildFcOrder(null);
-    renderFcList();
-    renderFcViewport();
-    renderFcEngine();
+    renderFcPage();
   }
 
   function deleteFlashcardCollection(id) {
@@ -3193,9 +3262,7 @@
       fc.order = [];
       fc.isFlipped = false;
     }
-    renderFcList();
-    renderFcViewport();
-    renderFcEngine();
+    renderFcPage();
   }
 
   function setFcViewMode(mode) {
@@ -3206,15 +3273,16 @@
   }
 
   function renderFcViewport() {
-    fc.modeButtons.forEach((button) => button.setAttribute("aria-pressed", button.dataset.viewMode === fc.mode ? "true" : "false"));
-    const col = fc.collections.find((c) => c.id === fc.selectedId) || null;
-    const dots = fc.order;
+    if (!fc.stage || !fc.heading) return;
+    (fc.modeButtons || []).forEach((button) => button.setAttribute("aria-pressed", button.dataset.viewMode === fc.mode ? "true" : "false"));
+    const col = selectedFlashcardCollection();
+    const dots = Array.isArray(fc.order) ? fc.order : [];
     if (!col) {
       fc.heading.replaceChildren();
-      fc.graph?.destroy();
+      try { fc.graph?.destroy(); } catch (_) {}
       fc.graph = null;
       fc.stage.classList.remove("is-graph");
-      fc.stage.replaceChildren(hint("Pick a collection on the left, or press + to create one."));
+      fc.stage.replaceChildren(fcEmptyState("Pick a collection on the left, or press + to create one."));
       return;
     }
     const title = document.createElement("span");
@@ -3232,7 +3300,7 @@
       fc.graph = null;
     }
     if (!dots.length) {
-      fc.stage.replaceChildren(hint(col.type === "custom"
+      fc.stage.replaceChildren(fcEmptyState(col.type === "custom"
         ? "This custom collection has no dots yet. Create it again with dots selected, or use a Tag / Hub collection."
         : "No dots match this collection yet."));
       return;
@@ -3252,6 +3320,10 @@
 
   function renderFcCards(dots) {
     const api = spaceApi();
+    if (!api || !Array.isArray(dots) || !dots.length) {
+      fc.stage.replaceChildren(fcEmptyState("No dots to show."));
+      return;
+    }
     const list = document.createElement("ul");
     list.className = "ctags-cards";
     list.setAttribute("aria-label", "Dots");
@@ -3374,17 +3446,20 @@
   }
 
   function renderFcEngine() {
-    releaseReads(fc.reads);
-    const col = fc.collections.find((c) => c.id === fc.selectedId) || null;
-    const dot = fc.selectedDotId ? space.byId.get(fc.selectedDotId) : null;
+    if (!fc.engine) return;
+    try { releaseReads(fc.reads); } catch (_) {}
+    if (!Array.isArray(fc.reads)) fc.reads = [];
+    const col = selectedFlashcardCollection();
+    const selectedDot = fc.selectedDotId && space.byId instanceof Map ? space.byId.get(fc.selectedDotId) : null;
     if (!col) {
-      fc.engine.replaceChildren(hint("Select a collection to start studying."));
+      fc.engine.replaceChildren(fcEmptyState("Select a collection to start studying."));
       return;
     }
-    if (!dot) {
-      fc.engine.replaceChildren(hint("Select a dot in the middle column to study it as a flashcard."));
+    if (!selectedDot) {
+      fc.engine.replaceChildren(fcEmptyState("Select a dot to view its flashcard"));
       return;
     }
+    const dot = selectedDot;
 
     const wrap = document.createElement("div");
     wrap.className = "fcards-study";
@@ -3463,12 +3538,12 @@
   }
 
   function setFcStudyStatus(dotId, status) {
-    const col = fc.collections.find((c) => c.id === fc.selectedId);
+    const col = selectedFlashcardCollection();
     if (!col || !dotId) return;
-    if (!col.studyData || typeof col.studyData !== "object") col.studyData = {};
+    if (!col.studyData || typeof col.studyData !== "object" || Array.isArray(col.studyData)) col.studyData = {};
     col.studyData[dotId] = { status, lastReviewed: Date.now() };
     saveFlashcardCollections();
-    if (fc.mode === "list") renderFcViewport();
+    if (fc.mode === "list" && !fc.rendering) renderFcViewport();
   }
 
   function openFlashcardCreateModal() {
@@ -3479,7 +3554,7 @@
       for (const name of names) tagOptions.push({ id: tagTargetId(type, name), label: `${type}: ${name}` });
     }
     tagOptions.sort((a, b) => a.label.localeCompare(b.label, undefined, { sensitivity: "base" }));
-    const hubs = space.dots.filter((d) => d.type === "hub").sort(byTitle);
+    const hubs = (Array.isArray(space.dots) ? space.dots : []).filter((d) => d.type === "hub").sort(fcByTitle);
 
     const backdrop = document.createElement("div");
     backdrop.className = "fcards-modal";
@@ -3525,7 +3600,7 @@
     const error = backdrop.querySelector("[data-fc-error]");
 
     const fillDots = () => {
-      const sorted = space.dots.slice().sort(byTitle);
+      const sorted = (Array.isArray(space.dots) ? space.dots : []).slice().sort(fcByTitle);
       if (!sorted.length) {
         dotsBox.textContent = "No dots in Space yet.";
         return;
@@ -3612,11 +3687,11 @@
         customDots,
         studyData: {},
       });
+      if (!Array.isArray(fc.collections)) fc.collections = [];
       fc.collections.push(created);
       saveFlashcardCollections();
       close();
       selectFlashcardCollection(created.id);
-      renderFcList();
     });
     titleInput.focus();
   }

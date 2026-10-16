@@ -135,6 +135,7 @@
     logEntries = list(master.log_entries);
     templates = list(master.templates);
     flashcardCollections = list(master.flashcard_collections);
+    if (!Array.isArray(flashcardCollections)) flashcardCollections = [];
   }
 
   // The Drive file's text as a master object; throws (so nothing overwrites it) if it isn't one.
@@ -661,10 +662,10 @@
     },
 
     // Collection → Flashcards study sets (custom / tag / hub groupings + per-dot studyData).
-    getFlashcardCollections: () => flashcardCollections,
+    getFlashcardCollections: () => (Array.isArray(flashcardCollections) ? flashcardCollections : []),
     saveFlashcardCollections(next) {
-      if (!uid || !Array.isArray(next)) return;
-      flashcardCollections = next;
+      if (!uid) return;
+      flashcardCollections = Array.isArray(next) ? next : [];
       changed();
     },
 
