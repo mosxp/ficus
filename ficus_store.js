@@ -13,10 +13,11 @@
  *     logger_groups the groups Manage Loggers clusters them in
  *     log_entries, recorded values for input loggers (see ficus_log_entries.js)
  *     templates,   reusable master dots (space.js); same shape as a dot plus isTemplate / templateLevel
- *     flashcard_collections }  Collection → Flashcards study sets (custom / tag / hub)
+ *     flashcard_collections,  Collection → Flashcards study sets (custom / tag / hub)
+ *     logger_dashboards }     Collection → Logger Dashboards (widgets over log_entries)
  * Version 2 added loggers and logger_groups; version 3 added log_entries; version 4 added templates;
- * version 5 added flashcard_collections. A page still on an older version refuses a newer file
- * (parseMaster), so it can't save over them.
+ * version 5 added flashcard_collections; version 6 added logger_dashboards. A page still on an older
+ * version refuses a newer file (parseMaster), so it can't save over them.
  *
  * load(session) reads it once, at sign-in, and space.js and collection.js then read from memory without waiting.
  * Their saves change memory at once; a copy goes into IndexedDB on this device straight after, and 3 seconds after
@@ -27,7 +28,7 @@
   "use strict";
 
   const FORMAT = "ficus-master";
-  const VERSION = 5;
+  const VERSION = 6;
   const PAGE_KINDS = new Set(["board", "block", "block_board"]);
   const DRIVE_DELAY_MS = 3000;
   const DEVICE_DELAY_MS = 400;
@@ -71,6 +72,7 @@
   let logEntries = [];
   let templates = [];
   let flashcardCollections = [];
+  let loggerDashboards = [];
 
   // The Drive file and the revision of it this device last read or wrote.
   let fileId = null;
@@ -106,6 +108,7 @@
       log_entries: logEntries,
       templates,
       flashcard_collections: flashcardCollections,
+      logger_dashboards: loggerDashboards,
     };
   }
 
@@ -136,6 +139,8 @@
     templates = list(master.templates);
     flashcardCollections = list(master.flashcard_collections);
     if (!Array.isArray(flashcardCollections)) flashcardCollections = [];
+    loggerDashboards = list(master.logger_dashboards);
+    if (!Array.isArray(loggerDashboards)) loggerDashboards = [];
   }
 
   // The Drive file's text as a master object; throws (so nothing overwrites it) if it isn't one.
@@ -372,6 +377,7 @@
     logEntries = [];
     templates = [];
     flashcardCollections = [];
+    loggerDashboards = [];
     setStatus();
   }
 
@@ -666,6 +672,14 @@
     saveFlashcardCollections(next) {
       if (!uid) return;
       flashcardCollections = Array.isArray(next) ? next : [];
+      changed();
+    },
+
+    // Collection → Logger Dashboards (widget grids over log_entries).
+    getLoggerDashboards: () => (Array.isArray(loggerDashboards) ? loggerDashboards : []),
+    saveLoggerDashboards(next) {
+      if (!uid) return;
+      loggerDashboards = Array.isArray(next) ? next : [];
       changed();
     },
 

@@ -15,7 +15,7 @@
   const PREVIEW_WIDTH_KEY = "ficus_collection_preview_width_v1";
   // The preview's width (dragged by its left edge) and the least room it leaves the viewport beside it.
   const PREVIEW_WIDTH = { min: 300, max: 800, initial: 400, step: 16, viewportMin: 240 };
-  const PAGES = { main: "Main Collection", tags: "Tags", notebooks: "Notebooks", cells: "Cells", templates: "Templates", flashcards: "Flashcards" };
+  const PAGES = { main: "Main Collection", tags: "Tags", notebooks: "Notebooks", cells: "Cells", templates: "Templates", flashcards: "Flashcards", dashboards: "Dashboards" };
   const VIEW_MODES = ["list", "graph", "orbit"];
   const SVG_NS = "http://www.w3.org/2000/svg";
   const INLINE_DOT = ".inline-child-dot[data-dot-id]";
@@ -76,8 +76,10 @@
     el.content.classList.toggle("is-notebooks", currentPage === "notebooks");
     el.content.classList.toggle("is-templates", currentPage === "templates");
     el.content.classList.toggle("is-flashcards", currentPage === "flashcards");
+    el.content.classList.toggle("is-dashboards", currentPage === "dashboards");
     if (currentPage !== "tags") hideTagsPage();
     if (currentPage !== "flashcards") hideFlashcardsPage();
+    if (currentPage !== "dashboards") window.FicusDashboards?.hide?.();
     if (currentPage !== "notebooks") {
       el.content.classList.remove("is-notebook-open");
       releaseNotebook();
@@ -96,6 +98,10 @@
     }
     if (currentPage === "flashcards") {
       if (active) showFlashcardsPage();
+      return;
+    }
+    if (currentPage === "dashboards") {
+      if (active) window.FicusDashboards?.show?.();
       return;
     }
     const title = document.createElement("h1");

@@ -21,7 +21,8 @@
     <script src="space.js?v=99" defer></script>
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
-    <script src="collection.js?v=26" defer></script>
+    <script src="ficus_dashboards.js?v=1" defer></script>
+    <script src="collection.js?v=27" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
       const APP_STORAGE_EPOCH = "2026-10-03-clean";
@@ -42,7 +43,7 @@
     <!-- Bump ?v= whenever these change so browsers never pair them with a different index.html. -->
     <script src="ficus_drive.js?v=6"></script>
     <script src="ficus_cloud.js?v=15"></script>
-    <script src="ficus_store.js?v=8"></script>
+    <script src="ficus_store.js?v=9"></script>
     <script>
       tailwind.config = {
         theme: {
@@ -840,6 +841,156 @@
       }
 
 
+      #collection-content.is-dashboards { display: flex; padding: 0; overflow: hidden; }
+
+      /* Collection → Logger Dashboards */
+      .ldash { display: flex; height: 100%; width: 100%; min-height: 0; min-width: 0; background: #fcfcfc; }
+      .ldash-list {
+        display: flex; width: 240px; flex: 0 0 240px; flex-direction: column; min-height: 0;
+        border-right: 1px solid #e5e5e5; background: #fff;
+      }
+      .ldash-list-head {
+        display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 8px;
+        min-height: 57px; padding: 12px; border-bottom: 1px solid #e5e5e5;
+      }
+      .ldash-list-title {
+        font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #78716c;
+      }
+      .ldash-list-body { flex: 1; min-height: 0; overflow: auto; padding: 8px; }
+      .ldash-list-empty { margin: 12px 8px; font-size: 0.8rem; color: #a8a29e; line-height: 1.45; }
+      .ldash-items { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+      .ldash-items > li { display: flex; gap: 2px; }
+      .ldash-item {
+        display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 2px; align-items: flex-start;
+        padding: 10px; border: 0; background: transparent; text-align: left; cursor: pointer; font: inherit; color: #1c1917;
+      }
+      .ldash-item:hover { background: rgba(0,0,0,0.05); }
+      .ldash-item[aria-pressed="true"] { background: rgba(0,0,0,0.08); box-shadow: inset 2px 0 0 #1c1917; }
+      .ldash-item-title { font-size: 0.9rem; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+      .ldash-item-meta { font-size: 0.7rem; color: #a8a29e; }
+      .ldash-item-del {
+        display: none; width: 28px; border: 0; background: transparent; color: #a8a29e; cursor: pointer;
+        align-items: center; justify-content: center;
+      }
+      .ldash-items > li:hover .ldash-item-del, .ldash-items > li:focus-within .ldash-item-del { display: inline-flex; }
+      @media (hover: none), (pointer: coarse) { .ldash-item-del { display: inline-flex; } }
+      .ldash-item-del svg { width: 14px; height: 14px; }
+      .ldash-main { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+      .ldash-toolbar {
+        display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; gap: 10px;
+        min-height: 57px; padding: 10px 16px; border-bottom: 1px solid #e5e5e5; background: #fff;
+      }
+      .ldash-heading { margin: 0; flex: 1; min-width: 10rem; font-size: 1.15rem; font-weight: 700; color: #1c1917; }
+      .ldash-toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+      .ldash-range select, .ldash-custom input[type="date"] {
+        min-height: 2.25rem; border: 1px solid #e7e5e4; background: #fff; padding: 0 0.55rem; font: inherit; font-size: 0.82rem;
+      }
+      .ldash-custom { display: inline-flex; gap: 6px; align-items: center; }
+      .ldash-btn {
+        min-height: 2.25rem; padding: 0 0.75rem; border: 1px solid #e7e5e4; background: #fff;
+        font: inherit; font-size: 0.82rem; font-weight: 650; color: #1c1917; cursor: pointer;
+      }
+      .ldash-btn:hover, .ldash-btn:focus-visible { background: #fafaf9; outline: 2px solid #1c1917; outline-offset: 2px; }
+      .ldash-btn.is-primary, .ldash-btn.is-active { background: #1c1917; border-color: #1c1917; color: #fff; }
+      .ldash-export-wrap { position: relative; }
+      .ldash-export-menu {
+        position: absolute; right: 0; top: calc(100% + 4px); z-index: 20; min-width: 11rem;
+        border: 1px solid #e7e5e4; background: #fff; box-shadow: 0 10px 24px rgba(28,25,23,0.12); padding: 0.3rem;
+      }
+      .ldash-export-menu button {
+        display: block; width: 100%; border: 0; background: transparent; text-align: left; padding: 0.5rem 0.6rem;
+        font: inherit; font-size: 0.82rem; font-weight: 600; cursor: pointer;
+      }
+      .ldash-export-menu button:hover { background: #f5f5f4; }
+      .ldash-canvas { flex: 1; min-height: 0; overflow: auto; padding: 16px; }
+      .ldash-canvas-empty, .ldash-empty {
+        display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+        min-height: 12rem; margin: 0; color: #a8a29e; font-size: 0.88rem; text-align: center;
+      }
+      .ldash-grid {
+        display: grid; grid-template-columns: repeat(var(--ldash-cols, 12), minmax(0, 1fr));
+        grid-auto-rows: 56px; gap: 12px; align-content: start;
+      }
+      .ldash-widget {
+        display: flex; flex-direction: column; min-width: 0; min-height: 0;
+        border: 1px solid #e7e5e4; background: #fff; box-shadow: 0 1px 2px rgba(28,25,23,0.04);
+      }
+      .ldash-widget-head {
+        display: flex; flex-shrink: 0; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid #f0eeec;
+      }
+      .ldash-widget-title { margin: 0; flex: 1; min-width: 0; font-size: 0.85rem; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .ldash-widget-type { font-size: 0.68rem; font-weight: 650; color: #a8a29e; text-transform: uppercase; letter-spacing: 0.04em; }
+      .ldash-widget-remove {
+        width: 1.6rem; height: 1.6rem; border: 0; background: transparent; cursor: pointer; color: #78716c; font-size: 0.85rem;
+      }
+      .ldash-widget-body { flex: 1; min-height: 0; min-width: 0; padding: 8px 10px 10px; overflow: hidden; }
+      .ldash-add-tile {
+        grid-column: span 4; grid-row: span 2; border: 1px dashed #d6d3d1; background: #fafaf9;
+        font: inherit; font-weight: 650; color: #78716c; cursor: pointer;
+      }
+      .ldash-add-tile:hover { border-color: #1c1917; color: #1c1917; }
+      .ldash-chart { display: block; width: 100%; height: 100%; }
+      .ldash-axis { font-size: 10px; fill: #a8a29e; }
+      .ldash-legend { font-size: 10px; font-weight: 600; }
+      .ldash-metric { display: flex; height: 100%; flex-direction: column; align-items: center; justify-content: center; gap: 0.35rem; text-align: center; }
+      .ldash-metric-value { margin: 0; font-size: clamp(2.2rem, 5vw, 3.4rem); font-weight: 780; letter-spacing: -0.03em; color: #1c1917; }
+      .ldash-metric-sub { margin: 0; font-size: 0.75rem; color: #78716c; max-width: 90%; }
+      .ldash-heatmap { display: flex; flex-wrap: wrap; gap: 3px; align-content: flex-start; height: 100%; overflow: auto; }
+      .ldash-heat-cell { width: 14px; height: 14px; border-radius: 2px; background: #e7e5e4; }
+      .ldash-table-wrap { height: 100%; overflow: auto; }
+      .ldash-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+      .ldash-table th, .ldash-table td { padding: 0.35rem 0.45rem; border-bottom: 1px solid #f0eeec; text-align: left; vertical-align: top; }
+      .ldash-table th { position: sticky; top: 0; background: #fff; font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.04em; color: #78716c; }
+      .ldash-modal {
+        position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center;
+        padding: 1rem; background: rgba(28,25,23,0.35);
+      }
+      .ldash-dialog {
+        width: min(28rem, 100%); max-height: min(90vh, 36rem); overflow: auto; display: flex; flex-direction: column; gap: 0.75rem;
+        border: 1px solid #e7e5e4; background: #fff; box-shadow: 0 18px 40px rgba(28,25,23,0.18); padding: 0.95rem 1rem 1.05rem;
+      }
+      .ldash-dialog-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+      .ldash-dialog-head h2 { margin: 0; font-size: 1.05rem; font-weight: 700; }
+      .ldash-dialog-close { border: 0; background: transparent; width: 2rem; height: 2rem; cursor: pointer; color: #78716c; }
+      .ldash-field { display: flex; flex-direction: column; gap: 0.35rem; margin: 0; padding: 0; border: 0; font-size: 0.8rem; font-weight: 650; color: #57534e; }
+      .ldash-field select, .ldash-field input[type="text"] {
+        min-height: 2.5rem; border: 1px solid #e7e5e4; padding: 0.45rem 0.65rem; font: inherit; font-weight: 500; color: #1c1917;
+      }
+      .ldash-logger-pick { max-height: 12rem; overflow: auto; border: 1px solid #e7e5e4; padding: 0.35rem; }
+      .ldash-logger-opt { display: flex; gap: 0.45rem; align-items: flex-start; padding: 0.35rem 0.4rem; cursor: pointer; min-height: 28px; font-weight: 500; color: #1c1917; }
+      .ldash-logger-opt:hover { background: #fafaf9; }
+      .ldash-dialog-error { margin: 0; font-size: 0.8rem; color: #b91c1c; }
+      .ldash-dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; }
+      @media (max-width: 960px) {
+        .ldash { flex-wrap: wrap; overflow: auto; }
+        .ldash-list { width: 100%; flex: 1 1 100%; max-height: 200px; border-right: 0; border-bottom: 1px solid #e5e5e5; }
+        .ldash-main { flex: 1 1 100%; min-height: 420px; }
+        .ldash-widget { grid-column: 1 / -1 !important; }
+      }
+
+      /* Print / PDF: dashboard canvas only */
+      @media print {
+        body.ldash-printing #notebook-tabs,
+        body.ldash-printing #collection-sidebar,
+        body.ldash-printing .ficus-account,
+        body.ldash-printing .ldash-list,
+        body.ldash-printing .ldash-toolbar-actions,
+        body.ldash-printing .ldash-widget-remove,
+        body.ldash-printing .ldash-add-tile { display: none !important; }
+        body.ldash-printing #view-collection { display: block !important; }
+        body.ldash-printing #collection-view { display: block; height: auto; width: 100%; }
+        body.ldash-printing #collection-content.is-dashboards { display: block; padding: 0; overflow: visible; }
+        body.ldash-printing .ldash { display: block; height: auto; }
+        body.ldash-printing .ldash-main { display: block; }
+        body.ldash-printing .ldash-toolbar { border: 0; padding: 0 0 12px; }
+        body.ldash-printing .ldash-canvas { overflow: visible; padding: 0; }
+        body.ldash-printing .ldash-grid { display: block; }
+        body.ldash-printing .ldash-widget {
+          break-inside: avoid; page-break-inside: avoid; margin: 0 0 16px; grid-column: auto !important; grid-row: auto !important;
+          height: auto !important; min-height: 200px;
+        }
+        body.ldash-printing .ldash-widget-body { overflow: visible; min-height: 180px; }
+      }
 
       /* Collection → Templates */
       .tpl-shelf-bar { display: flex; align-items: center; padding-bottom: 12px; border-bottom: 1px solid #e5e5e5; position: relative; }
@@ -4871,6 +5022,11 @@
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square" aria-hidden="true">
                 <path d="M3 3.5h8.5v9H3z" />
                 <path d="M5 2h8.5v9" />
+              </svg>
+            </button>
+            <button type="button" class="collection-tool" data-collection-page="dashboards" aria-label="Dashboards" title="Dashboards">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square" aria-hidden="true">
+                <path d="M2.5 10.5h3v3h-3zM6.5 6.5h3v7h-3zM10.5 3.5h3v10h-3z" />
               </svg>
             </button>
           </aside>
