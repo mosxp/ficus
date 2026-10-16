@@ -301,6 +301,7 @@
     loadedKey = key;
     const list = key ? store().getDots() : [];
     spaceDots = Array.isArray(list) ? list.map(cleanDot).filter(Boolean) : [];
+    touchGraph();
     tidyLinks();
     const tpls = key ? store().getTemplates?.() : [];
     spaceTemplates = Array.isArray(tpls) ? tpls.map(cleanTemplate).filter(Boolean) : [];
@@ -323,6 +324,134 @@
 
   function spaceLinks() {
     return spaceDots.flatMap((dot) => dot.children.map((target) => ({ source: dot.id, target })));
+  }
+
+  /* The canvas only simulates the active galaxy: the 150 most recently updated dots, plus any dot the search
+     capsule pinned and that dot's immediate neighbors. Links are kept only when both ends are in that set. */
+  const GRAPH_LIMIT = 150;
+  const pinnedGraphIds = new Set();
+  let graphCache = null;
+  const camera = { tx: 0, ty: 0, z: 1 };
+
+  function touchGraph() {
+    graphCache = null;
+  }
+
+  function buildGraph() {
+    const byId = new Map(spaceDots.map((dot) => [dot.id, dot]));
+    const ranked = spaceDots.slice().sort((a, b) => String(b.updatedAt || "").localeCompare(String(a.updatedAt || "")));
+    const ids = new Set(ranked.slice(0, GRAPH_LIMIT).map((dot) => dot.id));
+    for (const id of pinnedGraphIds) {
+      if (!byId.has(id)) continue;
+      ids.add(id);
+      const dot = byId.get(id);
+      for (const childId of dot.children) if (byId.has(childId)) ids.add(childId);
+      for (const other of spaceDots) {
+        if (other.children.includes(id)) ids.add(other.id);
+      }
+    }
+    const dots = [...ids].map((id) => byId.get(id)).filter(Boolean);
+    const links = [];
+    for (const dot of dots) {
+      for (const target of dot.children) {
+        if (ids.has(target)) links.push({ source: dot.id, target });
+      }
+    }
+    return { dots, links, ids };
+  }
+
+  function graphDots() {
+    if (!graphCache) graphCache = buildGraph();
+    return graphCache.dots;
+  }
+
+  function graphLinks() {
+    if (!graphCache) graphCache = buildGraph();
+    return graphCache.links;
+  }
+
+  function pinGraphDot(id) {
+    const dot = findDot(id);
+    if (!dot) return null;
+    pinnedGraphIds.add(dot.id);
+    for (const childId of dot.children) pinnedGraphIds.add(childId);
+    for (const other of spaceDots) {
+      if (other.children.includes(dot.id)) pinnedGraphIds.add(other.id);
+    }
+    touchGraph();
+    return dot;
+  }
+
+  function graphPointFromClient(clientX, clientY) {
+    const rect = el.canvas.getBoundingClientRect();
+    const z = camera.z || 1;
+    const localX = (clientX - rect.left - camera.tx) / z;
+    const localY = (clientY - rect.top - camera.ty) / z;
+    return {
+      x: localX - el.nodes.offsetLeft,
+      y: localY - el.nodes.offsetTop,
+    };
+  }
+
+  function frameDot(dot) {
+    if (!dot || !el.camera || !el.canvas) return;
+    const z = 1.4;
+    const ox = el.nodes.offsetLeft + dot.x;
+    const oy = el.nodes.offsetTop + dot.y;
+    camera.z = z;
+    camera.tx = el.canvas.clientWidth / 2 - ox * z;
+    camera.ty = el.canvas.clientHeight / 2 - oy * z;
+    el.camera.style.transform = `translate(${camera.tx}px, ${camera.ty}px) scale(${z})`;
+  }
+
+  function pulseDot(id) {
+    const node = nodeFor(id);
+    if (!node) return;
+    node.classList.add("is-search-hit");
+    window.setTimeout(() => node.classList.remove("is-search-hit"), 2400);
+  }
+
+  function stripSearchHtml(html) {
+    return String(html || "").replace(/<[^>]*>/g, " ").replace(/&nbsp;|&#160;/gi, " ");
+  }
+
+  function searchDots(query, allDots) {
+    const q = String(query || "").trim().toLowerCase();
+    if (q.length <= 1) return [];
+    const hits = [];
+    for (const dot of allDots || []) {
+      let score = 0;
+      let where = "";
+      if (String(dot.title || "").toLowerCase().includes(q)) {
+        score += 100;
+        where = "Matched in title";
+      }
+      const tagText = Object.entries(dot.tags || {}).flatMap(([type, names]) => [type, ...(Array.isArray(names) ? names : [])]);
+      if (tagText.some((name) => String(name).toLowerCase().includes(q))) {
+        score += 50;
+        if (!where) where = "Matched in tags";
+      }
+      if (stripSearchHtml(dot.content).toLowerCase().includes(q)) {
+        score += 10;
+        if (!where) where = "Matched in content";
+      }
+      if (score > 0) hits.push({ dot, score, where });
+    }
+    hits.sort((a, b) => b.score - a.score || String(b.dot.updatedAt || "").localeCompare(String(a.dot.updatedAt || "")));
+    return hits;
+  }
+
+  function focusSearchResult(id) {
+    const dot = pinGraphDot(id);
+    if (!dot) return;
+    render();
+    select(dot.id);
+    frameDot(dot);
+    pulseDot(dot.id);
+    requestAnimationFrame(() => {
+      const latest = findDot(dot.id);
+      if (latest) frameDot(latest);
+    });
   }
 
   /* A dot can be linked from more than one parent (and two dots each from the other). Linking adds the child to the
@@ -507,13 +636,16 @@
   function canvasBounds() {
     const width = el.canvas.clientWidth;
     const height = el.canvas.clientHeight;
-    const cx = el.nodes.offsetLeft;
-    const cy = el.nodes.offsetTop;
+    const z = camera.z || 1;
+    const ox = el.nodes.offsetLeft;
+    const oy = el.nodes.offsetTop;
+    const toX = (screen) => (screen - camera.tx) / z - ox;
+    const toY = (screen) => (screen - camera.ty) / z - oy;
     return {
-      minX: CANVAS_MARGIN - cx,
-      maxX: Math.max(CANVAS_MARGIN - cx, width - cx - CANVAS_MARGIN),
-      minY: CANVAS_MARGIN - cy,
-      maxY: Math.max(CANVAS_MARGIN - cy, height - cy - CANVAS_MARGIN * 1.5),
+      minX: toX(CANVAS_MARGIN),
+      maxX: Math.max(toX(CANVAS_MARGIN), toX(width - CANVAS_MARGIN)),
+      minY: toY(CANVAS_MARGIN),
+      maxY: Math.max(toY(CANVAS_MARGIN), toY(height - CANVAS_MARGIN * 1.5)),
     };
   }
 
@@ -547,7 +679,8 @@
   }
 
   function render() {
-    el.nodes.replaceChildren(...spaceDots.map(dotElement));
+    touchGraph();
+    el.nodes.replaceChildren(...graphDots().map(dotElement));
     el.emptyHint.classList.toggle("hidden", spaceDots.length > 0);
     renderOrbits();
     renderLinks();
@@ -572,7 +705,7 @@
      one-way links to a dot that circles another parent, still are. */
   function renderLinks() {
     positionLinks();
-    const links = spaceLinks();
+    const links = graphLinks();
     const pairs = new Set(links.map(({ source, target }) => `${source}\n${target}`));
     const orbit = currentViewMode === "orbit" ? sim.orbit : null;
     const lines = [];
@@ -653,8 +786,9 @@
   function onPointerMove(event) {
     if (!drag) return;
     const { x, y } = getCoordinates(event);
-    const dx = x - drag.startX;
-    const dy = y - drag.startY;
+    const z = camera.z || 1;
+    const dx = (x - drag.startX) / z;
+    const dy = (y - drag.startY) / z;
     if (!drag.moved) {
       if (Math.hypot(dx, dy) < DRAG_THRESHOLD) return;
       drag.moved = true;
@@ -740,10 +874,11 @@
      make orbits: two dots linked both ways are peers, neither circling the other, so a dot whose only parents are
      such peers is a star of its own (a binary star, tethered to its peer by their two-way line). */
   function computeOrbits() {
-    const byId = new Map(spaceDots.map((dot) => [dot.id, dot]));
+    const galaxy = graphDots();
+    const byId = new Map(galaxy.map((dot) => [dot.id, dot]));
     const mutual = (a, b) => Boolean(a && byId.get(b)?.children.includes(a.id));
-    const inbound = new Map(spaceDots.map((dot) => [dot.id, 0]));
-    for (const dot of spaceDots) {
+    const inbound = new Map(galaxy.map((dot) => [dot.id, 0]));
+    for (const dot of galaxy) {
       for (const id of dot.children) {
         if (id !== dot.id && inbound.has(id) && !mutual(dot, id)) inbound.set(id, inbound.get(id) + 1);
       }
@@ -769,9 +904,9 @@
         }
       }
     };
-    spaceDots.filter((dot) => !inbound.get(dot.id)).forEach((dot) => grow(dot.id));
+    galaxy.filter((dot) => !inbound.get(dot.id)).forEach((dot) => grow(dot.id));
     const hub = (dot) => (dot.children.length + 1) / (inbound.get(dot.id) + 1);
-    for (let rest = spaceDots.filter((dot) => !seen.has(dot.id)); rest.length; rest = rest.filter((dot) => !seen.has(dot.id))) {
+    for (let rest = galaxy.filter((dot) => !seen.has(dot.id)); rest.length; rest = rest.filter((dot) => !seen.has(dot.id))) {
       const star = rest.reduce((best, dot) => (hub(dot) > hub(best) || (hub(dot) === hub(best) && dot.children.length > best.children.length) ? dot : best));
       grow(star.id);
     }
@@ -845,7 +980,7 @@
       return;
     }
     sim.orbit = computeOrbits();
-    const byId = new Map(spaceDots.map((dot) => [dot.id, dot]));
+    const byId = new Map(graphDots().map((dot) => [dot.id, dot]));
     const kept = new Map([...el.orbitLayer.children].map((ring) => [ring.dataset.dotId, ring]));
     const rings = [];
     for (const [id, R] of sim.orbit.ring) {
@@ -909,7 +1044,7 @@
   function springPairs(index) {
     const seen = new Set();
     const pairs = [];
-    for (const { source, target } of spaceLinks()) {
+    for (const { source, target } of graphLinks()) {
       const a = index.get(source);
       const b = index.get(target);
       if (a === undefined || b === undefined || a === b) continue;
@@ -932,7 +1067,7 @@
   function tick(bounds) {
     sim.alpha += (sim.alphaTarget - sim.alpha) * SIM.alphaDecay;
     const alpha = sim.alpha;
-    const dots = spaceDots;
+    const dots = graphDots();
     const count = dots.length;
     const motion = dots.map(motionOf);
     const index = new Map(dots.map((dot, i) => [dot.id, i]));
@@ -1034,7 +1169,7 @@
 
   // Moves the dots and their arrows to where the simulation has them (and the open dot menu with its dot).
   function drawSimulation() {
-    const byId = new Map(spaceDots.map((dot) => [dot.id, dot]));
+    const byId = new Map(graphDots().map((dot) => [dot.id, dot]));
     for (const node of el.nodes.children) {
       const dot = byId.get(node.dataset.dotId);
       if (!dot) continue;
@@ -1061,7 +1196,7 @@
   /* Warms the simulation to at least `alpha` and runs it. With reduced motion the layout is worked out at once and
      drawn settled, except under a drag (live), which the person is doing themselves. */
   function reheat(alpha, live = false) {
-    if (!active || !spaceDots.length) return;
+    if (!active || !graphDots().length) return;
     sim.alpha = Math.max(sim.alpha, alpha);
     if (reducedMotion() && !live) {
       cancelAnimationFrame(sim.frame);
@@ -1082,11 +1217,11 @@
     sim.alphaTarget = 0;
   }
 
-  const graphSignature = () => `${spaceDots.map((dot) => dot.id).join(",")}|${spaceLinks().map(({ source, target }) => `${source}>${target}`).join(",")}`;
+  const graphSignature = () => `${graphDots().map((dot) => dot.id).join(",")}|${graphLinks().map(({ source, target }) => `${source}>${target}`).join(",")}`;
 
   // A dot or arrow added or taken away since the last render warms the graph so it finds its new shape.
   function syncSimulation() {
-    const ids = new Set(spaceDots.map((dot) => dot.id));
+    const ids = new Set(graphDots().map((dot) => dot.id));
     for (const id of sim.motion.keys()) if (!ids.has(id)) sim.motion.delete(id);
     const signature = graphSignature();
     if (signature === sim.signature) return;
@@ -1098,14 +1233,14 @@
   // Dots spawn scattered at random over the canvas, like planets, and the forces pull them into shape.
   function scatterDots() {
     const bounds = simBounds();
-    const spread = 140 + 46 * Math.sqrt(spaceDots.length);
+    const spread = 140 + 46 * Math.sqrt(graphDots().length);
     const range = (min, max) => {
       const lo = Math.max(min, -spread);
       const hi = Math.min(max, spread);
       return lo + Math.random() * Math.max(0, hi - lo);
     };
     sim.motion.clear();
-    spaceDots.forEach((dot) => {
+    graphDots().forEach((dot) => {
       dot.x = bounds ? range(bounds.minX, bounds.maxX) : range(-spread, spread);
       dot.y = bounds ? range(bounds.minY, bounds.maxY) : range(-spread, spread);
     });
@@ -1252,10 +1387,9 @@
      clear spot to that point, and Link existing dot… links two dots already in Space (pick the parent, then the dot
      to link under it). Opened from the keyboard, its first item takes focus. */
   function openAddMenuAt(clientX, clientY, focusFirst = false) {
-    const rect = el.canvas.getBoundingClientRect();
     addSpot = {
-      x: Math.round(clientX - rect.left - el.nodes.offsetLeft),
-      y: Math.round(clientY - rect.top - el.nodes.offsetTop),
+      x: Math.round(graphPointFromClient(clientX, clientY).x),
+      y: Math.round(graphPointFromClient(clientX, clientY).y),
     };
     el.addMenu.dataset.anchorX = String(clientX);
     el.addMenu.dataset.anchorY = String(clientY);
@@ -15764,10 +15898,90 @@
     else closeMenus();
   }
 
+  function buildSearchCapsule() {
+    const host = document.getElementById("view-space");
+    if (!host || host.querySelector(".space-search")) return;
+    const root = document.createElement("div");
+    root.className = "space-search";
+    root.innerHTML = `
+      <label class="space-search-bar">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.25"/><path d="M12.5 12.5 17 17"/></svg>
+        <input type="search" class="space-search-input" placeholder="Search dots" aria-label="Search dots" autocomplete="off" spellcheck="false" enterkeyhint="search" />
+      </label>
+      <div class="space-search-list" hidden role="listbox" aria-label="Search results"></div>`;
+    const input = root.querySelector(".space-search-input");
+    const list = root.querySelector(".space-search-list");
+
+    const closeList = () => {
+      list.hidden = true;
+      list.replaceChildren();
+    };
+
+    const paint = () => {
+      const hits = searchDots(input.value, spaceDots);
+      if (String(input.value || "").trim().length <= 1 || !hits.length) {
+        closeList();
+        if (String(input.value || "").trim().length > 1) {
+          list.hidden = false;
+          const empty = document.createElement("p");
+          empty.className = "space-search-empty";
+          empty.textContent = "No matching dots.";
+          list.replaceChildren(empty);
+        }
+        return;
+      }
+      list.hidden = false;
+      list.replaceChildren(...hits.slice(0, 40).map(({ dot, where }) => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "space-search-hit";
+        btn.setAttribute("role", "option");
+        btn.dataset.dotId = dot.id;
+        const mark = document.createElement("span");
+        mark.className = "space-search-type";
+        mark.dataset.type = dot.type;
+        mark.style.setProperty("--dot-color", dotColor(dot));
+        mark.setAttribute("aria-hidden", "true");
+        const text = document.createElement("span");
+        text.className = "space-search-text";
+        const title = document.createElement("span");
+        title.className = "space-search-title";
+        title.textContent = dot.title;
+        const meta = document.createElement("span");
+        meta.className = "space-search-meta";
+        meta.textContent = `${DOT_TYPES[dot.type]?.label || "Dot"} · ${where}`;
+        text.append(title, meta);
+        btn.append(mark, text);
+        return btn;
+      }));
+    };
+
+    input.addEventListener("input", paint);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        input.value = "";
+        closeList();
+      }
+    });
+    list.addEventListener("click", (event) => {
+      const hit = event.target.closest(".space-search-hit");
+      if (!hit) return;
+      const id = hit.dataset.dotId;
+      input.value = "";
+      closeList();
+      focusSearchResult(id);
+    });
+    root.addEventListener("pointerdown", (event) => event.stopPropagation());
+    document.addEventListener("pointerdown", (event) => {
+      if (!root.contains(event.target)) closeList();
+    });
+    host.append(root);
+  }
+
   function init() {
     if (ready) return true;
     const ids = {
-      view: "view-space", canvas: "space-canvas", nodes: "space-nodes", emptyHint: "space-empty-hint",
+      view: "view-space", canvas: "space-canvas", camera: "space-camera", nodes: "space-nodes", emptyHint: "space-empty-hint",
       linkLayer: "space-link-layer",
       linksSvg: "space-links", addMenu: "space-add-menu", dotMenu: "space-dot-menu", toast: "space-toast",
       appearancePop: "space-appearance-pop", orbitLayer: "space-orbit-layer", viewBtn: "space-view-btn",
@@ -15797,6 +16011,7 @@
       }
     }
     Object.assign(mini, { box: el.connectionOrbit, svg: el.miniSvg, linkLayer: el.miniLinks, nodeLayer: el.miniNodes });
+    buildSearchCapsule();
 
     el.canvas.addEventListener("pointerdown", onPointerDown);
     el.canvas.addEventListener("pointermove", onPointerMove);
@@ -16373,6 +16588,10 @@
     },
     get links() {
       return spaceLinks();
+    },
+    searchDots,
+    get visibleDots() {
+      return graphDots().map((dot) => dot.id);
     },
     /* What the Collection view (collection.js) reads to show Space's dots without opening Space. load() brings in
        the signed-in user's dots if Space hasn't yet; dots then come from `dots` above (copies). */
