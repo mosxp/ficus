@@ -276,13 +276,16 @@
 
   const FC_VIEW_KEY = "ficus_collection_fc_view_v1";
   const FC_MODE_LABELS = { list: "List", graph: "Graph", orbit: "Orbital" };
+  const FC_ENGINE_HEIGHT_KEY = "ficus_collection_fc_engine_height_v1";
+  const FC_ENGINE_HEIGHT = { min: 180, max: 720, initial: 280 };
   const fc = {
-    root: null, listEl: null, listBody: null, viewport: null, stage: null, heading: null,
-    engine: null, modeButtons: [], testToggle: null,
+    root: null, listEl: null, listBody: null, main: null, explorer: null,
+    viewport: null, stage: null, heading: null, enginePanel: null, engineBar: null,
+    engine: null, splitHandle: null, expandBtn: null, modeButtons: [], testToggle: null,
     collections: [], selectedId: null, selectedDotId: null,
     mode: "list", testMode: false, order: [],
     graph: null, expanded: new Set(), reads: [], isFlipped: false,
-    rendering: false,
+    isFullscreen: false, engineHeight: FC_ENGINE_HEIGHT.initial, rendering: false,
   };
 
   function sameTag(a, b) {
@@ -3093,6 +3096,7 @@
   }
 
   function hideFlashcardsPage() {
+    if (fc.isFullscreen) setFcFullscreen(false);
     try {
       fc.graph?.destroy();
     } catch (_) {}
@@ -3115,30 +3119,44 @@
         </div>
         <div class="fcards-list-body"></div>
       </section>
-      <section class="fcards-viewport" aria-label="Collection dots">
-        <div class="ctags-toolbar fcards-toolbar">
-          <div class="ctags-modes" role="group" aria-label="View as">
-            ${VIEW_MODES.map((mode) => `<button type="button" class="ctags-mode" data-view-mode="${mode}" aria-pressed="false" aria-label="${FC_MODE_LABELS[mode]}" title="${FC_MODE_LABELS[mode]}">${ICONS[mode]}</button>`).join("")}
+      <div class="fcards-main">
+        <section class="fcards-explorer" aria-label="Dot explorer">
+          <div class="ctags-toolbar fcards-toolbar">
+            <div class="ctags-modes" role="group" aria-label="View as">
+              ${VIEW_MODES.map((mode) => `<button type="button" class="ctags-mode" data-view-mode="${mode}" aria-pressed="false" aria-label="${FC_MODE_LABELS[mode]}" title="${FC_MODE_LABELS[mode]}">${ICONS[mode]}</button>`).join("")}
+            </div>
+            <div class="ctags-heading fcards-heading" aria-live="polite"></div>
+            <label class="fcards-test">
+              <input type="checkbox" data-fc-test />
+              <span>Test Mode</span>
+            </label>
           </div>
-          <div class="ctags-heading fcards-heading" aria-live="polite"></div>
-          <label class="fcards-test">
-            <input type="checkbox" data-fc-test />
-            <span>Test Mode</span>
-          </label>
-        </div>
-        <div class="ctags-stage fcards-stage"></div>
-      </section>
-      <aside class="fcards-engine" aria-label="Flashcard study">
-        <div class="fcards-engine-inner"></div>
-      </aside>`;
+          <div class="ctags-stage fcards-stage"></div>
+        </section>
+        <div class="fcards-split" role="separator" aria-orientation="horizontal" aria-label="Resize flashcard panel"
+          tabindex="0" title="Drag to resize" aria-valuemin="${FC_ENGINE_HEIGHT.min}" aria-valuemax="${FC_ENGINE_HEIGHT.max}"></div>
+        <aside class="fcards-engine" aria-label="Flashcard study">
+          <div class="fcards-engine-bar">
+            <span class="fcards-engine-label">Flashcard</span>
+            <button type="button" class="fcards-expand" data-fc-expand aria-pressed="false" title="Expand" aria-label="Expand flashcard"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" aria-hidden="true"><path d="M3 6.5V3h3.5M10 3h3v3.5M13 10v3h-3.5M6.5 13H3v-3.5"/></svg></button>
+          </div>
+          <div class="fcards-engine-inner"></div>
+        </aside>
+      </div>`;
     Object.assign(fc, {
       root,
       listEl: root.querySelector(".fcards-list"),
       listBody: root.querySelector(".fcards-list-body"),
-      viewport: root.querySelector(".fcards-viewport"),
+      main: root.querySelector(".fcards-main"),
+      explorer: root.querySelector(".fcards-explorer"),
+      viewport: root.querySelector(".fcards-explorer"),
       stage: root.querySelector(".fcards-stage"),
       heading: root.querySelector(".fcards-heading"),
+      enginePanel: root.querySelector(".fcards-engine"),
+      engineBar: root.querySelector(".fcards-engine-bar"),
       engine: root.querySelector(".fcards-engine-inner"),
+      splitHandle: root.querySelector(".fcards-split"),
+      expandBtn: root.querySelector("[data-fc-expand]"),
       modeButtons: [...root.querySelectorAll("[data-view-mode]")],
       testToggle: root.querySelector("[data-fc-test]"),
     });
@@ -3171,10 +3189,98 @@
       const pick = event.target.closest(DOT_PICKS);
       if (pick) selectFlashcardDot(pick.dataset.dotId);
     });
+    fc.expandBtn.addEventListener("click", () => setFcFullscreen(!fc.isFullscreen));
+    fc.splitHandle.addEventListener("pointerdown", onFcSplitStart);
+    fc.splitHandle.addEventListener("keydown", onFcSplitKey);
+    window.FicusInput.onDoubleActivate(fc.splitHandle, () => setFcEngineHeight(FC_ENGINE_HEIGHT.initial, true));
+    document.addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !fc.isFullscreen || !active || currentPage !== "flashcards") return;
+      if (event.target.closest?.("[role='dialog'], dialog, .fcards-modal")) return;
+      event.preventDefault();
+      setFcFullscreen(false);
+    });
     let saved = null;
-    try { saved = localStorage.getItem(FC_VIEW_KEY); } catch (_) {}
+    let savedHeight = NaN;
+    try {
+      saved = localStorage.getItem(FC_VIEW_KEY);
+      savedHeight = Number(localStorage.getItem(FC_ENGINE_HEIGHT_KEY));
+    } catch (_) {}
     fc.mode = VIEW_MODES.includes(saved) ? saved : "list";
+    fc.engineHeight = Number.isFinite(savedHeight) && savedHeight > 0
+      ? Math.min(Math.max(savedHeight, FC_ENGINE_HEIGHT.min), FC_ENGINE_HEIGHT.max)
+      : FC_ENGINE_HEIGHT.initial;
+    applyFcEngineHeight();
+    syncFcFullscreenUi();
     return root;
+  }
+
+  function applyFcEngineHeight() {
+    if (!fc.main || fc.isFullscreen) return;
+    const height = Math.min(Math.max(fc.engineHeight, FC_ENGINE_HEIGHT.min), FC_ENGINE_HEIGHT.max);
+    fc.main.style.setProperty("--fcards-engine-height", `${height}px`);
+    fc.splitHandle?.setAttribute("aria-valuenow", String(height));
+    fc.splitHandle?.setAttribute("aria-valuetext", `${height} pixels tall`);
+  }
+
+  function setFcEngineHeight(height, save) {
+    fc.engineHeight = Math.round(Math.min(Math.max(height, FC_ENGINE_HEIGHT.min), FC_ENGINE_HEIGHT.max));
+    applyFcEngineHeight();
+    if (!save) return;
+    try { localStorage.setItem(FC_ENGINE_HEIGHT_KEY, String(fc.engineHeight)); } catch (_) {}
+  }
+
+  function onFcSplitStart(event) {
+    if (fc.isFullscreen) return;
+    if (event.button != null && event.button !== 0) return;
+    event.preventDefault();
+    const handle = fc.splitHandle;
+    if (!handle) return;
+    handle.setPointerCapture?.(event.pointerId);
+    const startY = (typeof getCoordinates === "function" ? getCoordinates(event) : { y: event.clientY }).y;
+    const startH = fc.engineHeight;
+    const move = (ev) => {
+      if (handle.hasPointerCapture && !handle.hasPointerCapture(ev.pointerId)) return;
+      const y = (typeof getCoordinates === "function" ? getCoordinates(ev) : { y: ev.clientY }).y;
+      // Dragging the handle up grows the engine panel.
+      setFcEngineHeight(startH + (startY - y), false);
+    };
+    const end = (ev) => {
+      handle.releasePointerCapture?.(ev.pointerId);
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", end);
+      handle.removeEventListener("pointercancel", end);
+      setFcEngineHeight(fc.engineHeight, true);
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+  }
+
+  function onFcSplitKey(event) {
+    if (fc.isFullscreen) return;
+    const step = 24;
+    const map = { ArrowUp: fc.engineHeight + step, ArrowDown: fc.engineHeight - step, Home: FC_ENGINE_HEIGHT.max, End: FC_ENGINE_HEIGHT.min };
+    if (!has(map, event.key)) return;
+    event.preventDefault();
+    setFcEngineHeight(map[event.key], true);
+  }
+
+  function setFcFullscreen(on) {
+    fc.isFullscreen = Boolean(on);
+    syncFcFullscreenUi();
+    if (!fc.isFullscreen) applyFcEngineHeight();
+  }
+
+  function syncFcFullscreenUi() {
+    fc.root?.classList.toggle("is-fc-fullscreen", fc.isFullscreen);
+    fc.enginePanel?.classList.toggle("is-fullscreen", fc.isFullscreen);
+    if (!fc.expandBtn) return;
+    fc.expandBtn.setAttribute("aria-pressed", fc.isFullscreen ? "true" : "false");
+    fc.expandBtn.title = fc.isFullscreen ? "Minimize" : "Expand";
+    fc.expandBtn.setAttribute("aria-label", fc.isFullscreen ? "Minimize flashcard" : "Expand flashcard");
+    fc.expandBtn.innerHTML = fc.isFullscreen
+      ? '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" aria-hidden="true"><path d="M3 6.5h3.5V3M10 3v3.5H13M13 10h-3.5V13M6.5 13v-3.5H3"/></svg>'
+      : '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="square" aria-hidden="true"><path d="M3 6.5V3h3.5M10 3h3v3.5M13 10v3h-3.5M6.5 13H3v-3.5"/></svg>';
   }
 
   function showFlashcardsPage() {
@@ -3189,6 +3295,8 @@
       fc.selectedDotId = null;
       fc.isFlipped = false;
     }
+    applyFcEngineHeight();
+    syncFcFullscreenUi();
     renderFcPage();
   }
 
@@ -3306,7 +3414,7 @@
       return;
     }
     if (!graphed) {
-      renderFcCards(dots);
+      renderFcTree(dots);
       return;
     }
     if (!fc.graph) {
@@ -3318,16 +3426,47 @@
     if (active) fc.graph.start();
   }
 
-  function renderFcCards(dots) {
+  /** Hierarchy for List mode: a dot nested under a Hub that is also in the collection
+      appears only inside that Hub's accordion (no flat duplicates). */
+  function fcHierarchy(dots) {
+    const list = Array.isArray(dots) ? dots.filter(Boolean) : [];
+    const byId = new Map(list.map((dot) => [dot.id, dot]));
+    const hubsInSet = new Set(list.filter((dot) => dot.type === "hub").map((dot) => dot.id));
+    const childrenByHub = new Map([...hubsInSet].map((id) => [id, []]));
+    const nestedIds = new Set();
+    const parentHubOf = (dot) => {
+      if (dot.parentId && hubsInSet.has(dot.parentId) && dot.parentId !== dot.id) return dot.parentId;
+      for (const hubId of hubsInSet) {
+        if (hubId === dot.id) continue;
+        const hub = byId.get(hubId);
+        if (Array.isArray(hub?.children) && hub.children.includes(dot.id)) return hubId;
+      }
+      return null;
+    };
+    for (const dot of list) {
+      const parentHub = parentHubOf(dot);
+      if (!parentHub) continue;
+      nestedIds.add(dot.id);
+      childrenByHub.get(parentHub).push(dot);
+    }
+    for (const kids of childrenByHub.values()) kids.sort(fcByTitle);
+    const roots = list.filter((dot) => !nestedIds.has(dot.id)).sort(fcByTitle);
+    return { roots, childrenByHub };
+  }
+
+  function renderFcTree(dots) {
     const api = spaceApi();
     if (!api || !Array.isArray(dots) || !dots.length) {
       fc.stage.replaceChildren(fcEmptyState("No dots to show."));
       return;
     }
+    const { roots, childrenByHub } = fcHierarchy(dots);
     const list = document.createElement("ul");
     list.className = "ctags-cards";
     list.setAttribute("aria-label", "Dots");
-    list.append(...dots.map((dot, index) => {
+    let nestSeq = 0;
+    const appendEntry = (parent, dot) => {
+      const kids = dot.type === "hub" ? (childrenByHub.get(dot.id) || []) : [];
       const item = document.createElement("li");
       item.className = "ctags-entry";
       item.dataset.dotId = dot.id;
@@ -3346,35 +3485,38 @@
       title.textContent = dot.title;
       const meta = document.createElement("span");
       meta.className = "ctags-card-meta";
-      const study = fc.collections.find((c) => c.id === fc.selectedId)?.studyData?.[dot.id];
+      const study = selectedFlashcardCollection()?.studyData?.[dot.id];
       meta.textContent = [
         api.typeLabel(dot.type),
+        dot.type === "hub" && kids.length ? countOf(kids.length, "nested dot") : "",
         study?.status === "memorized" ? "Memorized" : study?.status === "review" ? "Review" : "",
       ].filter(Boolean).join(" \u00b7 ");
       main.append(title, meta);
-      const snippet = snippetOf(dot);
-      if (snippet) {
-        const words = document.createElement("span");
-        words.className = "ctags-card-snippet";
-        words.textContent = snippet;
-        main.append(words);
+      if (dot.type !== "hub") {
+        const snippet = snippetOf(dot);
+        if (snippet) {
+          const words = document.createElement("span");
+          words.className = "ctags-card-snippet";
+          words.textContent = snippet;
+          main.append(words);
+        }
       }
       open.append(marker, main);
 
-      const children = childrenOf(dot).sort(byTitle);
-      const shown = children.length > 0 && fc.expanded.has(dot.id);
-      const nestId = `fcards-children-${index}`;
+      const shown = kids.length > 0 && fc.expanded.has(dot.id);
+      const nestId = `fcards-children-${nestSeq++}`;
       const toggle = document.createElement("button");
       toggle.type = "button";
       toggle.className = "ctags-card-toggle";
       toggle.innerHTML = CHEVRON;
       toggle.setAttribute("aria-expanded", shown ? "true" : "false");
       toggle.setAttribute("aria-controls", nestId);
-      if (children.length) {
-        toggle.setAttribute("aria-label", `${dot.title}: ${countOf(children.length, "child dot")}`);
+      if (kids.length) {
+        toggle.setAttribute("aria-label", `${dot.title}: ${countOf(kids.length, "child dot")}`);
+        toggle.title = shown ? "Hide nested dots" : "Show nested dots";
       } else {
         toggle.disabled = true;
-        toggle.setAttribute("aria-label", `${dot.title} has no child dots`);
+        toggle.setAttribute("aria-label", dot.type === "hub" ? `${dot.title} has no nested dots in this collection` : `${dot.title}`);
       }
       card.append(open, toggle);
 
@@ -3383,32 +3525,20 @@
       nest.id = nestId;
       nest.classList.toggle("is-open", shown);
       nest.inert = !shown;
-      const inner = document.createElement("div");
-      inner.className = "ctags-children-inner";
-      const kids = document.createElement("ul");
-      kids.className = "ctags-child-list";
-      kids.append(...children.map((child) => {
-        const row = document.createElement("li");
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "ctags-child";
-        button.dataset.dotId = child.id;
-        if (child.id === fc.selectedDotId) button.setAttribute("aria-current", "true");
-        const name = document.createElement("span");
-        name.className = "ctags-child-title";
-        name.textContent = child.title;
-        const kind = document.createElement("span");
-        kind.className = "ctags-child-type";
-        kind.textContent = api.typeLabel(child.type);
-        button.append(typeMarker(child), name, kind);
-        row.append(button);
-        return row;
-      }));
-      inner.append(kids);
-      nest.append(inner);
+      if (kids.length) {
+        const inner = document.createElement("div");
+        inner.className = "ctags-children-inner";
+        const kidsList = document.createElement("ul");
+        kidsList.className = "ctags-cards fcards-nested-cards";
+        kidsList.setAttribute("aria-label", `Children of ${dot.title}`);
+        for (const child of kids) appendEntry(kidsList, child);
+        inner.append(kidsList);
+        nest.append(inner);
+      }
       item.append(card, nest);
-      return item;
-    }));
+      parent.append(item);
+    };
+    for (const rootDot of roots) appendEntry(list, rootDot);
     fc.stage.replaceChildren(list);
   }
 
@@ -3418,6 +3548,7 @@
     if (!nest || toggle.disabled) return;
     const open = toggle.getAttribute("aria-expanded") !== "true";
     toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    toggle.title = open ? "Hide nested dots" : "Show nested dots";
     nest.classList.toggle("is-open", open);
     nest.inert = !open;
     if (open) fc.expanded.add(item.dataset.dotId);
@@ -3460,9 +3591,27 @@
       return;
     }
     const dot = selectedDot;
-
     const wrap = document.createElement("div");
     wrap.className = "fcards-study";
+
+    if (dot.type === "hub") {
+      const navCard = document.createElement("div");
+      navCard.className = "fcards-card fcards-hub-nav";
+      const icon = document.createElement("div");
+      icon.className = "fcards-hub-icon";
+      icon.setAttribute("aria-hidden", "true");
+      icon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7.5A1.5 1.5 0 0 1 4.5 6H9l2 2h8.5A1.5 1.5 0 0 1 21 9.5v8A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5v-10z"/></svg>';
+      const hubTitle = document.createElement("p");
+      hubTitle.className = "fcards-hub-title";
+      hubTitle.textContent = dot.title || "Untitled hub";
+      const hubNote = document.createElement("p");
+      hubNote.className = "fcards-hub-note";
+      hubNote.textContent = "Hub Navigator — Select a child dot to study";
+      navCard.append(icon, hubTitle, hubNote);
+      wrap.append(navCard, fcNavControls(dot));
+      fc.engine.replaceChildren(wrap);
+      return;
+    }
 
     const card = document.createElement("div");
     card.className = "fcards-card" + (fc.isFlipped ? " is-flipped" : "");
@@ -3508,33 +3657,36 @@
       actions.append(review, mem);
     }
     card.append(actions);
+    wrap.append(card, fcNavControls(dot));
+    fc.engine.replaceChildren(wrap);
+  }
 
+  function fcNavControls(dot) {
     const nav = document.createElement("div");
     nav.className = "fcards-nav";
-    const idx = fc.order.findIndex((d) => d.id === dot.id);
+    const order = Array.isArray(fc.order) ? fc.order : [];
+    const idx = order.findIndex((d) => d.id === dot.id);
     const prev = document.createElement("button");
     prev.type = "button";
     prev.className = "fcards-nav-btn";
     prev.textContent = "\u2190 Previous";
     prev.disabled = idx <= 0;
     prev.addEventListener("click", () => {
-      if (idx > 0) selectFlashcardDot(fc.order[idx - 1].id);
+      if (idx > 0) selectFlashcardDot(order[idx - 1].id);
     });
     const pos = document.createElement("span");
     pos.className = "fcards-nav-pos";
-    pos.textContent = idx >= 0 ? `${idx + 1} / ${fc.order.length}` : "";
+    pos.textContent = idx >= 0 ? `${idx + 1} / ${order.length}` : "";
     const next = document.createElement("button");
     next.type = "button";
     next.className = "fcards-nav-btn";
     next.textContent = "Next \u2192";
-    next.disabled = idx < 0 || idx >= fc.order.length - 1;
+    next.disabled = idx < 0 || idx >= order.length - 1;
     next.addEventListener("click", () => {
-      if (idx >= 0 && idx < fc.order.length - 1) selectFlashcardDot(fc.order[idx + 1].id);
+      if (idx >= 0 && idx < order.length - 1) selectFlashcardDot(order[idx + 1].id);
     });
     nav.append(prev, pos, next);
-
-    wrap.append(card, nav);
-    fc.engine.replaceChildren(wrap);
+    return nav;
   }
 
   function setFcStudyStatus(dotId, status) {

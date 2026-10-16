@@ -21,7 +21,7 @@
     <script src="space.js?v=99" defer></script>
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
-    <script src="collection.js?v=23" defer></script>
+    <script src="collection.js?v=24" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
       const APP_STORAGE_EPOCH = "2026-10-03-clean";
@@ -645,7 +645,7 @@
       .fcards-empty { margin: 16px 8px; font-size: 0.8rem; line-height: 1.5; color: #a8a29e; }
       .fcards-empty-state, .fcards .empty-state {
         display: flex; flex: 1 1 auto; align-items: center; justify-content: center;
-        box-sizing: border-box; width: 100%; min-height: 10rem; margin: 0; padding: 24px;
+        box-sizing: border-box; width: 100%; min-height: 8rem; margin: 0; padding: 24px;
         text-align: center; font-size: 0.85rem; line-height: 1.5; color: #a8a29e;
       }
       .fcards-list-body > .fcards-empty-state { min-height: 8rem; align-items: flex-start; justify-content: flex-start; padding: 16px 8px; text-align: left; }
@@ -671,9 +671,16 @@
       }
       .fcards-item-del:hover, .fcards-item-del:focus-visible { color: #1c1917; background: rgba(0,0,0,0.05); outline: none; }
       .fcards-item-del svg { width: 14px; height: 14px; }
-      .fcards-viewport { display: flex; min-width: 0; flex: 1 1 auto; flex-direction: column; background: #fcfcfc; }
-      .fcards-stage { display: flex; flex-direction: column; }
-      .fcards-stage > .fcards-empty-state { flex: 1; }
+
+      /* Main column: explorer (top) + flashcard engine (bottom) */
+      .fcards-main {
+        --fcards-engine-height: 280px;
+        display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; min-height: 0;
+      }
+      .fcards-explorer {
+        display: flex; flex: 1 1 auto; flex-direction: column; min-height: 120px; min-width: 0;
+        background: #fcfcfc; overflow: hidden;
+      }
       .fcards-toolbar { gap: 10px; flex-wrap: wrap; }
       .fcards-heading { flex: 1; min-width: 0; }
       .fcards-heading-title { font-size: 0.9rem; font-weight: 650; color: #1c1917; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -683,27 +690,62 @@
         min-height: 28px; padding: 4px 2px;
       }
       .fcards-test input { width: 1rem; height: 1rem; accent-color: #1c1917; }
-      .fcards-engine {
-        display: flex; width: min(380px, 38vw); flex: 0 0 min(380px, 38vw); flex-direction: column;
-        min-height: 0; min-width: 0; border-left: 1px solid #e5e5e5; background: #fff;
+      .fcards-stage {
+        display: flex; flex: 1; flex-direction: column; min-height: 0;
+        overflow-y: auto; overscroll-behavior: contain;
       }
+      .fcards-stage.is-graph { overflow: hidden; }
+      .fcards-stage > .fcards-empty-state { flex: 1; }
+      .fcards-nested-cards { max-width: none; padding: 8px 0 4px 0; gap: 6px; }
+      .fcards-split {
+        flex: 0 0 8px; touch-action: none; -webkit-touch-callout: none; cursor: row-resize;
+        background: linear-gradient(#e5e5e5, #e5e5e5) center / 100% 1px no-repeat;
+        background-color: #fafaf9;
+      }
+      .fcards-split:hover, .fcards-split:focus-visible { background-color: #f5f5f4; outline: none; box-shadow: inset 0 0 0 1px #d6d3d1; }
+      .fcards-engine {
+        display: flex; flex: 0 0 var(--fcards-engine-height); flex-direction: column;
+        min-height: 0; min-width: 0; border-top: 1px solid #e5e5e5; background: #fff;
+      }
+      .fcards-engine-bar {
+        display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 8px;
+        min-height: 44px; padding: 0 12px 0 16px; border-bottom: 1px solid #f0eeec;
+      }
+      .fcards-engine-label {
+        font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #78716c;
+      }
+      .fcards-expand {
+        display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem;
+        border: 1px solid #e7e5e4; background: #fff; color: #57534e; cursor: pointer; padding: 0;
+      }
+      .fcards-expand svg { width: 15px; height: 15px; }
+      .fcards-expand:hover, .fcards-expand:focus-visible { color: #1c1917; background: #fafaf9; outline: 2px solid #1c1917; outline-offset: 2px; }
       .fcards-engine-inner {
         display: flex; flex: 1; flex-direction: column; min-height: 0; min-width: 0;
-        overflow-y: auto; overscroll-behavior: contain; padding: 20px 18px 28px;
+        overflow-y: auto; overscroll-behavior: contain; padding: 16px 20px 24px;
       }
       .fcards-engine-inner > .fcards-empty-state { flex: 1; }
-      .fcards-study { display: flex; flex-direction: column; gap: 16px; min-height: 100%; }
+      .fcards-study { display: flex; flex-direction: column; gap: 14px; min-height: 100%; width: 100%; max-width: 56rem; margin: 0 auto; }
       .fcards-card {
-        display: flex; flex-direction: column; min-height: 22rem; border: 1px solid #e7e5e4; background: #fff;
-        box-shadow: 0 10px 28px rgba(28, 25, 23, 0.08); padding: 1.25rem 1.15rem 1rem;
+        display: flex; flex-direction: column; min-height: 14rem; border: 1px solid #e7e5e4; background: #fff;
+        box-shadow: 0 10px 28px rgba(28, 25, 23, 0.08); padding: 1.25rem 1.25rem 1rem; width: 100%;
       }
-      .fcards-face { display: flex; flex: 1; min-height: 14rem; align-items: center; justify-content: center; }
+      .fcards-face { display: flex; flex: 1; min-height: 10rem; align-items: center; justify-content: center; }
       .fcards-front-title {
         margin: 0; padding: 0.5rem; text-align: center; font-size: clamp(1.45rem, 2.4vw, 2rem);
         font-weight: 760; letter-spacing: -0.02em; line-height: 1.25; color: #1c1917; word-break: break-word;
       }
-      .fcards-back-page { width: 100%; align-self: stretch; max-height: 18rem; overflow: auto; }
+      .fcards-back-page { width: 100%; align-self: stretch; max-height: min(40vh, 22rem); overflow: auto; }
+      .fcards-engine.is-fullscreen .fcards-back-page { max-height: none; flex: 1; }
       .fcards-back-page .dot-read-page { margin: 0; }
+      .fcards-hub-nav {
+        align-items: center; justify-content: center; gap: 0.65rem; text-align: center;
+        min-height: 12rem; background: #fafaf9;
+      }
+      .fcards-hub-icon { display: flex; width: 3rem; height: 3rem; align-items: center; justify-content: center; color: #78716c; }
+      .fcards-hub-icon svg { width: 2.5rem; height: 2.5rem; }
+      .fcards-hub-title { margin: 0; font-size: 1.35rem; font-weight: 750; color: #1c1917; }
+      .fcards-hub-note { margin: 0; font-size: 0.88rem; color: #78716c; max-width: 22rem; }
       .fcards-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 1rem; }
       .fcards-btn {
         min-height: 2.5rem; padding: 0 0.9rem; border: 1px solid #e7e5e4; background: #fff;
@@ -724,6 +766,18 @@
       }
       .fcards-nav-btn:disabled { opacity: 0.4; cursor: default; }
       .fcards-nav-pos { font-size: 0.75rem; font-weight: 600; color: #a8a29e; font-variant-numeric: tabular-nums; }
+
+      /* Fullscreen flashcard overlay */
+      .fcards-engine.is-fullscreen {
+        position: fixed; inset: 0; z-index: 50; flex: none !important; width: auto !important; height: auto !important;
+        border: 0; background: #fff; padding: 0; box-shadow: none;
+      }
+      .fcards-engine.is-fullscreen .fcards-engine-bar { padding: 12px 24px; border-bottom: 1px solid #e7e5e4; }
+      .fcards-engine.is-fullscreen .fcards-engine-inner { padding: 2rem clamp(1.25rem, 4vw, 3rem) 2.5rem; }
+      .fcards-engine.is-fullscreen .fcards-study { max-width: 64rem; min-height: calc(100% - 0px); }
+      .fcards-engine.is-fullscreen .fcards-card { min-height: min(70vh, 36rem); }
+      .fcards.is-fc-fullscreen .fcards-split { visibility: hidden; pointer-events: none; }
+
       .fcards-modal {
         position: fixed; inset: 0; z-index: 9999; display: flex; align-items: center; justify-content: center;
         padding: 1rem; background: rgba(28, 25, 23, 0.35);
@@ -753,10 +807,11 @@
       .fcards-btn-primary:hover, .fcards-btn-primary:focus-visible { background: #292524; }
       @media (max-width: 960px) {
         .fcards { flex-wrap: wrap; overflow: auto; }
-        .fcards-list { width: 100%; max-height: 220px; border-right: 0; border-bottom: 1px solid #e5e5e5; }
-        .fcards-viewport { min-height: 280px; flex: 1 1 100%; }
-        .fcards-engine { width: 100%; border-left: 0; border-top: 1px solid #e5e5e5; }
+        .fcards-list { width: 100%; flex: 1 1 100%; max-height: 200px; border-right: 0; border-bottom: 1px solid #e5e5e5; }
+        .fcards-main { flex: 1 1 100%; min-height: 420px; }
+        .fcards-engine { flex-basis: min(42vh, 320px); }
       }
+
 
 
       /* Collection → Templates */
