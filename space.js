@@ -13361,7 +13361,15 @@
     destroyHubDot();
     el.detailBody.replaceChildren();
     const id = openDotId;
+    const closing = id ? findDot(id) : null;
+    const returnToTemplates = Boolean(closing?.isTemplate);
     openDotId = null;
+    syncDocHomeTab(null);
+    // Template editors aren't Space canvas dots: after close, land on Collection → Templates (no blank Space).
+    if (returnToTemplates) {
+      goToTemplatesCollection();
+      return;
+    }
     if (!active || !id) return;
     render();
     nodeFor(id)?.focus({ preventScroll: true });
@@ -15401,6 +15409,7 @@
     else mountBlockDot(dot);
     renderDotTags();
     syncTemplateBanner(dot);
+    syncDocHomeTab(dot);
     setDocOrigin(id);
     el.view.classList.add("space-doc-open");
     el.detailModal.classList.toggle("is-template-dot", Boolean(dot.isTemplate));
@@ -15864,7 +15873,9 @@
       if (event.target === el.titleModal) closeTitlePrompt();
     });
 
-    el.detailClose.addEventListener("click", () => closeDetail());
+    el.detailClose.addEventListener("click", () => {
+      closeDetail(Boolean(openDotId && findDot(openDotId)?.isTemplate));
+    });
     el.detailDelete.addEventListener("click", openDeletePrompt);
     el.deleteSingle.addEventListener("click", () => deleteOpenDot(false));
     el.deleteCascade.addEventListener("click", () => deleteOpenDot(true));
@@ -15877,7 +15888,10 @@
     el.detailModal.addEventListener("animationend", (event) => {
       if (event.target === el.detailModal) board?.refresh();
     });
-    el.docHome.addEventListener("click", () => closeDetail());
+    el.docHome.addEventListener("click", () => {
+      // Template root tab routes via finishClose → Collection → Templates; normal dots return to Space.
+      closeDetail(Boolean(openDotId && findDot(openDotId)?.isTemplate));
+    });
     el.refBack?.addEventListener("click", goRefBack);
     if (el.detailTitle.contentEditable !== "plaintext-only") el.detailTitle.contentEditable = "true";
     el.detailTitle.addEventListener("input", onTitleInput);
@@ -16161,6 +16175,32 @@
     } else {
       page.classList.remove("is-template");
     }
+  }
+
+  const DOC_HOME_SPACE_ICON = '<svg class="space-icon" data-doc-home-icon viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 11.5 L7.5 3.5 L12.5 8.5 Z" stroke-opacity="0.5" /><path d="M12.5 8.5 L13 13" stroke-opacity="0.5" /><circle cx="3.5" cy="11.5" r="1.6" fill="currentColor" stroke="none" /><circle cx="7.5" cy="3.5" r="1.6" fill="currentColor" stroke="none" /><circle cx="12.5" cy="8.5" r="1.6" fill="currentColor" stroke="none" /><circle cx="13" cy="13" r="1" fill="currentColor" stroke="none" /></svg>';
+  const DOC_HOME_TEMPLATES_ICON = '<svg class="space-icon" data-doc-home-icon viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square" aria-hidden="true"><path d="M2.5 2.5h11v11h-11z" /><path d="M2.5 5.75h11M6.25 5.75v7.75" stroke-dasharray="1.5 1.25" /></svg>';
+
+  function syncDocHomeTab(dot) {
+    const home = el.docHome;
+    if (!home) return;
+    const asTemplate = Boolean(dot?.isTemplate);
+    const label = home.querySelector("[data-doc-home-label]");
+    const icon = home.querySelector("[data-doc-home-icon]");
+    home.dataset.docHome = asTemplate ? "templates" : "space";
+    home.title = asTemplate ? "Back to Templates" : "Back to Space";
+    home.setAttribute("aria-label", asTemplate ? "Back to Templates" : "Back to Space");
+    if (label) label.textContent = asTemplate ? "\u2190 Templates" : "Space";
+    if (icon) {
+      const wrap = document.createElement("span");
+      wrap.innerHTML = asTemplate ? DOC_HOME_TEMPLATES_ICON : DOC_HOME_SPACE_ICON;
+      icon.replaceWith(wrap.firstElementChild);
+    }
+  }
+
+  function goToTemplatesCollection() {
+    if (typeof window.showView === "function") window.showView("collection");
+    if (typeof window.loadCollectionSubPage === "function") window.loadCollectionSubPage("templates");
+    else window.FicusCollection?.loadSubPage?.("templates");
   }
 
   let templatePicker = null;
