@@ -22,7 +22,8 @@
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
     <script src="ficus_dashboards.js?v=3" defer></script>
-    <script src="collection.js?v=27" defer></script>
+    <script src="ficus_timeline.js?v=1" defer></script>
+    <script src="collection.js?v=28" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
       const APP_STORAGE_EPOCH = "2026-10-03-clean";
@@ -842,6 +843,193 @@
 
 
       #collection-content.is-dashboards { display: flex; padding: 0; overflow: hidden; }
+      #collection-content.is-time { display: flex; padding: 0; overflow: hidden; }
+
+      /* Collection → Time / Timeline */
+      .ftime { display: flex; height: 100%; width: 100%; min-height: 0; min-width: 0; flex-direction: column; background: #fcfcfc; }
+      .ftime-toolbar {
+        display: flex; flex-shrink: 0; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
+        min-height: 57px; padding: 10px 16px; border-bottom: 1px solid #e5e5e5; background: #fff;
+        padding-right: max(16px, calc(var(--ficus-account-room) + 12px));
+      }
+      .ftime-toolbar-start {
+        display: flex; flex-wrap: wrap; align-items: center; gap: 12px; min-width: 0; max-width: 100%;
+      }
+      .ftime-heading {
+        margin: 0; flex: 0 1 auto; min-width: 0; max-width: min(10rem, 30vw);
+        font-size: 1.15rem; font-weight: 700; color: #1c1917;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .ftime-toolbar-divider { flex-shrink: 0; width: 1px; height: 1.5rem; background: #e7e5e4; }
+      .ftime-modes {
+        display: inline-flex; flex-wrap: wrap; align-items: center; gap: 2px;
+        padding: 2px; border: 1px solid #e7e5e4; background: #fafaf9;
+      }
+      .ftime-mode {
+        min-height: 2rem; padding: 0 0.65rem; border: 0; background: transparent;
+        font: inherit; font-size: 0.78rem; font-weight: 650; color: #78716c; cursor: pointer;
+      }
+      .ftime-mode:hover { color: #1c1917; background: #f5f5f4; }
+      .ftime-mode.is-active { background: #1c1917; color: #fff; }
+      .ftime-mode:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      .ftime-nav { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
+      .ftime-btn {
+        min-height: 2.25rem; padding: 0 0.75rem; border: 1px solid #e7e5e4; background: #fff;
+        font: inherit; font-size: 0.82rem; font-weight: 650; color: #1c1917; cursor: pointer;
+      }
+      .ftime-btn:hover, .ftime-btn:focus-visible { background: #fafaf9; outline: 2px solid #1c1917; outline-offset: 2px; }
+      .ftime-btn.is-quiet { border-color: transparent; }
+      .ftime-range {
+        margin: 0; min-width: 0; font-size: 0.88rem; font-weight: 650; color: #57534e;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .ftime-stage { flex: 1; min-height: 0; min-width: 0; overflow: auto; overscroll-behavior: contain; position: relative; }
+      .ftime-empty {
+        display: flex; align-items: center; justify-content: center; min-height: 12rem;
+        margin: 0; padding: 2rem; color: #a8a29e; font-size: 0.9rem; text-align: center; line-height: 1.5;
+      }
+      .ftime-empty--overlay {
+        position: absolute; inset: 0; pointer-events: none; background: rgba(252,252,252,0.72);
+      }
+
+      .ftime-grid { display: flex; flex-direction: column; min-width: min(100%, 720px); position: relative; }
+      .ftime-grid-head, .ftime-allday {
+        display: grid; grid-template-columns: 3.5rem repeat(var(--ftime-cols, 1), minmax(0, 1fr));
+        border-bottom: 1px solid #e7e5e4; background: #fff; position: sticky; z-index: 2;
+      }
+      .ftime-grid-head { top: 0; }
+      .ftime-allday { top: 2.5rem; z-index: 1; align-items: stretch; }
+      .ftime-grid-gutter {
+        display: flex; align-items: flex-start; justify-content: flex-end; padding: 0.45rem 0.35rem 0 0;
+        font-size: 0.68rem; font-weight: 650; color: #a8a29e;
+      }
+      .ftime-grid-dayhead {
+        padding: 0.55rem 0.45rem; font-size: 0.78rem; font-weight: 650; color: #57534e; border-left: 1px solid #f0eeec;
+      }
+      .ftime-grid-dayhead.is-today { color: #1c1917; box-shadow: inset 0 -2px 0 #1c1917; }
+      .ftime-allday-cell {
+        display: flex; flex-direction: column; gap: 3px; min-height: 2.4rem; padding: 0.25rem;
+        border-left: 1px solid #f0eeec;
+      }
+      .ftime-hours { display: grid; grid-template-columns: 3.5rem minmax(0, 1fr); position: relative; }
+      .ftime-hours-gutter { position: relative; }
+      .ftime-hour-label {
+        position: absolute; right: 0.35rem; transform: translateY(-0.45em);
+        font-size: 0.65rem; font-weight: 650; color: #a8a29e; white-space: nowrap;
+      }
+      .ftime-hours-cols {
+        display: grid; grid-template-columns: repeat(var(--ftime-cols, 1), minmax(0, 1fr));
+        border-left: 1px solid #e7e5e4; position: relative;
+      }
+      .ftime-hours-col { position: relative; border-left: 1px solid #f0eeec; }
+      .ftime-hours-col.is-today { background: rgba(28,25,23,0.02); }
+      .ftime-hour-line {
+        position: absolute; left: 0; right: 0; height: 0; border-top: 1px solid #f0eeec; pointer-events: none;
+      }
+      .ftime-block {
+        position: absolute; left: 3px; right: 3px; z-index: 1; overflow: hidden;
+        display: flex; flex-direction: column; align-items: flex-start; gap: 1px;
+        padding: 3px 6px; border: 0; border-left: 3px solid #5B6C7E; background: #eef1f4;
+        text-align: left; cursor: pointer; font: inherit; color: #1c1917; touch-action: manipulation;
+      }
+      .ftime-block:hover, .ftime-block:focus-visible { background: #e4e9ee; outline: 2px solid #1c1917; outline-offset: 1px; }
+      .ftime-block-title { font-size: 0.72rem; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+      .ftime-block-time { font-size: 0.65rem; color: #57534e; }
+
+      .ftime-chip {
+        display: flex; flex-direction: column; align-items: flex-start; gap: 1px; width: 100%;
+        min-height: 28px; padding: 3px 6px; border: 0; border-left: 3px solid #5B6C7E;
+        background: #eef1f4; text-align: left; cursor: pointer; font: inherit; color: #1c1917;
+        touch-action: manipulation;
+      }
+      .ftime-chip--task { border-left-color: #8BA888; background: #f1f5f0; }
+      .ftime-chip.is-done { opacity: 0.65; text-decoration: line-through; }
+      .ftime-chip.is-deleted { opacity: 0.55; font-style: italic; }
+      .ftime-chip:hover, .ftime-chip:focus-visible { outline: 2px solid #1c1917; outline-offset: 1px; }
+      .ftime-chip-title { font-size: 0.72rem; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+      .ftime-chip-meta { font-size: 0.65rem; color: #78716c; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+
+      .ftime-month { padding: 12px 16px 24px; }
+      .ftime-month-weekdays, .ftime-month-grid {
+        display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; background: #e7e5e4;
+      }
+      .ftime-month-weekdays { background: transparent; gap: 0; margin-bottom: 4px; }
+      .ftime-month-weekdays > div {
+        padding: 0.35rem 0.4rem; font-size: 0.7rem; font-weight: 700; color: #a8a29e; text-transform: uppercase; letter-spacing: 0.04em;
+      }
+      .ftime-month-cell {
+        min-height: 6.5rem; padding: 0.35rem; background: #fff; cursor: pointer; touch-action: manipulation;
+      }
+      .ftime-month-cell.is-outside { background: #fafaf9; color: #a8a29e; }
+      .ftime-month-cell.is-today { box-shadow: inset 0 0 0 2px #1c1917; }
+      .ftime-month-cell:hover { background: #fafaf9; }
+      .ftime-month-num { font-size: 0.75rem; font-weight: 700; margin-bottom: 0.25rem; }
+      .ftime-month-items { display: flex; flex-direction: column; gap: 2px; }
+      .ftime-month-more { font-size: 0.65rem; font-weight: 650; color: #78716c; padding-left: 4px; }
+
+      .ftime-year {
+        display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 16px;
+      }
+      .ftime-year-month {
+        display: flex; flex-direction: column; gap: 8px; align-items: stretch;
+        padding: 12px; border: 1px solid #e7e5e4; background: #fff; cursor: pointer;
+        font: inherit; text-align: left; color: #1c1917; touch-action: manipulation; min-height: 28px;
+      }
+      .ftime-year-month:hover, .ftime-year-month:focus-visible { border-color: #1c1917; outline: 2px solid #1c1917; outline-offset: 2px; }
+      .ftime-year-label { font-size: 0.85rem; font-weight: 700; }
+      .ftime-year-heat { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
+      .ftime-heat { aspect-ratio: 1; border-radius: 2px; background: #e7e5e4; }
+      .ftime-heat.is-outside { visibility: hidden; }
+      .ftime-heat--1 { background: #d6d3d1; }
+      .ftime-heat--2 { background: #a8a29e; }
+      .ftime-heat--3 { background: #78716c; }
+      .ftime-heat--4 { background: #1c1917; }
+
+      .ftime-feed { max-width: 42rem; margin: 0 auto; padding: 16px 16px 48px; }
+      .ftime-feed-day { margin-bottom: 1.25rem; }
+      .ftime-feed-sticky {
+        position: sticky; top: 0; z-index: 2; margin: 0 0 0.65rem; padding: 0.55rem 0;
+        font-size: 0.78rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: #78716c;
+        background: linear-gradient(#fcfcfc 70%, rgba(252,252,252,0));
+      }
+      .ftime-feed-cards { display: flex; flex-direction: column; gap: 10px; }
+      .ftime-card {
+        display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); gap: 0; width: 100%;
+        border: 1px solid #e7e5e4; background: #fff; padding: 0; text-align: left; cursor: pointer;
+        font: inherit; color: #1c1917; overflow: hidden; touch-action: manipulation; min-height: 5.5rem;
+      }
+      .ftime-card:hover, .ftime-card:focus-visible { border-color: #1c1917; outline: 2px solid #1c1917; outline-offset: 2px; }
+      .ftime-card.is-done { opacity: 0.7; }
+      .ftime-card.is-deleted { opacity: 0.55; }
+      .ftime-card-media { min-height: 5.5rem; background: #f5f5f4; overflow: hidden; }
+      .ftime-card-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+      .ftime-card-media--swatch {
+        background: linear-gradient(145deg, color-mix(in srgb, var(--ftime-accent, #a8a29e) 55%, #fff), var(--ftime-accent, #a8a29e));
+      }
+      .ftime-card-body { display: flex; flex-direction: column; gap: 0.25rem; padding: 0.7rem 0.85rem; min-width: 0; }
+      .ftime-card-kicker {
+        display: flex; justify-content: space-between; gap: 0.5rem;
+        font-size: 0.68rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; color: #a8a29e;
+      }
+      .ftime-card-title { margin: 0; font-size: 1rem; font-weight: 700; line-height: 1.3; }
+      .ftime-card-notes { margin: 0; font-size: 0.82rem; color: #57534e; line-height: 1.4;
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+      .ftime-card-parent { margin: 0.15rem 0 0; font-size: 0.78rem; font-weight: 650; color: #78716c;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .ftime-card--task .ftime-card-kicker span:first-child { color: #6b8f6a; }
+
+      @media (max-width: 960px) {
+        .ftime-year { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .ftime-month-cell { min-height: 5rem; }
+        .ftime-card { grid-template-columns: 4.25rem minmax(0, 1fr); }
+      }
+      @media (max-width: 640px) {
+        .ftime-toolbar { padding: 10px 12px; }
+        .ftime-year { grid-template-columns: 1fr; }
+        .ftime-grid { min-width: 560px; }
+        .ftime-modes { width: 100%; }
+        .ftime-mode { flex: 1 1 auto; text-align: center; }
+      }
 
       /* Collection → Logger Dashboards */
       .ldash { display: flex; height: 100%; width: 100%; min-height: 0; min-width: 0; background: #fcfcfc; }
@@ -1271,7 +1459,10 @@
         #collection-view { bottom: calc(4.35rem + env(safe-area-inset-bottom)); height: auto; }
         #collection-sidebar { padding-top: 16px; gap: 12px; }
         #collection-content { padding: 24px 20px; }
-        #collection-content.is-tags { padding: 0; }
+        #collection-content.is-tags,
+        #collection-content.is-flashcards,
+        #collection-content.is-dashboards,
+        #collection-content.is-time { padding: 0; }
         .ctags { flex-direction: column; }
         .ctags-explorer { width: 100%; max-height: 40%; border-right: 0; border-bottom: 1px solid #e5e5e5; }
         .ctags-viewport { min-height: 0; }
@@ -5044,6 +5235,12 @@
             <button type="button" class="collection-tool" data-collection-page="dashboards" aria-label="Dashboards" title="Dashboards">
               <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square" aria-hidden="true">
                 <path d="M2.5 10.5h3v3h-3zM6.5 6.5h3v7h-3zM10.5 3.5h3v10h-3z" />
+              </svg>
+            </button>
+            <button type="button" class="collection-tool" data-collection-page="time" aria-label="Time" title="Time">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="square" aria-hidden="true">
+                <circle cx="8" cy="8" r="5.5" />
+                <path d="M8 5v3.25L10.25 10" />
               </svg>
             </button>
           </aside>
