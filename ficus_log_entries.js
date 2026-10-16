@@ -289,6 +289,9 @@
     if (el) return true;
     const overlay = document.getElementById("log-entry-modal");
     if (!overlay) return false;
+    // Portal to <body> so it overlays the open dot (not trapped under .space-doc in #view-space).
+    if (overlay.parentElement !== document.body) document.body.appendChild(overlay);
+    overlay.classList.add("log-entry-overlay");
     el = {
       overlay,
       sheet: overlay.querySelector("[data-log-sheet]"),
@@ -298,9 +301,12 @@
     overlay.querySelector("[data-log-close]")?.addEventListener("click", () => close());
     overlay.addEventListener("pointerdown", (event) => {
       if (event.target === overlay) close();
+      event.stopPropagation();
     });
+    // Capture Escape before Space's document handler (which would close the open dot).
     overlay.addEventListener("keydown", (event) => {
       if (event.key === "Escape") {
+        event.preventDefault();
         event.stopPropagation();
         close();
       }
@@ -333,10 +339,16 @@
   }
 
   function show() {
+    if (el.overlay.parentElement !== document.body) document.body.appendChild(el.overlay);
+    el.overlay.classList.add("log-entry-overlay");
     el.overlay.classList.remove("hidden");
     el.title.textContent = ui.mode === "edit" ? "Edit log" : "Log entry";
     render();
     el.sheet?.focus({ preventScroll: true });
+  }
+
+  function isOpen() {
+    return Boolean(el?.overlay && !el.overlay.classList.contains("hidden"));
   }
 
   function close() {
@@ -761,6 +773,7 @@
     openCreate,
     openEdit,
     close,
+    isOpen,
     read: readEntries,
     find: findEntry,
     upsert: upsertEntry,

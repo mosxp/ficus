@@ -4306,12 +4306,15 @@
   }
 
   function openTextLogModal() {
-    if (readingText() || findDot(openDotId)?.type !== "text") return;
+    // Capture the open text dot; only open the modal — never close the detail page / navigate to Space.
+    const dotId = openDotId;
+    if (readingText() || findDot(dotId)?.type !== "text") return;
     closeSpacePopovers();
     window.FicusLogEntries?.openCreate?.({
-      dotId: openDotId,
+      dotId,
       onDone: (entry) => {
-        if (!entry || entry.deleted || readingText() || findDot(openDotId)?.type !== "text") return;
+        if (!entry || entry.deleted) return;
+        if (openDotId !== dotId || readingText() || findDot(dotId)?.type !== "text") return;
         if (!restoreSelection()) return;
         placeSolidAtCaret(window.FicusLogEntries.pillNode(entry));
       },
@@ -7217,7 +7220,11 @@
       logBtn.setAttribute("aria-haspopup", "dialog");
       logBtn.textContent = "+ Log";
       logBtn.addEventListener("mousedown", (event) => event.preventDefault());
-      logBtn.addEventListener("click", openTextLogModal);
+      logBtn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        openTextLogModal();
+      });
       fmt.logBtn = logBtn;
       btn.after(logBtn, refBtn, ...embedBtns);
     }
@@ -8466,12 +8473,13 @@
 
   function addBoardLog() {
     const view = boardView;
-    if (!view?.editing || !board) return;
+    const dotId = openDotId;
+    if (!view?.editing || !board || findDot(dotId)?.type !== "board") return;
     board._closePopover();
     window.FicusLogEntries?.openCreate?.({
-      dotId: openDotId,
+      dotId,
       onDone: (entry) => {
-        if (!entry || entry.deleted || boardView !== view || !view.editing || !board) return;
+        if (!entry || entry.deleted || boardView !== view || openDotId !== dotId || !view.editing || !board) return;
         placeBoardObject({
           id: newBoardObjectId(), type: LOG_ENTRY_TYPE, logEntryId: entry.id,
           x: 0, y: 0, w: LOG_CARD_WIDTH, h: LOG_CARD_HEIGHT, rotation: 0,
@@ -12365,17 +12373,20 @@
         return;
       }
       if (event.target.closest(`[data-space-add-block="${LOG_ENTRY_TYPE}"]`)) {
+        const dotId = view.dotId || openDotId;
+        const rect = sketch.rect;
+        const frameId = sketch.frameId;
         view.sketch = null;
         closeSpacePopovers();
         window.FicusLogEntries?.openCreate?.({
-          dotId: view.dotId,
+          dotId,
           onDone: (entry) => {
             sketch.ghost.remove();
-            if (!entry || entry.deleted || blockView !== view) {
+            if (!entry || entry.deleted || blockView !== view || openDotId !== dotId) {
               if (blockView === view) sizeBlockCanvas(view);
               return;
             }
-            addBlockLog(view, entry, sketch.rect, sketch.frameId);
+            addBlockLog(view, entry, rect, frameId);
           },
         });
         return;
@@ -15537,6 +15548,12 @@
 
   function onKeyDown(event) {
     if (!active || event.key !== "Escape") return;
+    // LogEntryModal is a body-level portal; Escape closes it without leaving the open dot.
+    if (window.FicusLogEntries?.isOpen?.()) {
+      event.preventDefault();
+      window.FicusLogEntries.close();
+      return;
+    }
     if (event.target.closest?.("#note-chip-popover, #note-at-menu, #note-contact-popover")) return;
     const popovers = document.querySelectorAll(FORMAT_POPOVERS);
     if (popovers.length) {
