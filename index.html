@@ -22,7 +22,7 @@
     <script src="ficus_loggers.js?v=12" defer></script>
     <script src="ficus_log_entries.js?v=6" defer></script>
     <script src="ficus_dashboards.js?v=3" defer></script>
-    <script src="ficus_timeline.js?v=5" defer></script>
+    <script src="ficus_timeline.js?v=6" defer></script>
     <script src="collection.js?v=30" defer></script>
     <script>
       // Changing this value wipes every device's saved local preferences on its next load.
@@ -1030,23 +1030,42 @@
       .ftime-month-items { display: flex; flex-direction: column; gap: 2px; }
       .ftime-month-more { font-size: 0.65rem; font-weight: 650; color: #78716c; padding-left: 4px; }
 
+      .ftime-year-shell {
+        box-sizing: border-box; display: flex; flex-direction: column; width: 100%; height: 100%;
+        min-height: 0; max-width: none; padding: 1rem 1.25rem 1.5rem; overflow: auto;
+      }
+      .ftime-year-empty { margin: 0 0 0.75rem; font-size: 0.85rem; color: #a8a29e; }
       .ftime-year {
-        display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; padding: 16px;
+        display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1.5rem; width: 100%; max-width: none; flex: 1 1 auto; min-height: 0;
+        align-content: start;
       }
       .ftime-year-month {
-        display: flex; flex-direction: column; gap: 8px; align-items: stretch;
-        padding: 12px; border: 1px solid #e7e5e4; background: #fff; cursor: pointer;
-        font: inherit; text-align: left; color: #1c1917; touch-action: manipulation; min-height: 28px;
+        display: flex; flex-direction: column; align-items: flex-start; gap: 0.35rem;
+        min-width: 0; min-height: 0; padding: 0.15rem 0.1rem; border: 0; background: transparent;
+        cursor: pointer; font: inherit; text-align: left; color: #1c1917; touch-action: manipulation;
       }
-      .ftime-year-month:hover, .ftime-year-month:focus-visible { border-color: #1c1917; outline: 2px solid #1c1917; outline-offset: 2px; }
-      .ftime-year-label { font-size: 0.85rem; font-weight: 700; }
-      .ftime-year-heat { display: grid; grid-template-columns: repeat(7, 1fr); gap: 3px; }
-      .ftime-heat { aspect-ratio: 1; border-radius: 2px; background: #e7e5e4; }
+      .ftime-year-month:hover, .ftime-year-month:focus-visible { outline: 2px solid #1c1917; outline-offset: 2px; }
+      .ftime-year-label { margin: 0 0 0.15rem; font-size: 0.875rem; font-weight: 700; line-height: 1.2; color: #1c1917; }
+      .ftime-year-heat { display: grid; grid-template-columns: repeat(7, 1rem); gap: 0.25rem; }
+      .ftime-heat { width: 1rem; height: 1rem; border-radius: 2px; background: #e7e5e4; }
       .ftime-heat.is-outside { visibility: hidden; }
       .ftime-heat--1 { background: #d6d3d1; }
       .ftime-heat--2 { background: #a8a29e; }
       .ftime-heat--3 { background: #78716c; }
       .ftime-heat--4 { background: #1c1917; }
+      @media (min-width: 768px) {
+        .ftime-year { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      }
+      @media (min-width: 1280px) {
+        .ftime-stage:has(.ftime-year-shell) { overflow: hidden; }
+        .ftime-year-shell { overflow: hidden; }
+        .ftime-year {
+          grid-template-columns: repeat(6, minmax(0, 1fr));
+          grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+          align-content: stretch; height: 100%;
+        }
+      }
 
       .ftime-feed {
         max-width: 52rem; margin: 0 auto; padding: 20px 20px 48px;
@@ -1106,14 +1125,12 @@
         .ftime .ctags-preview-inner { width: min(calc(var(--ctags-preview-width) - 1px), calc(100vw - 65px)); }
       }
       @media (max-width: 960px) {
-        .ftime-year { grid-template-columns: repeat(2, minmax(0, 1fr)); }
         .ftime-month-cell { min-height: 5rem; }
         .ftime-card { grid-template-columns: 4.25rem minmax(0, 1fr); }
       }
       @media (max-width: 640px) {
         .ftime-toolbar { padding: 10px 12px; }
         .ftime-toolbar-bar { gap: 0.75rem; }
-        .ftime-year { grid-template-columns: 1fr; }
         .ftime-grid { min-width: 560px; }
         .ftime-modes { width: 100%; }
         .ftime-mode { flex: 1 1 auto; text-align: center; }

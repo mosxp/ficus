@@ -894,7 +894,7 @@
         const level = n === 0 ? 0 : Math.min(4, Math.ceil((n / max) * 4));
         cells += `<span class="ftime-heat ftime-heat--${level}${inMonth ? "" : " is-outside"}" title="${inMonth ? `${day.getDate()}: ${n}` : ""}"></span>`;
       }
-      card.innerHTML = `<span class="ftime-year-label">${escapeHtml(label)}</span><div class="ftime-year-heat">${cells}</div>`;
+      card.innerHTML = `<h3 class="ftime-year-label">${escapeHtml(label)}</h3><div class="ftime-year-heat">${cells}</div>`;
       card.addEventListener("click", () => {
         ui.anchor = startOfMonth(monthDate);
         ui.mode = "month";
@@ -902,8 +902,16 @@
       });
       wrap.append(card);
     }
-    if (![...counts.keys()].length) wrap.append(emptyState("No dated events or tasks this year."));
-    ui.stage.append(wrap);
+    const shell = document.createElement("div");
+    shell.className = "ftime-year-shell";
+    if (![...counts.keys()].length) {
+      const note = document.createElement("p");
+      note.className = "ftime-year-empty";
+      note.textContent = "No dated events or tasks this year.";
+      shell.append(note);
+    }
+    shell.append(wrap);
+    ui.stage.append(shell);
   }
 
   /* ---------- Timeline feed ---------- */
